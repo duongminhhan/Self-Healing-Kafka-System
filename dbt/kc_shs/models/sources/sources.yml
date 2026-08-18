@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: sqlserver_raw
+    database: ingest_reference
+    schema: dbo
+    tables:
+      - name: Connectors
+        columns:
+          - name: id
+            tests:
+              - not_null
+              - unique
+          - name: IsActive
+            tests:
+              - accepted_values:
+                  values: [ 0, 1 ]
+          - name: Level
+            tests:
+              - accepted_values:
+                  values: [ 1, 2, 3, 4 ]
+      - name: TopicLagJobs
+        columns:
+          - name: id
+            tests:
+              - not_null
+              - unique
+
+      - name: ConnectorHealingLogs
+      - name: TopicLagLogs
+

@@ -1,0 +1,48 @@
+version: 2
+
+seeds:
+  - name: connector_configs
+    description: Desired connector configuration extracted from the operational SQL scripts.
+    columns:
+      - name: JobName
+        data_tests:
+          - not_null
+          - unique
+      - name: ConnectorName
+        data_tests:
+          - not_null
+          - unique
+      - name: ConnectorType
+        data_tests:
+          - not_null
+      - name: IsActive
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]
+      - name: Level
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4]
+      - name: ConfigTemplate
+        data_tests:
+          - not_null
+      - name: ConfigId
+        data_tests:
+          - not_null
+
+  - name: topic_lag_job_configs
+    description: Desired active topics grouped by connector name.
+    columns:
+      - name: ConnectorReference
+        data_tests:
+          - not_null
+      - name: TopicName
+        data_tests:
+          - not_null
+      - name: IsActive
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [0, 1]

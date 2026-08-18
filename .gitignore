@@ -1,0 +1,101 @@
+# Local AI and assistant metadata
+.agents/
+.codex/
+.junie/
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.code-workspace
+*.iml
+
+# Python bytecode, environments, and dependency installs
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+/lib/
+
+# Native build outputs
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.class
+
+# Python packaging
+/build/
+/dist/
+*.egg
+*.egg-info/
+*.whl
+pip-wheel-metadata/
+
+# Tests, coverage, type checking, linting, and profiling
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+*.prof
+*.pstats
+
+# dbt generated artifacts and downloaded packages
+**/dbt_packages/
+**/target/
+dbt/**/logs/
+
+# Runtime logs and process files
+/logs/
+*.log
+*.pid
+
+# Local environment values and secrets; commit templates only
+.env
+.env.*
+!.env.example
+env/*.env
+!env/*.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local databases and generated release archives
+*.db
+*.sqlite
+*.sqlite3
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local implementation and refactor plans
+/PERFORMANCE_REFACTOR_PLAN.md
+/STEP4_SCN_RECOVERY_PLAN.md
