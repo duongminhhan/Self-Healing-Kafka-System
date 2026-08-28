@@ -4,7 +4,6 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from self_healthy_kafka.monitoring.metrics import record_connector_healing_event
 from self_healthy_kafka.storage.common import json_value
 
 logger = logging.getLogger(__name__)
@@ -113,11 +112,6 @@ def _emit_connector_healing_log(
     has_next_step: bool,
     details: dict[str, Any],
 ) -> None:
-    record_connector_healing_event(
-        connector_name=connector_name,
-        event_type=event_type,
-        healing_step=healing_step,
-    )
     log_fn = logger.info
     if severity.upper() in {"ERROR", "CRITICAL"}:
         log_fn = logger.error

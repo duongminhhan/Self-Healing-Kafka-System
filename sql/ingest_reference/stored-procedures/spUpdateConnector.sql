@@ -66,17 +66,4 @@ begin
         ) else [LastFailedAt] end
     where [Id] = @connectorid;
 
-    if exists (select 1 from openjson(@fields) where [key] = 'is_active')
-       and case json_value(@fields, '$.is_active')
-            when 'true' then 1 when 'false' then 0
-            else try_convert(bit, json_value(@fields, '$.is_active'))
-        end = 0
-    begin
-        update [dbo].[TopicLagJobs]
-        set [IsActive] = 0,
-            [IsOverThreshold] = 0,
-            [UpdatedAt] = sysdatetimeoffset()
-        where [ConnectorId] = @connectorid
-          and ([IsActive] = 1 or [IsOverThreshold] = 1);
-    end;
 END;

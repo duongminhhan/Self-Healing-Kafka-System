@@ -63,16 +63,6 @@ class MssqlConnectorRepository:
                 rows = rows_to_dicts(cur)
                 return [self._hydrate_connector_row(row) for row in rows]
 
-    def list_connector_activity(self) -> list[dict[str, Any]]:
-        with self._get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "EXEC dbo.spGetConnectorContext "
-                    "@ActiveOnly = 0, @IncludeRuntimeConfig = 0, "
-                    "@IncludeHealingState = 0"
-                )
-                return rows_to_dicts(cur)
-
     def get_connector(
         self,
         connector_name: str,

@@ -29,7 +29,6 @@ def _config(**overrides) -> GrafanaWebhookConfig:
         "queue_size": 10,
         "worker_count": 2,
         "recovery_followup_seconds": 1,
-        "monitoring_inventory_refresh_seconds": 60,
     }
     values.update(overrides)
     return GrafanaWebhookConfig(**values)
@@ -205,76 +204,17 @@ def test_webhook_rejects_invalid_bearer_token():
         service.close()
 
 
-def test_metrics_exposes_active_and_inactive_connectors():
-    service = GrafanaWebhookService(
-        _config(),
-        lambda *_: None,
-        connector_activity=lambda: [
-            {
-                "connector_name": "CDC",
-                "is_active": True,
-                "source_server": "oracle_cdc",
-            },
-            {
-                "connector_name": 'CDC."old"',
-                "is_active": False,
-                "source_server": "oracle_cdc",
-            },
-        ],
-        topic_lag_metrics=lambda: [
-            {
-                "connector_name": "CDC",
-                "topic_name": 'CDC.C__CDCUSER."CUSTOMERS"',
-                "last_message_timestamp_seconds": 1781229000.25,
-                "is_over_threshold": True,
-            },
-            {
-                "connector_name": "CDC.001",
-                "topic_name": "CDC.C__CDCUSER.ORDERS",
-                "last_message_timestamp_seconds": 1781229400,
-                "is_over_threshold": False,
-            },
-        ],
-    )
+def test_metrics_endpoint_is_not_exposed():
+    service = GrafanaWebhookService(_config(), lambda *_: None)
     service.start()
     try:
         port = service._server.server_port
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
         connection.request("GET", "/metrics")
         response = connection.getresponse()
-        body = response.read().decode()
+        response.read()
 
-        assert response.status == 200
-        assert response.getheader("Content-Type").startswith("text/plain")
-        assert 'kc_shs_connector_active{connector_name="CDC"} 1' in body
-        assert 'kc_shs_connector_active{connector_name="CDC.\\"old\\""} 0' in body
-        assert (
-            'kc_shs_connector_source_server{connector_name="CDC",'
-            'source_server="oracle_cdc"} 1'
-        ) in body
-        assert (
-            'kc_shs_connector_source_server{connector_name="CDC.\\"old\\"",'
-            'source_server="oracle_cdc"} 0'
-        ) in body
-        assert (
-            'kc_shs_topic_last_message_timestamp_seconds{connector_name="CDC",'
-            'topic="CDC.C__CDCUSER.\\"CUSTOMERS\\""} 1781229000.250000'
-        ) in body
-        assert (
-            'kc_shs_topic_last_message_timestamp_seconds{connector_name="CDC.001",'
-            'topic="CDC.C__CDCUSER.ORDERS"} 1781229400.000000'
-        ) in body
-        assert (
-            'kc_shs_topic_over_threshold{connector_name="CDC",'
-            'topic="CDC.C__CDCUSER.\\"CUSTOMERS\\"",condition="db_state"} 1'
-        ) in body
-        assert (
-            'kc_shs_topic_over_threshold{connector_name="CDC.001",'
-            'topic="CDC.C__CDCUSER.ORDERS",condition="db_state"} 0'
-        ) in body
-        assert "kc_shs_topic_lagging" not in body
-        assert "kc_shs_topic_idle_seconds" not in body
-        assert "kc_shs_topic_lag_firing_count" not in body
+        assert response.status == 404
     finally:
         service.close()
 

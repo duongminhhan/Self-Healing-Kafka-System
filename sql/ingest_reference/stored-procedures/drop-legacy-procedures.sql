@@ -16,6 +16,15 @@ BEGIN TRY
     DROP PROCEDURE IF EXISTS dbo.spUpdateTopicLagJobs;
     DROP PROCEDURE IF EXISTS dbo.spGetCredentialConnector;
     DROP PROCEDURE IF EXISTS dbo.spGetKafkaServer;
+    DROP PROCEDURE IF EXISTS dbo.spGetOperationalMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetHealingAttemptMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetHealingRecoveredMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetHealingEscalatedMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetTopicLagStateMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetTopicLagEventMetrics;
+    DROP PROCEDURE IF EXISTS dbo.spGetMonitoredTopics;
+    DROP PROCEDURE IF EXISTS dbo.spUpdateTopicLagState;
+    DROP PROCEDURE IF EXISTS dbo.spInsertTopicLagLog;
 
     COMMIT TRANSACTION;
 END TRY

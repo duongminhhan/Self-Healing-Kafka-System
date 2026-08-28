@@ -29,7 +29,6 @@ WITH
     ALLOW_ROW_LOCKS = ON,
     ALLOW_PAGE_LOCKS = ON
   ) ON [PRIMARY];
-
 CREATE NONCLUSTERED INDEX [ConnectorHealingLogs.IDX_02]
 ON [ingest_reference].[dbo].[ConnectorHealingLogs] (
   [ConnectorId] ASC,
@@ -41,25 +40,6 @@ ON [ingest_reference].[dbo].[ConnectorHealingLogs] (
   [EventType],
   [HasNextStep],
   [Message]
-)
-WITH
-  (
-    PAD_INDEX = OFF,
-    FILLFACTOR = 100,
-    SORT_IN_TEMPDB = OFF,
-    IGNORE_DUP_KEY = OFF,
-    STATISTICS_NORECOMPUTE = OFF,
-    ONLINE = OFF,
-    ALLOW_ROW_LOCKS = ON,
-    ALLOW_PAGE_LOCKS = ON
-  ) ON [PRIMARY];
-
-CREATE NONCLUSTERED INDEX [ConnectorHealingLogs.IDX_03]
-ON [ingest_reference].[dbo].[ConnectorHealingLogs] (
-  [EventType] ASC,
-  [ConnectorName] ASC,
-  [HealingStep] ASC,
-  [CreatedAt] DESC
 )
 WITH
   (

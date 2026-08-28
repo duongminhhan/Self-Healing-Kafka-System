@@ -77,12 +77,6 @@ def _env(
     return cast(raw)
 
 
-def _env_csv(key: str) -> list[str]:
-    """Comma-separated env var → list of non-empty trimmed strings."""
-    raw: str = _env(key)
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
 def _env_bool(key: str) -> bool:
     """Boolean env var accepting the usual true-ish values."""
     return _env(key, lambda v: v.lower() in ("1", "true", "yes", "on"))
@@ -129,10 +123,6 @@ class GrafanaWebhookConfig:
         "GRAFANA_WEBHOOK_RECOVERY_FOLLOWUP_SECONDS",
         int,
     )
-    monitoring_inventory_refresh_seconds: int = _env(
-        "MONITORING_INVENTORY_REFRESH_SECONDS",
-        int,
-    )
 
 
 @dataclass
@@ -145,23 +135,6 @@ class StateMachineConfig:
     recreate_verify_wait_seconds: int = _env("RECREATE_VERIFY_WAIT_SECONDS", int)
     scn_poll_interval_seconds: int = _env("SCN_POLL_INTERVAL_SECONDS", int)
     recreate_keep_base_connector: bool = _env_bool("RECREATE_KEEP_BASE_CONNECTOR")
-
-
-@dataclass
-class TopicIdleConfig:
-    """
-    Topic-idleness probe — detects "no new messages written to topic X for
-    N seconds" by polling Kafka end-offsets directly (not via Connect).
-
-    Topic names are loaded from SQL Server, not from env. These values are
-    defaults for DB rows that do not override them.
-    """
-    bootstrap_servers: list[str] = field(default_factory=lambda: _env_csv("KAFKA_BOOTSTRAP_SERVERS"))
-    topic_idle_enabled: bool = _env_bool("TOPIC_LAG_TOPIC_IDLE_ENABLED")
-    event_capture_enabled: bool = _env_bool("TOPIC_LAG_EVENT_CAPTURE_ENABLED")
-    idle_threshold_seconds: int  = _env("TOPIC_IDLE_THRESHOLD_SECONDS", int)
-    poll_interval_seconds: int   = _env("TOPIC_IDLE_POLL_INTERVAL_SECONDS", int)
-    event_capture_lag_threshold_ms: int = _env("TOPIC_EVENT_CAPTURE_LAG_THRESHOLD_MS", int)
 
 
 @dataclass
@@ -179,14 +152,6 @@ class LoggingConfig:
 
 
 @dataclass
-class PrometheusMetricsConfig:
-    enabled: bool = _env_bool("PROMETHEUS_METRICS_ENABLED")
-    host: str = _env("PROMETHEUS_METRICS_HOST")
-    port: int = _env("PROMETHEUS_METRICS_PORT", int)
-    sync_interval_seconds: int = _env("METRICS_SYNC_INTERVAL_SECONDS", int)
-
-
-@dataclass
 class AppConfig:
     kafka_connect: KafkaConnectConfig = field(default_factory=KafkaConnectConfig)
     polling: PollingConfig            = field(default_factory=PollingConfig)
@@ -194,10 +159,6 @@ class AppConfig:
     state_machine: StateMachineConfig = field(default_factory=StateMachineConfig)
     mssql: MssqlConfig                = field(default_factory=MssqlConfig)
     logging: LoggingConfig            = field(default_factory=LoggingConfig)
-    topic_idle: TopicIdleConfig       = field(default_factory=TopicIdleConfig)
-    prometheus_metrics: PrometheusMetricsConfig = field(
-        default_factory=PrometheusMetricsConfig,
-    )
 
 
 cfg = AppConfig()

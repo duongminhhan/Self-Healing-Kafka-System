@@ -161,11 +161,6 @@ def test_recreate_with_offset_preserves_schema_history_and_patches_offsets():
     assert fields["last_scn"] == "124"
     assert fields["config_template"]["database.url"] == "{url}"
     assert fields["config_template"]["database.password"] == "{pwd}"
-    db.reset_topic_lag_after_connector_recreate.assert_called_once_with(
-        connector_id=1,
-        old_connector_name="conA.001",
-        new_connector_name="conA.002",
-    )
 
 
 def test_recreate_with_offset_keeps_unversioned_base_connector():
@@ -339,11 +334,6 @@ def test_recreate_without_offset_increments_version_again():
     )
     assert "config" not in client.create_connector.call_args.args[1]
     assert db.update_connector_fields.call_args.kwargs["connector_name"] == "conA.003"
-    db.reset_topic_lag_after_connector_recreate.assert_called_once_with(
-        connector_id=1,
-        old_connector_name="conA.002",
-        new_connector_name="conA.003",
-    )
 
 
 def test_escalate_records_exhausted_healing_action():

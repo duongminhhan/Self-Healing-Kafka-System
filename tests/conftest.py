@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-import sys
-import types
 from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
-
-if "kafka" not in sys.modules:
-    kafka_stub = types.ModuleType("kafka")
-    kafka_stub.KafkaConsumer = object
-    kafka_stub.TopicPartition = lambda topic, partition: (topic, partition)
-    sys.modules["kafka"] = kafka_stub
-
-if "kafka.errors" not in sys.modules:
-    kafka_errors_stub = types.ModuleType("kafka.errors")
-    kafka_errors_stub.KafkaError = Exception
-    sys.modules["kafka.errors"] = kafka_errors_stub
 
 from self_healthy_kafka.domain.models import (
     ConnectorState,

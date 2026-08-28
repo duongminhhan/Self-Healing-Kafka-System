@@ -3,7 +3,6 @@ import hmac
 import time
 
 from self_healthy_kafka.config import GrafanaWebhookConfig
-from self_healthy_kafka.webhook.metrics import render_prometheus_metrics
 from self_healthy_kafka.webhook.security import EventDeduplicator, WebhookAuthenticator
 
 
@@ -53,60 +52,3 @@ def test_hmac_authenticator_checks_timestamp_and_body():
         },
         body,
     )
-
-
-def test_metrics_renderer_escapes_labels_and_preserves_topic_mapping():
-    rendered = render_prometheus_metrics(
-        [{"connector_name": 'CDC"1', "source_server": "CDC", "is_active": True}],
-        [{
-            "connector_name": 'CDC"1',
-            "topic_name": "CDC.CUSTOMERS",
-            "last_message_timestamp_seconds": 123.5,
-            "is_over_threshold": True,
-        }],
-        {
-            "connectors": [{
-                "connector_name": "CDC.002",
-                "configured_connector_name": "CDC.001",
-                "source_server": "CDC",
-                "state": "RUNNING",
-                "inventory_status": "REPLACEMENT",
-                "configured": False,
-                "present": True,
-                "managed": True,
-                "is_active": True,
-            }],
-            "topics": [{
-                "connector_name": "CDC.002",
-                "configured_connector_name": "",
-                "source_server": "CDC",
-                "topic_name": "CDC.ORDERS",
-                "inventory_status": "UNCONFIGURED",
-                "configured": False,
-                "present": True,
-            }],
-        },
-    ).decode()
-
-    assert 'connector_name="CDC\\"1"' in rendered
-    assert 'topic="CDC.CUSTOMERS"} 123.500000' in rendered
-    assert (
-        'kc_shs_topic_active{connector_name="CDC\\"1",'
-        'topic="CDC.CUSTOMERS",condition="db_state"} 1'
-    ) in rendered
-    assert (
-        'kc_shs_topic_over_threshold{connector_name="CDC\\"1",'
-        'topic="CDC.CUSTOMERS",condition="db_state"} 1'
-    ) in rendered
-    assert (
-        'kc_shs_connector_inventory{connector_name="CDC.002",'
-        'configured_connector_name="CDC.001",source_server="CDC",'
-        'state="RUNNING",inventory_status="REPLACEMENT",configured="false",'
-        'present="true",managed="true",'
-        'active="true"} 1'
-    ) in rendered
-    assert (
-        'kc_shs_topic_inventory{connector_name="CDC.002",'
-        'configured_connector_name="",source_server="CDC",topic="CDC.ORDERS",'
-        'inventory_status="UNCONFIGURED",configured="false",present="true"} 1'
-    ) in rendered

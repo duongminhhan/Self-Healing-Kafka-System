@@ -304,11 +304,6 @@ class HealingActions:
             last_failed_at=result.checked_at,
         )
         self._delete_failed_versioned_connector(job, old_name, connector_name)
-        self._reset_topic_lag_after_successful_recreate(
-            job,
-            old_connector_name=old_name,
-            new_connector_name=connector_name,
-        )
         return True
 
     def retry_timed_out_recreate_with_offset(
@@ -521,11 +516,6 @@ class HealingActions:
             last_failed_at=result.checked_at,
         )
         self._delete_failed_versioned_connector(job, old_name, connector_name)
-        self._reset_topic_lag_after_successful_recreate(
-            job,
-            old_connector_name=old_name,
-            new_connector_name=connector_name,
-        )
         return True
 
     def escalate(self, job: JobLike, result: HealthResult) -> None:
@@ -612,19 +602,6 @@ class HealingActions:
         config: dict[str, Any],
     ) -> dict[str, Any]:
         return template_for_storage(config, job.get("config_template") or {})
-
-    def _reset_topic_lag_after_successful_recreate(
-        self,
-        job: JobLike,
-        *,
-        old_connector_name: str,
-        new_connector_name: str,
-    ) -> None:
-        self._db.reset_topic_lag_after_connector_recreate(
-            connector_id=job["id"],
-            old_connector_name=old_connector_name,
-            new_connector_name=new_connector_name,
-        )
 
     @staticmethod
     def _original_connector_name(job: JobLike) -> str:

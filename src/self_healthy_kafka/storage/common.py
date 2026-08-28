@@ -14,7 +14,7 @@ class MssqlConnection:
     def __init__(self, connection_string: str, timeout_seconds: int = 5):
         self._connection_string = connection_string
         self._timeout_seconds = timeout_seconds
-        self._conn = None
+        self._conn: Any = None
 
     def __enter__(self):
         import pyodbc

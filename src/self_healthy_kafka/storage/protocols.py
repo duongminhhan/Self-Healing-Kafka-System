@@ -39,14 +39,3 @@ class HealingStore(Protocol):
         commit_scn: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None: ...
-    def get_operational_metrics(
-        self,
-        window_minutes: int = 15,
-    ) -> dict[str, list[dict[str, Any]] | None]: ...
-    def reset_topic_lag_after_connector_recreate(
-        self,
-        *,
-        connector_id: str,
-        old_connector_name: str,
-        new_connector_name: str,
-    ) -> int: ...

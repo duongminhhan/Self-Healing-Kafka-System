@@ -13,7 +13,6 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from self_healthy_kafka.config import GrafanaWebhookConfig
-from self_healthy_kafka.webhook.metrics import render_prometheus_metrics
 from self_healthy_kafka.webhook.security import (
     EventDeduplicator,
     WebhookAuthenticator,
@@ -78,23 +77,9 @@ class GrafanaWebhookService:
         self,
         config: GrafanaWebhookConfig,
         process_connector: Callable[[str, bool], str | None],
-        connector_activity: Callable[[], list[dict[str, Any]]] | None = None,
-        topic_lag_metrics: Callable[[], list[dict[str, Any]]] | None = None,
-        monitoring_inventory: Callable[
-            [], dict[str, list[dict[str, Any]]]
-        ] | None = None,
-        monitoring_start: Callable[[], None] | None = None,
-        monitoring_close: Callable[[], None] | None = None,
     ):
         self._config = config
         self._process_connector = process_connector
-        self._connector_activity = connector_activity or (lambda: [])
-        self._topic_lag_metrics = topic_lag_metrics or (lambda: [])
-        self._monitoring_inventory = monitoring_inventory or (
-            lambda: {"connectors": [], "topics": []}
-        )
-        self._monitoring_start = monitoring_start or (lambda: None)
-        self._monitoring_close = monitoring_close or (lambda: None)
         self._queue: queue.Queue[GrafanaAlertEvent | None] = queue.Queue(
             maxsize=config.queue_size
         )
@@ -111,7 +96,6 @@ class GrafanaWebhookService:
         if not self._config.enabled:
             return
         self._validate_config()
-        self._monitoring_start()
         handler = self._handler_class()
         self._server = ThreadingHTTPServer(
             (self._config.host, self._config.port),
@@ -150,7 +134,6 @@ class GrafanaWebhookService:
         if not self._config.enabled:
             return
         self._stopping.set()
-        self._monitoring_close()
         with self._followup_lock:
             timers = list(self._followup_timers.values())
             self._followup_timers.clear()
@@ -325,9 +308,6 @@ class GrafanaWebhookService:
                 if self.path == "/health":
                     self._json_response(HTTPStatus.OK, {"status": "ok"})
                     return
-                if self.path == "/metrics":
-                    self._metrics_response()
-                    return
                 self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
             def do_POST(self) -> None:
@@ -393,37 +373,6 @@ class GrafanaWebhookService:
                 self._write_response(
                     status,
                     "application/json",
-                    body,
-                )
-
-            def _metrics_response(self) -> None:
-                try:
-                    inventory = service._monitoring_inventory()
-                    connector_rows = inventory.get("connector_activity")
-                    if connector_rows is None:
-                        connector_rows = service._connector_activity()
-                    topic_rows = inventory.get("topic_lag_metrics")
-                    if topic_rows is None:
-                        topic_rows = service._topic_lag_metrics()
-                    body = render_prometheus_metrics(
-                        connector_rows,
-                        topic_rows,
-                        inventory,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to load SELF-HEALTHY-KAFKA metrics",
-                        extra={"event": "kc_shs_metrics_failed"},
-                    )
-                    self._json_response(
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": "metrics unavailable"},
-                    )
-                    return
-
-                self._write_response(
-                    HTTPStatus.OK,
-                    "text/plain; version=0.0.4; charset=utf-8",
                     body,
                 )
 

@@ -1,7 +1,0 @@
-connector_reference: OTM-CLI-G001
-is_active: true
-
-topics:
-  - CDC.OTM-CLI.GLOGOWNER.SHIPMENT
-  - CDC.OTM-CLI.GLOGOWNER.SHIPMENT_STOP
-  - CDC.OTM-CLI.GLOGOWNER.SHIP_UNIT

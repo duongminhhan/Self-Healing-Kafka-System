@@ -25,13 +25,6 @@ begin
         c.[LastScn],
         c.[LastCommitScn],
         c.[LastFailedAt],
-        coalesce(
-            json_value(c.[ConfigTemplate], '$.config."topic.prefix"'),
-            json_value(c.[ConfigTemplate], '$."topic.prefix"'),
-            json_value(c.[ConfigTemplate], '$.config."database.server.name"'),
-            json_value(c.[ConfigTemplate], '$."database.server.name"'),
-            c.[ConnectorName]
-        ) as [SourceServer],
         case
             when @includehealingstate = 1
              and latest_incident.[HasNextStep] = 1

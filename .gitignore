@@ -95,7 +95,3 @@ env/*.env
 .DS_Store
 Thumbs.db
 Desktop.ini
-
-# Local implementation and refactor plans
-/PERFORMANCE_REFACTOR_PLAN.md
-/STEP4_SCN_RECOVERY_PLAN.md

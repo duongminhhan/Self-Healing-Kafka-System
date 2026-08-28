@@ -68,7 +68,6 @@ def log_effective_config() -> None:
                 ),
             },
             "logging_cfg": asdict(cfg.logging),
-            "topic_idle": asdict(cfg.topic_idle),
         },
     )
 
