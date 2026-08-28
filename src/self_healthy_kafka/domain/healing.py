@@ -80,15 +80,10 @@ class ConnectorJob(MutableMapping[str, Any]):
     connector_type: str = "source"
     is_active: bool = True
     level: int = 1
-    config_id: str | None = None
-    config_template: dict[str, Any] = field(default_factory=dict)
     active_config: dict[str, Any] | None = None
     failed_count: int = 0
     failed_connector: bool = False
     failed_task: bool = False
-    last_scn: str | None = None
-    last_commit_scn: str | None = None
-    last_failed_at: datetime | None = None
     active_incident_id: str | None = None
     latest_event_type: str | None = None
     latest_event_at: datetime | str | None = None

@@ -1,23 +1,23 @@
 CREATE TABLE [ingest_reference].[dbo].[ConnectorHealingLogs] (
   [Id] UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID(),
-  [ConnectorId] UNIQUEIDENTIFIER NULL,
-  [JobName] VARCHAR(255) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+  [QueueId] UNIQUEIDENTIFIER NOT NULL,
   [ConnectorName] VARCHAR(255) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
   [EventType] VARCHAR(80) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
   [AttemptNo] INT NULL,
-  [IncidentId] UNIQUEIDENTIFIER NULL,
   [HealingStep] SMALLINT NULL,
-  [HasNextStep] BIT NOT NULL DEFAULT 1,
+  [Severity] VARCHAR(20) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL DEFAULT 'INFO',
   [Message] NVARCHAR(MAX) COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
   [Details] NVARCHAR(MAX) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL DEFAULT N'{}',
   [CreatedAt] DATETIMEOFFSET(3) NOT NULL DEFAULT SYSDATETIMEOFFSET(),
-  [FinishedAt] DATETIMEOFFSET(3) NULL,
-  CONSTRAINT [PK_ConnectorHealingLogs] PRIMARY KEY ([Id])
+  CONSTRAINT [PK_ConnectorHealingLogs] PRIMARY KEY ([Id]),
+  CONSTRAINT [FK_ConnectorHealingLogs_Queue]
+    FOREIGN KEY ([QueueId])
+    REFERENCES [ingest_reference].[dbo].[ConnectorHealingQueue] ([QueueId])
 );
 
 CREATE NONCLUSTERED INDEX [ConnectorHealingLogs.IDX_01]
-ON [ingest_reference].[dbo].[ConnectorHealingLogs] ([ConnectorId] ASC, [CreatedAt] DESC)
-INCLUDE ([HasNextStep], [IncidentId])
+ON [ingest_reference].[dbo].[ConnectorHealingLogs] ([QueueId] ASC, [CreatedAt] DESC)
+INCLUDE ([EventType], [HealingStep], [Severity])
 WITH
   (
     PAD_INDEX = OFF,
@@ -31,14 +31,12 @@ WITH
   ) ON [PRIMARY];
 CREATE NONCLUSTERED INDEX [ConnectorHealingLogs.IDX_02]
 ON [ingest_reference].[dbo].[ConnectorHealingLogs] (
-  [ConnectorId] ASC,
-  [IncidentId] ASC,
+  [QueueId] ASC,
   [CreatedAt] DESC
 ) INCLUDE (
   [AttemptNo],
   [Details],
   [EventType],
-  [HasNextStep],
   [Message]
 )
 WITH

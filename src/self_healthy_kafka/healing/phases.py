@@ -126,3 +126,6 @@ class EventType:
     # Ghi khi chính state machine gặp exception trong lúc xử lý một connector.
     # Event này dùng để debug lỗi code/wiring thay vì lỗi Kafka Connect.
     STATE_MACHINE_ERROR = "STATE_MACHINE_ERROR"
+    # Ghi mỗi lần queue đang mở quan sát connector/task vẫn unhealthy. Số event
+    # này là bộ đếm debounce thay cho một cột state riêng trên queue.
+    HEALTH_FAILURE_OBSERVED = "HEALTH_FAILURE_OBSERVED"

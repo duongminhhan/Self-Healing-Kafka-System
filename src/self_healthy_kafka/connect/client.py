@@ -144,6 +144,19 @@ class KafkaConnectClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_config(self, name: str) -> Optional[dict[str, Any]]:
+        """GET /connectors/{name}/config for an in-memory recovery action."""
+        resp = self._request(
+            "GET",
+            f"/connectors/{name}/config",
+            connector_name=name,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        payload = resp.json()
+        return dict(payload) if isinstance(payload, dict) else None
+
     # ─── Restart Actions ─────────────────────────────────────────────────────
 
     def restart_connector(self, name: str, only_failed: bool = True) -> None:

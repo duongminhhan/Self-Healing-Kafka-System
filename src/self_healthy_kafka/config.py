@@ -1,21 +1,21 @@
 """
 Application configuration.
 
-Single source of truth: .env.example at the repo root.
-- .env.example (committed) defines every tunable and its default value.
-- env/<APP_ENV>.env (gitignored) carries environment-specific overrides.
+Single source of truth: env/<APP_ENV>.env.
+- env/<APP_ENV>.env (gitignored) carries the complete runtime configuration.
+- env/<APP_ENV>.env.example documents the required keys for that environment.
 - SELF_HEALTHY_KAFKA_ENV_FILE can point to an explicit env file.
 - Shell env vars are also respected.
 
 Precedence (highest wins):
-    shell env > explicit env file > env/<APP_ENV>.env > .env.example
+    shell env > explicit env file > env/<APP_ENV>.env
 
 `_env(KEY, cast=int)` reads `os.environ[KEY]` and casts. If the key isn't
-set anywhere (shell, env/<APP_ENV>.env, or .env.example), it raises KeyError at
-import time — that forces every tunable to be documented in .env.example.
+set anywhere (shell or the selected env file), it raises KeyError at import
+time. This keeps missing deployment configuration explicit.
 
 Adding a new tunable:
-    1. Add a line to .env.example (KEY=default_value).
+    1. Add the key to each env/<APP_ENV>.env.example template.
     2. Reference it from a dataclass field via `_env("KEY", cast=int)`.
     3. Override it in env/<APP_ENV>.env, an explicit env file, or the shell.
 """
@@ -42,9 +42,6 @@ if _explicit_env_file:
 else:
     load_dotenv(_project_root / "env" / f"{_app_env}.env", override=False)
 
-load_dotenv(_project_root / ".env.example", override=False)
-
-
 T = TypeVar("T")
 
 
@@ -64,15 +61,13 @@ def _env(
     Read a required env var and cast it.
 
     Raises KeyError at import time if the key isn't set anywhere (shell,
-    env/<APP_ENV>.env, or .env.example). That guarantees every tunable
-    referenced by code is documented in .env.example.
+    env/<APP_ENV>.env). That guarantees deployment configuration is complete.
     """
     raw = os.getenv(key)
     if raw is None:
         raise KeyError(
-            f"Required env var {key!r} is not set. Add it to .env.example "
-            "with a documented default value, or set it explicitly in "
-            "env/<APP_ENV>.env / your shell environment."
+            f"Required env var {key!r} is not set. Add it to the selected "
+            "env/<APP_ENV>.env file or your shell environment."
         )
     return cast(raw)
 

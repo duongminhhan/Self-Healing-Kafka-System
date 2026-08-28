@@ -5,11 +5,12 @@ ROOT = Path(__file__).resolve().parents[2]
 INIT_TABLE = ROOT / "sql" / "init-table"
 STORED_PROCEDURES = ROOT / "sql" / "ingest_reference" / "stored-procedures"
 CONNECTOR_SEEDS = ROOT / "sql" / "ingest_reference" / "connector"
-TABLE_FILES = ("Connectors.sql", "ConnectorHealingLogs.sql")
+TABLE_FILES = ("ConnectorHealingQueue.sql", "ConnectorHealingLogs.sql")
 PROCEDURE_NAMES = {
-    "spGetConnectorContext",
+    "spEnqueueConnectorHealing",
+    "spGetConnectorHealingQueue",
     "spInsertConnectorHealingLog",
-    "spUpdateConnector",
+    "spUpdateConnectorHealingQueue",
 }
 
 
@@ -83,7 +84,7 @@ def test_mssql_schema_contains_only_healing_tables():
 
     assert table_files == set(TABLE_FILES)
     assert schema.count("CREATE TABLE [ingest_reference].[dbo].") == 2
-    assert "[dbo].[Connectors]" in schema
+    assert "[dbo].[ConnectorHealingQueue]" in schema
     assert "[dbo].[ConnectorHealingLogs]" in schema
     assert "TopicLagJobs" not in schema
     assert "TopicLagLogs" not in schema
@@ -166,10 +167,6 @@ def test_cleanup_script_drops_removed_metrics_and_topic_lag_procedures():
         assert f"DROP PROCEDURE IF EXISTS dbo.{name};" in cleanup
 
 
-def test_connector_seeds_do_not_insert_topic_lag_jobs():
+def test_no_static_connector_registry_seeds_remain():
     scripts = sorted(CONNECTOR_SEEDS.rglob("*.sql"))
-    assert scripts
-    for path in scripts:
-        source = path.read_text(encoding="utf-8")
-        assert re.search(r"INSERT INTO\s+(?:\[dbo\]\.|dbo\.)Connectors", source)
-        assert "TopicLag" not in source
+    assert not scripts

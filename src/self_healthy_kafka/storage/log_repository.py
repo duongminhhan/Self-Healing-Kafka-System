@@ -41,11 +41,13 @@ class MssqlConnectorLogRepository:
             scn=scn,
             commit_scn=commit_scn,
         )
+        if connector_id is None:
+            raise ValueError("queue id is required to persist a healing log")
         sql = (
             "EXEC dbo.spInsertConnectorHealingLog "
-            "@ConnectorId = ?, @JobName = ?, @ConnectorName = ?, "
-            "@EventType = ?, @AttemptNo = ?, @IncidentId = ?, "
-            "@HealingStep = ?, @HasNextStep = ?, @Message = ?, @Details = ?"
+            "@QueueId = ?, @ConnectorName = ?, @EventType = ?, "
+            "@AttemptNo = ?, @HealingStep = ?, @Severity = ?, "
+            "@Message = ?, @Details = ?"
         )
         with self._get_conn() as conn:
             with conn.cursor() as cur:
@@ -53,13 +55,11 @@ class MssqlConnectorLogRepository:
                     sql,
                     (
                         connector_id,
-                        job_name,
                         connector_name,
                         event_type,
                         attempt_no,
-                        incident_id,
                         healing_step,
-                        has_next_step,
+                        severity,
                         message,
                         json_value(log_details),
                     ),

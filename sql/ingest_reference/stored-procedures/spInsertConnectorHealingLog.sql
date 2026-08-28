@@ -1,39 +1,33 @@
 CREATE OR ALTER PROCEDURE dbo.spInsertConnectorHealingLog
-    @connectorid uniqueidentifier = null,
-    @jobname varchar(255) = null,
+    @queueid uniqueidentifier,
     @connectorname varchar(255),
     @eventtype varchar(80),
     @attemptno int = null,
-    @incidentid uniqueidentifier = null,
     @healingstep smallint = null,
-    @hasnextstep bit,
-    @message nvarchar(max),
-    @details nvarchar(max)
+    @severity varchar(20) = 'INFO',
+    @message nvarchar(max) = null,
+    @details nvarchar(max) = N'{}'
 as
 begin
     set nocount on;
 
     insert into [dbo].[ConnectorHealingLogs] (
-        [ConnectorId],
-        [JobName],
+        [QueueId],
         [ConnectorName],
         [EventType],
         [AttemptNo],
-        [IncidentId],
         [HealingStep],
-        [HasNextStep],
+        [Severity],
         [Message],
         [Details]
     )
     values (
-        @connectorid,
-        @jobname,
+        @queueid,
         @connectorname,
         @eventtype,
         @attemptno,
-        @incidentid,
         @healingstep,
-        @hasnextstep,
+        @severity,
         @message,
         @details
     );

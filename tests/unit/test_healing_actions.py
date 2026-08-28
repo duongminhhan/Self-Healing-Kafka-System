@@ -36,10 +36,6 @@ def _job(**overrides):
             "connector.class": "X",
             "schema.history.internal.kafka.topic": "schema-history.conA",
         },
-        "config_template": {
-            "connector.class": "X",
-            "schema.history.internal.kafka.topic": "schema-history.conA",
-        },
     }
     base.update(overrides)
     return base
@@ -70,10 +66,7 @@ def test_restart_failed_tasks_records_task_restart_action():
     assert db.record_connector_log.call_args.kwargs["event_type"] == "TASK_RESTART"
     assert db.record_connector_log.call_args.kwargs["attempt_no"] == 1
     assert db.record_connector_log.call_args.kwargs["details"]["task_ids"] == [0]
-    fields = db.update_connector_fields.call_args.kwargs
-    assert fields["failed_count"] == 4
-    assert fields["failed_task"] is True
-    assert fields["failed_connector"] is False
+    db.update_queue_fields.assert_not_called()
 
 
 def test_recreate_with_offset_preserves_schema_history_and_patches_offsets():
@@ -106,15 +99,6 @@ def test_recreate_with_offset_preserves_schema_history_and_patches_offsets():
                 ),
                 "database.url": "jdbc:oracle:thin:@host/service",
                 "database.password": "secret",
-            },
-            config_id="318",
-            config_template={
-                "connector.class": "X",
-                "name": "conA.001",
-                "schema.history.internal.kafka.topic": "schema-history.conA.001",
-                "database.url": "{url}",
-                "database.password": "{pwd}",
-                "schema.history.internal.kafka.bootstrap.servers": "{kafka_server}",
             },
             task_restart_count=3,
             connector_restart_count=1,
@@ -156,11 +140,9 @@ def test_recreate_with_offset_preserves_schema_history_and_patches_offsets():
     ][0]
     assert recreate_log["details"]["schema_history_topic"] == "schema-history.conA.001"
     assert recreate_log["details"]["preserve_schema_history"] is True
-    fields = db.update_connector_fields.call_args.kwargs
-    assert fields["connector_name"] == "conA.002"
-    assert fields["last_scn"] == "124"
-    assert fields["config_template"]["database.url"] == "{url}"
-    assert fields["config_template"]["database.password"] == "{pwd}"
+    assert db.update_queue_fields.call_args.kwargs == {
+        "current_connector_name": "conA.002"
+    }
 
 
 def test_recreate_with_offset_keeps_unversioned_base_connector():
@@ -240,7 +222,7 @@ def test_recreate_with_offset_failure_does_not_resume_when_patch_fails():
     assert client.create_connector.call_args.kwargs["initial_state"] == "STOPPED"
     client.patch_offsets.assert_called_once()
     client.resume_connector.assert_not_called()
-    assert db.update_connector_fields.call_args.kwargs["connector_name"] == "conA.002"
+    assert db.update_queue_fields.call_args.kwargs["current_connector_name"] == "conA.002"
     assert [
         call.kwargs["event_type"] for call in db.record_connector_log.call_args_list
     ][-1] == "CONNECTOR_RECREATE_WITH_OFFSET_FAILED"
@@ -269,7 +251,7 @@ def test_recreate_with_offset_create_timeout_logs_retryable_timeout():
         "CONNECTOR_RECREATE_WITH_OFFSET_TIMEOUT"
     )
     assert db.record_connector_log.call_args.kwargs["attempt_no"] == 1
-    assert db.update_connector_fields.call_args.kwargs["connector_name"] == "conA.002"
+    assert db.update_queue_fields.call_args.kwargs["current_connector_name"] == "conA.002"
 
 
 def test_timed_out_recreate_reuses_existing_connector_before_offset_patch():
@@ -313,11 +295,7 @@ def test_recreate_without_offset_increments_version_again():
     actions.recreate_without_offset(
         _job(
             connector_name="conA.002",
-            active_config=None,
-            config_template={
-                "name": "conA.001",
-                "config": {"connector.class": "X", "name": "conA.001"},
-            },
+            active_config={"connector.class": "X", "name": "conA.001"},
         ),
         _unhealthy(task_ids=[0]),
     )
@@ -333,7 +311,7 @@ def test_recreate_without_offset_increments_version_again():
         == "schema-history.conA.003"
     )
     assert "config" not in client.create_connector.call_args.args[1]
-    assert db.update_connector_fields.call_args.kwargs["connector_name"] == "conA.003"
+    assert db.update_queue_fields.call_args.kwargs["current_connector_name"] == "conA.003"
 
 
 def test_escalate_records_exhausted_healing_action():
@@ -344,9 +322,4 @@ def test_escalate_records_exhausted_healing_action():
     actions.escalate(_job(), _unhealthy())
 
     assert db.record_connector_log.call_args.kwargs["event_type"] == "HEALING_ESCALATED"
-    fields = db.update_connector_fields.call_args.kwargs
-    assert fields["is_active"] is False
-    assert fields["failed_count"] == 7
-    assert fields["failed_task"] is True
-    assert fields["failed_connector"] is True
-    assert fields["last_failed_at"]
+    db.complete.assert_called_once_with(1, "ESCALATED")

@@ -1,5 +1,4 @@
 import json
-from uuid import UUID
 
 import pytest
 
@@ -54,28 +53,34 @@ def _repository(connection):
     return repo
 
 
-def test_update_connector_fields_rejects_unknown_field():
+def test_update_queue_fields_rejects_unknown_field():
     with pytest.raises(ValueError, match="unknown_field"):
-        _repository(_Connection()).update_connector_fields(1, unknown_field="x")
+        _repository(_Connection()).update_queue_fields(1, unknown_field="x")
 
 
-def test_update_connector_fields_serializes_only_physical_columns():
+def test_update_queue_fields_serializes_queue_columns():
     connection = _Connection()
     repo = _repository(connection)
-
-    repo.update_connector_fields("connector-id", failed_count=4, failed_task=True)
+    repo.update_queue_fields(
+        "queue-id",
+        queue_status="WAITING",
+        current_connector_name="conn-x.001",
+    )
 
     sql, params = connection.cursor_obj.executed[-1]
-    assert sql == "EXEC dbo.spUpdateConnector @ConnectorId = ?, @Fields = ?"
-    assert params[0] == "connector-id"
-    assert json.loads(params[1]) == {"failed_count": 4, "failed_task": True}
+    assert sql == "EXEC dbo.spUpdateConnectorHealingQueue @QueueId = ?, @Fields = ?"
+    assert params[0] == "queue-id"
+    assert json.loads(params[1]) == {
+        "queue_status": "WAITING",
+        "current_connector_name": "conn-x.001",
+    }
 
 
-def test_record_connector_log_persists_audit_details():
+def test_record_connector_log_persists_audit_details_for_queue():
     connection = _Connection()
     repo = _repository(connection)
-
     repo.record_connector_log(
+        connector_id="queue-id",
         connector_name="conn-x",
         event_type="TASK_RESTART",
         message="Restarted failed task 0",
@@ -86,8 +91,9 @@ def test_record_connector_log_persists_audit_details():
 
     sql, params = connection.cursor_obj.executed[-1]
     assert sql.startswith("EXEC dbo.spInsertConnectorHealingLog")
-    assert params[2:4] == ("conn-x", "TASK_RESTART")
-    assert json.loads(params[9]) == {
+    assert params[0] == "queue-id"
+    assert params[1:3] == ("conn-x", "TASK_RESTART")
+    assert json.loads(params[7]) == {
         "reason": "FAILED",
         "severity": "WARNING",
         "task_id": 0,
@@ -95,61 +101,47 @@ def test_record_connector_log_persists_audit_details():
     assert connection.committed is True
 
 
-def test_list_connectors_derives_healing_state_from_context():
+def test_list_connectors_reads_only_due_open_queue_items():
     connection = _Connection(results=[[{
-        "id": "connector-id",
+        "id": "queue-id",
         "connector_name": "conn-x",
-        "failed_count": 7,
-        "config_template": {"connector.class": "X"},
-        "active_incident_id": "incident-1",
-        "latest_event_type": "CONNECTOR_RESTART",
-        "latest_attempt_no": 1,
-        "latest_has_next_step": True,
-        "latest_message": "restart",
+        "root_connector_name": "conn-x",
+        "queue_status": "PENDING",
+        "healing_mode": "RESTART_ONLY",
+        "failed_count": 1,
+        "latest_event_type": "HEALTH_FAILURE_OBSERVED",
         "latest_event_details": {"task_ids": [0]},
-        "latest_event_at": "2026-06-03T00:00:01+00:00",
-        "task_restart_count": 3,
-        "connector_restart_count": 1,
+        "task_restart_count": 0,
+        "connector_restart_count": 0,
     }]])
 
     row = _repository(connection).list_connectors()[0]
 
-    assert row["active_incident_id"] == "incident-1"
-    assert row["current_phase"] == "CONNECTOR_RESTARTING"
-    assert row["task_restart_count"] == 3
+    sql, params = connection.cursor_obj.executed[-1]
+    assert "spGetConnectorHealingQueue" in sql
+    assert params[-1] is True
+    assert row["active_incident_id"] == "queue-id"
     assert row["last_failed_task_ids"] == [0]
+    assert row["active_config"] is None
 
 
-def test_get_connector_by_id_resolves_runtime_config_on_demand():
+def test_enqueue_connector_uses_queue_procedure():
     connection = _Connection(results=[[{
-        "id": "connector-id",
+        "id": "queue-id",
         "connector_name": "conn-x",
-        "failed_count": 7,
-        "config_id": "318",
-        "config_template": {
-            "database.url": "{url}",
-            "database.password": "{pwd}",
-            "schema.history.internal.kafka.bootstrap.servers": "{kafka_server}",
-        },
-        "credential": "jdbc:oracle:thin:@host/service;secret",
-        "kafka_server": "kafka-1:9092,kafka-2:9092",
+        "root_connector_name": "conn-x",
+        "queue_status": "PENDING",
+        "healing_mode": "RECOVERY",
     }]])
 
-    row = _repository(connection).get_connector_by_id(
-        "connector-id",
-        include_runtime_config=True,
+    row = _repository(connection).enqueue_connector(
+        root_connector_name="conn-x",
+        current_connector_name="conn-x",
+        connector_class="io.debezium.connector.oracle.OracleConnector",
+        healing_mode="RECOVERY",
     )
 
-    assert row["active_config"]["database.password"] == "secret"
-    assert row["active_config"]["database.url"] == "jdbc:oracle:thin:@host/service"
-    assert row["active_config"]["schema.history.internal.kafka.bootstrap.servers"] == (
-        "kafka-1:9092,kafka-2:9092"
-    )
-
-
-def test_ensure_active_incident_reuses_open_incident_or_creates_uuid():
-    repo = _repository(_Connection(results=[[{"active_incident_id": "incident-1"}]]))
-    assert repo.ensure_active_incident("connector-id") == "incident-1"
-
-    repo._get_conn = lambda: _Connection(results=[[{"active_incident_id": None}]])
-    UUID(repo.ensure_active_incident("connector-id"))
+    sql, params = connection.cursor_obj.executed[-1]
+    assert "spEnqueueConnectorHealing" in sql
+    assert params[-1] == "RECOVERY"
+    assert row["connector_name"] == "conn-x"

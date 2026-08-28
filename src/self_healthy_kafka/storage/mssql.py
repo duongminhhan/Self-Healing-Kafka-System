@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from self_healthy_kafka.domain.healing import ConnectorJob
@@ -58,8 +59,32 @@ class HealingRepository:
             include_runtime_config=include_runtime_config,
         )
 
-    def update_connector_fields(self, connector_id: Any, **fields: Any) -> None:
-        self._connectors.update_connector_fields(connector_id, **fields)
+    def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:
+        self._connectors.update_queue_fields(queue_id, **fields)
+
+    def enqueue_connector(
+        self,
+        *,
+        root_connector_name: str,
+        current_connector_name: str,
+        connector_class: str | None,
+        healing_mode: str,
+    ) -> ConnectorJob:
+        return self._connectors.enqueue_connector(
+            root_connector_name=root_connector_name,
+            current_connector_name=current_connector_name,
+            connector_class=connector_class,
+            healing_mode=healing_mode,
+        )
+
+    def start_processing(self, queue_id: Any) -> None:
+        self._connectors.start_processing(queue_id)
+
+    def wait_for_next_attempt(self, queue_id: Any, next_attempt_at: datetime) -> None:
+        self._connectors.wait_for_next_attempt(queue_id, next_attempt_at)
+
+    def complete(self, queue_id: Any, outcome: str) -> None:
+        self._connectors.complete(queue_id, outcome)
 
     def ensure_active_incident(self, connector_id: Any) -> str:
         return self._connectors.ensure_active_incident(connector_id)

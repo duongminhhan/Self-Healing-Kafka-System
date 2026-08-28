@@ -11,7 +11,6 @@ from self_healthy_kafka.domain.healing import HealingStep
 from self_healthy_kafka.domain.models import HealthResult
 from self_healthy_kafka.healing.action_services.escalation import EscalationExecutor
 from self_healthy_kafka.healing.action_services.restart import RestartExecutor
-from self_healthy_kafka.healing.config_resolution import template_for_storage
 from self_healthy_kafka.healing.helpers import (
     failure_details,
     failure_message,
@@ -186,7 +185,6 @@ class HealingActions:
                         "retry_after_seconds": self._recreate_verify_wait_seconds,
                         "error": str(exc),
                         "offsets": offsets,
-                        "config_template": self._config_template_for_storage(job, config),
                     },
                 )
                 return False
@@ -295,13 +293,9 @@ class HealingActions:
                 recreate_verify_wait_seconds=self._recreate_verify_wait_seconds,
             ),
         )
-        self._db.update_connector_fields(
+        self._db.update_queue_fields(
             job["id"],
-            connector_name=connector_name,
-            config_template=self._config_template_for_storage(job, config),
-            last_scn=scn,
-            last_commit_scn=commit_scn,
-            last_failed_at=result.checked_at,
+            current_connector_name=connector_name,
         )
         self._delete_failed_versioned_connector(job, old_name, connector_name)
         return True
@@ -318,7 +312,6 @@ class HealingActions:
         config = (
             details.get("config")
             or job.get("active_config")
-            or job.get("config_template")
             or {}
         )
         attempt_no = int(job.get("recreate_with_offset_timeout_count") or 0) + 1
@@ -509,11 +502,9 @@ class HealingActions:
                 recreate_verify_wait_seconds=self._recreate_verify_wait_seconds,
             ),
         )
-        self._db.update_connector_fields(
+        self._db.update_queue_fields(
             job["id"],
-            connector_name=connector_name,
-            config_template=self._config_template_for_storage(job, config),
-            last_failed_at=result.checked_at,
+            current_connector_name=connector_name,
         )
         self._delete_failed_versioned_connector(job, old_name, connector_name)
         return True
@@ -561,13 +552,10 @@ class HealingActions:
         scn: str | None,
         commit_scn: str | None,
     ) -> None:
-        self._db.update_connector_fields(
+        del config, result, scn, commit_scn
+        self._db.update_queue_fields(
             job["id"],
-            connector_name=connector_name,
-            config_template=self._config_template_for_storage(job, config),
-            last_scn=scn,
-            last_commit_scn=commit_scn,
-            last_failed_at=result.checked_at,
+            current_connector_name=connector_name,
         )
 
     def _log_recreate_with_offset_failure(
@@ -595,13 +583,6 @@ class HealingActions:
             message=message,
             details=details,
         )
-
-    @staticmethod
-    def _config_template_for_storage(
-        job: JobLike,
-        config: dict[str, Any],
-    ) -> dict[str, Any]:
-        return template_for_storage(config, job.get("config_template") or {})
 
     @staticmethod
     def _original_connector_name(job: JobLike) -> str:

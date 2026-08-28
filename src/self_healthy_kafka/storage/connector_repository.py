@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from self_healthy_kafka.domain.healing import ConnectorJob
-from self_healthy_kafka.healing.config_resolution import (
-    has_external_placeholders,
-    resolve_connector_config,
-)
 from self_healthy_kafka.healing.phases import EventType, Phase
 from self_healthy_kafka.storage.common import (
     dict_or_empty,
@@ -19,20 +14,13 @@ from self_healthy_kafka.storage.common import (
     rows_to_dicts,
 )
 
-PHYSICAL_CONNECTOR_FIELDS = {
-    "job_name",
-    "connector_name",
-    "connector_type",
-    "is_active",
-    "level",
-    "config_template",
-    "config_id",
-    "failed_count",
-    "failed_connector",
-    "failed_task",
-    "last_scn",
-    "last_commit_scn",
-    "last_failed_at",
+QUEUE_FIELDS = {
+    "current_connector_name",
+    "queue_status",
+    "final_outcome",
+    "started_at",
+    "completed_at",
+    "next_attempt_at",
 }
 
 PHASE_BY_EVENT = {
@@ -49,19 +37,13 @@ PHASE_BY_EVENT = {
 
 
 class MssqlConnectorRepository:
-    """Loads active connector rows and derives healing state from log history."""
+    """Persists open connector-healing incidents as queue items."""
 
     def __init__(self, get_conn: Callable[[], Any]):
         self._get_conn = get_conn
 
     def list_connectors(self) -> list[ConnectorJob]:
-        with self._get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "EXEC dbo.spGetConnectorContext @IncludeRuntimeConfig = 0"
-                )
-                rows = rows_to_dicts(cur)
-                return [self._hydrate_connector_row(row) for row in rows]
+        return self._get_queue_items(due_only=True)
 
     def get_connector(
         self,
@@ -69,18 +51,9 @@ class MssqlConnectorRepository:
         *,
         include_runtime_config: bool = False,
     ) -> ConnectorJob | None:
-        with self._get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "EXEC dbo.spGetConnectorContext "
-                    f"@ConnectorName = ?, @IncludeRuntimeConfig = "
-                    f"{int(include_runtime_config)}",
-                    (connector_name,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return None
-                return self._hydrate_connector_row(row_to_dict(cur, row))
+        del include_runtime_config
+        rows = self._get_queue_items(connector_name=connector_name)
+        return rows[0] if rows else None
 
     def get_connector_by_id(
         self,
@@ -88,142 +61,122 @@ class MssqlConnectorRepository:
         *,
         include_runtime_config: bool = False,
     ) -> ConnectorJob | None:
+        del include_runtime_config
+        rows = self._get_queue_items(queue_id=connector_id)
+        return rows[0] if rows else None
+
+    def enqueue_connector(
+        self,
+        *,
+        root_connector_name: str,
+        current_connector_name: str,
+        connector_class: str | None,
+        healing_mode: str,
+    ) -> ConnectorJob:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "EXEC dbo.spGetConnectorContext "
-                    f"@ConnectorId = ?, @IncludeRuntimeConfig = "
-                    f"{int(include_runtime_config)}",
-                    (connector_id,),
+                    "EXEC dbo.spEnqueueConnectorHealing "
+                    "@RootConnectorName = ?, @CurrentConnectorName = ?, "
+                    "@ConnectorClass = ?, @HealingMode = ?",
+                    (
+                        root_connector_name,
+                        current_connector_name,
+                        connector_class,
+                        healing_mode,
+                    ),
                 )
                 row = cur.fetchone()
                 if not row:
-                    return None
-                return self._hydrate_connector_row(row_to_dict(cur, row))
+                    raise RuntimeError("spEnqueueConnectorHealing returned no queue item")
+                return self._hydrate_queue_row(row_to_dict(cur, row))
 
-    def update_connector_fields(self, connector_id: Any, **fields: Any) -> None:
+    def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:
         if not fields:
             return
-        unknown = set(fields) - PHYSICAL_CONNECTOR_FIELDS
+        unknown = set(fields) - QUEUE_FIELDS
         if unknown:
-            raise ValueError(f"unknown connector field(s): {', '.join(sorted(unknown))}")
-
+            raise ValueError(f"unknown queue field(s): {', '.join(sorted(unknown))}")
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "EXEC dbo.spUpdateConnector "
-                    "@ConnectorId = ?, @Fields = ?",
-                    (connector_id, json_value(fields)),
+                    "EXEC dbo.spUpdateConnectorHealingQueue "
+                    "@QueueId = ?, @Fields = ?",
+                    (queue_id, json_value(fields)),
                 )
 
-    def ensure_active_incident(self, connector_id: Any) -> str:
+    def start_processing(self, queue_id: Any) -> None:
+        self.update_queue_fields(
+            queue_id,
+            queue_status="PROCESSING",
+            started_at=datetime.now(timezone.utc),
+        )
+
+    def wait_for_next_attempt(self, queue_id: Any, next_attempt_at: datetime) -> None:
+        self.update_queue_fields(
+            queue_id,
+            queue_status="WAITING",
+            next_attempt_at=next_attempt_at,
+        )
+
+    def complete(self, queue_id: Any, outcome: str) -> None:
+        self.update_queue_fields(
+            queue_id,
+            queue_status="ESCALATED" if outcome == "ESCALATED" else "COMPLETED",
+            final_outcome=outcome,
+            completed_at=datetime.now(timezone.utc),
+            next_attempt_at=None,
+        )
+
+    @staticmethod
+    def ensure_active_incident(connector_id: Any) -> str:
+        return str(connector_id)
+
+    def _get_queue_items(
+        self,
+        *,
+        queue_id: Any | None = None,
+        connector_name: str | None = None,
+        due_only: bool = False,
+    ) -> list[ConnectorJob]:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "EXEC dbo.spGetConnectorContext "
-                    "@ConnectorId = ?, @IncludeRuntimeConfig = 0",
-                    (connector_id,),
+                    "EXEC dbo.spGetConnectorHealingQueue "
+                    "@QueueId = ?, @ConnectorName = ?, @OpenOnly = 1, @DueOnly = ?",
+                    (queue_id, connector_name, due_only),
                 )
-                row = cur.fetchone()
-                context = row_to_dict(cur, row) if row else {}
-                incident_id = context.get("active_incident_id")
-        return incident_id or str(uuid.uuid4())
+                return [self._hydrate_queue_row(row) for row in rows_to_dicts(cur)]
 
-    def _hydrate_connector_row(self, row: dict[str, Any]) -> ConnectorJob:
-        credential = row.pop("credential", None)
-        kafka_server = row.pop("kafka_server", None)
-        active_incident_id = row.get("active_incident_id")
-        if not int(row.get("failed_count") or 0):
-            active_incident_id = None
-        latest_log = _latest_log_from_context(row, active_incident_id)
-
-        row["config_template"] = dict_or_empty(row.get("config_template"))
-        if has_external_placeholders(row["config_template"]) and (
-            credential is not None or kafka_server is not None
-        ):
-            row["active_config"] = resolve_connector_config(
-                row["config_template"],
-                config_id=row.get("config_id"),
-                load_credential=lambda config_id: _required_runtime_value(
-                    credential,
-                    f"spGetConnectorContext returned no credential for "
-                    f"ConfigId={config_id}",
-                ),
-                load_kafka_server=lambda: _required_runtime_value(
-                    kafka_server,
-                    "spGetConnectorContext returned no Kafka server",
-                ),
-            )
-        row["active_incident_id"] = active_incident_id
-        row["latest_event_type"] = latest_log.get("event_type")
-        row["latest_event_at"] = latest_log.get("created_at")
-        row["latest_event_details"] = latest_log.get("details") or {}
-        row["latest_has_next_step"] = latest_log.get("has_next_step")
-        row["current_phase"] = _derive_phase(row, latest_log)
-        row["task_restart_count"] = int(row.get("task_restart_count") or 0)
-        row["connector_restart_count"] = int(
-            row.get("connector_restart_count") or 0
-        )
-        row["recreate_with_offset_count"] = int(
-            row.get("recreate_with_offset_count") or 0
-        )
-        row["recreate_with_offset_timeout_count"] = int(
-            row.get("recreate_with_offset_timeout_count") or 0
-        )
-        row["recreate_without_offset_count"] = int(
-            row.get("recreate_without_offset_count") or 0
-        )
-        row["last_failed_task_ids"] = _latest_task_ids(latest_log)
-        row["last_checked_at"] = _parse_log_detail_dt(latest_log, "checked_at")
-        row["last_error"] = latest_log.get("message")
-        for key in (
-            "latest_attempt_no",
-            "latest_message",
-        ):
-            row.pop(key, None)
+    @staticmethod
+    def _hydrate_queue_row(row: dict[str, Any]) -> ConnectorJob:
+        latest_details = dict_or_empty(row.get("latest_event_details"))
+        row["active_incident_id"] = row.get("active_incident_id") or row.get("id")
+        row["active_config"] = None
+        row["connector_type"] = "source"
+        row["is_active"] = row.get("queue_status") not in {"COMPLETED", "ESCALATED"}
+        row["failed_connector"] = False
+        row["failed_task"] = bool(latest_details.get("task_ids"))
+        row["last_failed_task_ids"] = _latest_task_ids(latest_details)
+        row["last_checked_at"] = _parse_log_detail_dt(latest_details, "checked_at")
+        row["last_error"] = row.get("latest_message")
+        row["latest_event_details"] = latest_details
+        row["current_phase"] = _derive_phase(row)
         return ConnectorJob.from_mapping(row)
 
 
-def _latest_log_from_context(
-    row: dict[str, Any],
-    active_incident_id: Any,
-) -> dict[str, Any]:
-    if not active_incident_id or not row.get("latest_event_type"):
-        return {}
-    return {
-        "event_type": row.get("latest_event_type"),
-        "attempt_no": row.get("latest_attempt_no"),
-        "has_next_step": row.get("latest_has_next_step"),
-        "message": row.get("latest_message"),
-        "details": dict_or_empty(row.get("latest_event_details")),
-        "created_at": row.get("latest_event_at"),
-    }
-
-
-def _required_runtime_value(value: Any, error_message: str) -> Any:
-    if value is None or not str(value).strip():
-        raise ValueError(error_message)
-    return value
-
-
-def _derive_phase(row: dict[str, Any], latest_log: dict[str, Any]) -> str:
-    if not int(row.get("failed_count") or 0):
-        return Phase.HEALTHY
-    event_type = latest_log.get("event_type")
+def _derive_phase(row: dict[str, Any]) -> str:
+    event_type = row.get("latest_event_type")
     if event_type in PHASE_BY_EVENT:
         return PHASE_BY_EVENT[event_type]
     return Phase.FAILED_DEBOUNCE
 
 
-def _latest_task_ids(latest_log: dict[str, Any]) -> list[int]:
-    details = dict_or_empty(latest_log.get("details"))
+def _latest_task_ids(details: dict[str, Any]) -> list[int]:
     raw_ids = details.get("task_ids") or []
     return [int(task_id) for task_id in raw_ids if task_id is not None]
 
 
-def _parse_log_detail_dt(latest_log: dict[str, Any], key: str) -> datetime | None:
-    details = dict_or_empty(latest_log.get("details"))
+def _parse_log_detail_dt(details: dict[str, Any], key: str) -> datetime | None:
     value = details.get(key)
-    if not value:
-        return None
-    return parse_datetime(value)
+    return parse_datetime(value) if value else None

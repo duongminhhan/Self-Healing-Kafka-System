@@ -35,7 +35,7 @@ class RestartExecutor:
         task_ids = result.failed_task_ids or list(
             job.get("last_failed_task_ids") or []
         )
-        failed_count = self._clamp(int(job.get("failed_count") or 0) + 1)
+        failed_count = self._clamp(int(job.get("failed_count") or 0))
         self._client.restart_connector(job["connector_name"], only_failed=True)
         self._db.record_connector_log(
             connector_id=job["id"],
@@ -60,15 +60,6 @@ class RestartExecutor:
                 ),
             ),
         )
-        fields: dict[str, Any] = {
-            "failed_count": failed_count,
-            "last_failed_at": result.checked_at,
-        }
-        if failed_count == self._task_failed_count:
-            fields.update(failed_task=True, failed_connector=False)
-        if failed_count >= self._max_failed_count:
-            fields.update(failed_task=True, failed_connector=True)
-        self._db.update_connector_fields(job["id"], **fields)
 
     def restart_connector(
         self,
@@ -76,7 +67,7 @@ class RestartExecutor:
         result: HealthResult,
         incident_id: str,
     ) -> None:
-        failed_count = self._clamp(int(job.get("failed_count") or 0) + 1)
+        failed_count = self._clamp(int(job.get("failed_count") or 0))
         if job.get("failed_task"):
             failed_count = self._max_failed_count
         self._client.restart_connector(job["connector_name"], only_failed=False)
@@ -98,14 +89,6 @@ class RestartExecutor:
                 post_restart_wait_seconds=self._post_restart_wait_seconds,
             ),
         )
-        fields: dict[str, Any] = {
-            "failed_count": failed_count,
-            "failed_connector": True,
-            "last_failed_at": result.checked_at,
-        }
-        if failed_count >= self._max_failed_count:
-            fields.update(failed_task=True, failed_connector=True)
-        self._db.update_connector_fields(job["id"], **fields)
 
     def _clamp(self, value: Any) -> int:
         return max(0, min(int(value or 0), self._max_failed_count))

@@ -17,16 +17,17 @@ settings.
 For a first database installation, execute these table scripts in DBeaver:
 
 ```text
-sql/init-table/Connectors.sql
+sql/init-table/ConnectorHealingQueue.sql
 sql/init-table/ConnectorHealingLogs.sql
 ```
 
 Then execute the runtime stored procedures:
 
 ```text
-sql/ingest_reference/stored-procedures/spGetConnectorContext.sql
+sql/ingest_reference/stored-procedures/spEnqueueConnectorHealing.sql
+sql/ingest_reference/stored-procedures/spGetConnectorHealingQueue.sql
 sql/ingest_reference/stored-procedures/spInsertConnectorHealingLog.sql
-sql/ingest_reference/stored-procedures/spUpdateConnector.sql
+sql/ingest_reference/stored-procedures/spUpdateConnectorHealingQueue.sql
 ```
 
 For an existing database, also execute

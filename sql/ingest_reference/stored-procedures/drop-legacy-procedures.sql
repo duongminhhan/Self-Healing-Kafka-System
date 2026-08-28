@@ -5,6 +5,8 @@ BEGIN TRY
     BEGIN TRANSACTION;
 
     DROP PROCEDURE IF EXISTS dbo.spGetConnectors;
+    DROP PROCEDURE IF EXISTS dbo.spGetConnectorContext;
+    DROP PROCEDURE IF EXISTS dbo.spUpdateConnector;
     DROP PROCEDURE IF EXISTS dbo.spGetConnectorActivity;
     DROP PROCEDURE IF EXISTS dbo.spGetConnectorByName;
     DROP PROCEDURE IF EXISTS dbo.spGetConnectorById;

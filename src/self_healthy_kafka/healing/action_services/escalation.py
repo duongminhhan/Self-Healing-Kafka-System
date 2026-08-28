@@ -43,14 +43,7 @@ class EscalationExecutor:
                 phase=job.get("current_phase"),
             ),
         )
-        self._db.update_connector_fields(
-            job["id"],
-            is_active=False,
-            failed_count=self._max_failed_count,
-            failed_connector=True,
-            failed_task=True,
-            last_failed_at=result.checked_at,
-        )
+        self._db.complete(job["id"], "ESCALATED")
 
     def level_limit_reached(
         self,
@@ -81,17 +74,7 @@ class EscalationExecutor:
                 attempted_event=attempted_event,
             ),
         )
-        failed_count = self._clamp(job.get("failed_count"))
-        fields: dict[str, Any] = {
-            "is_active": False,
-            "failed_count": failed_count,
-            "last_failed_at": result.checked_at,
-        }
-        if failed_count == self._task_failed_count:
-            fields.update(failed_task=True, failed_connector=False)
-        if failed_count >= self._max_failed_count:
-            fields.update(failed_task=True, failed_connector=True)
-        self._db.update_connector_fields(job["id"], **fields)
+        self._db.complete(job["id"], "ESCALATED")
 
     def _clamp(self, value: Any) -> int:
         return max(0, min(int(value or 0), self._max_failed_count))

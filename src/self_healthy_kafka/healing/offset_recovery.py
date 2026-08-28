@@ -15,14 +15,9 @@ def build_replacement_connector(
     latest_details = job.get("latest_event_details") or {}
     version_seed = latest_details.get("new_connector_name") or current_name
     connector_name = next_versioned_connector_name(str(version_seed))
-    template = dict(job.get("active_config") or job.get("config_template") or {})
-    if not template:
+    config = dict(job.get("active_config") or {})
+    if not config:
         raise ValueError("Connector runtime config is required for recreate")
-
-    if isinstance(template.get("config"), dict):
-        config = dict(template["config"])
-    else:
-        config = dict(template)
 
     config["name"] = connector_name
     if preserve_schema_history:

@@ -30,7 +30,6 @@ from self_healthy_kafka.healing.helpers import (
 from self_healthy_kafka.healing.helpers import (
     incident_id as active_incident_id,
 )
-from self_healthy_kafka.healing.offset_recovery import extract_last_scn
 from self_healthy_kafka.healing.phases import EventType
 from self_healthy_kafka.healing.policy import (
     RECREATE_WITH_OFFSET_FAILURE_EVENTS,
@@ -90,9 +89,8 @@ class ConnectorStateMachine:
         self._post_restart_wait_seconds = post_restart_wait_seconds
         self._recovery_healthy_confirm_seconds = recovery_healthy_confirm_seconds
         self._recreate_verify_wait_seconds = recreate_verify_wait_seconds
-        self._scn_poll_interval_seconds = scn_poll_interval_seconds
+        del scn_poll_interval_seconds
         self._recreate_keep_base_connector = recreate_keep_base_connector
-        self._last_scn_fetch_at: dict[str, datetime] = {}
         self._healthy_since: dict[str, datetime] = {}
         self._connector_locks: dict[str, threading.Lock] = {}
         self._connector_locks_guard = threading.Lock()
@@ -115,11 +113,12 @@ class ConnectorStateMachine:
         return self._client
 
     def tick(self) -> list[str]:
+        self._discover_failed_connectors()
         jobs = self._db.list_connectors()
         if not jobs:
-            logger.warning(
-                "no active connector jobs found in DB",
-                extra={"event": "connector_jobs_empty"},
+            logger.debug(
+                "no open connector healing queue items",
+                extra={"event": "connector_healing_queue_empty"},
             )
             return []
 
@@ -159,14 +158,9 @@ class ConnectorStateMachine:
         """
         job = self._db.get_connector(connector_name)
         if not job:
-            logger.warning(
-                "Grafana alert does not map to an active connector",
-                extra={
-                    "event": "grafana_webhook_connector_not_found",
-                    "connector_name": connector_name,
-                },
-            )
-            return None
+            job = self._enqueue_failed_connector(connector_name)
+            if job is None:
+                return None
         processed = self._process_job_safely(
             job,
             failure_confirmed=failure_confirmed,
@@ -199,6 +193,7 @@ class ConnectorStateMachine:
             )
             return ConnectorProcessingOutcome(processed=False)
         try:
+            self._db.start_processing(job.id)
             requires_followup = self._process_job(
                 job,
                 failure_confirmed=failure_confirmed,
@@ -229,6 +224,15 @@ class ConnectorStateMachine:
             )
         finally:
             lock.release()
+        if not requires_followup:
+            requires_followup = False
+        else:
+            refreshed = self._db.get_connector_by_id(job.id)
+            if refreshed is not None:
+                self._db.wait_for_next_attempt(
+                    job.id,
+                    self._action_wait_until(refreshed) or utc_now(),
+                )
         return ConnectorProcessingOutcome(
             processed=True,
             requires_followup=requires_followup,
@@ -305,11 +309,6 @@ class ConnectorStateMachine:
         failed_count = max(job.failed_count, self._failure_confirm_checks)
         if failed_count == job.failed_count:
             return job
-        self._db.update_connector_fields(
-            job.id,
-            failed_count=failed_count,
-            last_failed_at=result.checked_at,
-        )
         return job.copy(failed_count=failed_count)
 
     @staticmethod
@@ -322,17 +321,9 @@ class ConnectorStateMachine:
 
     def _handle_kafka_connect_unreachable(self, job: JobLike) -> None:
         self._healthy_since.pop(str(job["id"]), None)
-        self._db.update_connector_fields(
-            job["id"],
-            last_failed_at=utc_now(),
-        )
 
     def _handle_not_created(self, job: JobLike, result: HealthResult) -> None:
         self._healthy_since.pop(str(job["id"]), None)
-        self._db.update_connector_fields(
-            job["id"],
-            last_failed_at=result.checked_at,
-        )
 
     def _handle_healthy(self, job: JobLike, result: HealthResult) -> None:
         latest_event = job.get("latest_event_type")
@@ -345,7 +336,7 @@ class ConnectorStateMachine:
             self._record_recovered(job, result)
             return
 
-        self._refresh_connector_scn(job, result=result)
+        # No action is needed for a healthy queue item without an incident step.
 
     def _handle_post_action_healthy(
         self,
@@ -373,12 +364,7 @@ class ConnectorStateMachine:
     def _record_recovered(self, job: JobLike, result: HealthResult) -> None:
         details = recovery_details(job, result)
         if details["healing_steps"] == "NO_AUTOMATED_STEP":
-            self._db.update_connector_fields(
-                job["id"],
-                failed_count=0,
-                failed_connector=False,
-                failed_task=False,
-            )
+            self._db.complete(job["id"], "RECOVERED")
             self._healthy_since.pop(str(job["id"]), None)
             return
         self._delete_superseded_connector_if_needed(job, details)
@@ -394,12 +380,7 @@ class ConnectorStateMachine:
             message=recovery_message(details),
             details=details,
         )
-        self._db.update_connector_fields(
-            job["id"],
-            failed_count=0,
-            failed_connector=False,
-            failed_task=False,
-        )
+        self._db.complete(job["id"], "RECOVERED")
         self._healthy_since.pop(str(job["id"]), None)
 
     def _delete_superseded_connector_if_needed(
@@ -441,36 +422,49 @@ class ConnectorStateMachine:
         job = ConnectorJob.from_mapping(job)
         self._healthy_since.pop(str(job.id), None)
 
+        # Terminal queue items must not accumulate duplicate observations.
+        current_decision = self._transitions.decide_unhealthy(
+            job,
+            has_failed_tasks=bool(result.failed_task_ids or job.failed_task),
+        )
+        if current_decision.action == RecoveryAction.STOP:
+            self._db.complete(job.id, "ESCALATED")
+            return
+
+        failed_count = clamp_failed_count(
+            job.failed_count + 1,
+            self._policy.max_failed_count,
+        )
+        self._db.record_connector_log(
+            connector_id=job.id,
+            connector_name=job.connector_name,
+            incident_id=active_incident_id(job),
+            event_type=EventType.HEALTH_FAILURE_OBSERVED,
+            attempt_no=failed_count,
+            healing_step=HealingStep.DETECT,
+            has_next_step=True,
+            severity="WARNING",
+            message=failure_message(result),
+            details=failure_details(
+                result,
+                task_ids=result.failed_task_ids,
+                failed_count=failed_count,
+            ),
+        )
+        job = job.copy(
+            failed_count=failed_count,
+            failed_task=bool(result.failed_task_ids),
+            failed_connector=not bool(result.failed_task_ids),
+        )
+
         decision = self._transitions.decide_unhealthy(
             job,
             has_failed_tasks=bool(result.failed_task_ids or job.failed_task),
         )
 
-        if decision.action == RecoveryAction.STOP:
-            fields: dict[str, Any] = {
-                "is_active": False,
-                "last_failed_at": result.checked_at,
-            }
-            if job.failed_count >= self._policy.max_failed_count:
-                fields["failed_count"] = self._policy.max_failed_count
-            self._db.update_connector_fields(job["id"], **fields)
-            return
-
         incident_id = self._db.ensure_active_incident(job["id"])
-        failed_count = clamp_failed_count(
-            job.failed_count,
-            self._policy.max_failed_count,
-        )
 
         if decision.action == RecoveryAction.DEBOUNCE:
-            self._db.update_connector_fields(
-                job["id"],
-                failed_count=clamp_failed_count(
-                    failed_count + 1,
-                    self._policy.max_failed_count,
-                ),
-                last_failed_at=result.checked_at,
-            )
             return
 
         if failed_count == self._failure_confirm_checks:
@@ -503,7 +497,6 @@ class ConnectorStateMachine:
                 decision.attempted_event,
             ):
                 return
-            self._refresh_connector_scn(job, result=result, force=True)
             self._actions.restart_failed_tasks(job, result, incident_id)
             return
 
@@ -516,7 +509,6 @@ class ConnectorStateMachine:
                 decision.attempted_event,
             ):
                 return
-            self._refresh_connector_scn(job, result=result, force=True)
             self._actions.restart_connector(job, result, incident_id)
             return
 
@@ -564,15 +556,12 @@ class ConnectorStateMachine:
     def _load_runtime_config(self, job: ConnectorJob) -> ConnectorJob:
         if job.active_config is not None:
             return job
-        refreshed = self._db.get_connector_by_id(
-            job.id,
-            include_runtime_config=True,
-        )
-        if refreshed is None:
+        config = self._client.get_config(job.connector_name)
+        if config is None:
             raise RuntimeError(
-                f"Connector {job.connector_name} disappeared before recreate"
+                f"Connector {job.connector_name} has no readable runtime config"
             )
-        return ConnectorJob.from_mapping(refreshed)
+        return job.copy(active_config=config)
 
     def _run_recreate_with_offset_retry_or_escalate(
         self,
@@ -620,30 +609,44 @@ class ConnectorStateMachine:
             return latest_at + timedelta(seconds=self._recreate_verify_wait_seconds)
         return None
 
-    def _refresh_connector_scn(
-        self,
-        job: JobLike,
-        *,
-        result: HealthResult | None = None,
-        force: bool = False,
-    ) -> None:
-        connector_id = str(job["id"])
-        now = utc_now()
-        if not force:
-            last_fetch_at = self._last_scn_fetch_at.get(connector_id)
-            if (
-                last_fetch_at
-                and now - last_fetch_at < timedelta(seconds=self._scn_poll_interval_seconds)
-            ):
-                return
-        offsets = self._client.get_offsets(job["connector_name"])
-        self._last_scn_fetch_at[connector_id] = now
-        scn, commit_scn = extract_last_scn(offsets)
-        if not scn and not commit_scn:
+    def _discover_failed_connectors(self) -> None:
+        try:
+            connector_names = self._client.list_connectors()
+        except Exception as exc:
+            logger.warning(
+                "could not discover Kafka Connect connectors: %s",
+                exc,
+                extra={"event": "connector_discovery_failed"},
+            )
             return
-        fields: dict[str, Any] = {}
-        if scn:
-            fields["last_scn"] = scn
-        if commit_scn:
-            fields["last_commit_scn"] = commit_scn
-        self._db.update_connector_fields(job["id"], **fields)
+        for connector_name in connector_names:
+            if self._client.status_circuit_open:
+                return
+            if self._db.get_connector(connector_name) is not None:
+                continue
+            self._enqueue_failed_connector(connector_name)
+
+    def _enqueue_failed_connector(self, connector_name: str) -> ConnectorJob | None:
+        result = self._checker.check(connector_name)
+        if result is None or result.is_healthy or result.status == HealthStatus.STOPPED:
+            return None
+        connector_class = None
+        healing_mode = "RESTART_ONLY"
+        try:
+            config = self._client.get_config(connector_name) or {}
+            connector_class = config.get("connector.class")
+            if str(connector_class).startswith("io.debezium.connector.oracle."):
+                healing_mode = "RECOVERY"
+        except Exception as exc:
+            logger.warning(
+                "[%s] could not read connector config; using restart-only queue: %s",
+                connector_name,
+                exc,
+                extra={"event": "connector_config_discovery_failed", "connector_name": connector_name},
+            )
+        return self._db.enqueue_connector(
+            root_connector_name=connector_name,
+            current_connector_name=connector_name,
+            connector_class=connector_class,
+            healing_mode=healing_mode,
+        )
