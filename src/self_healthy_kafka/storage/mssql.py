@@ -59,6 +59,47 @@ class HealingRepository:
             include_runtime_config=include_runtime_config,
         )
 
+    def list_queue_for_chat(
+        self,
+        *,
+        queue_id: Any | None = None,
+        connector_name: str | None = None,
+    ) -> list[ConnectorJob]:
+        return self._connectors.list_queue_for_chat(
+            queue_id=queue_id,
+            connector_name=connector_name,
+        )
+
+    def get_failure_ranking(
+        self,
+        *,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self._connectors.get_failure_ranking(
+            from_at=from_at,
+            to_at=to_at,
+            limit=limit,
+        )
+
+    def list_healing_logs(
+        self,
+        *,
+        queue_id: str | None,
+        connector_name: str | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self._logs.list_for_chat(
+            queue_id=queue_id,
+            connector_name=connector_name,
+            from_at=from_at,
+            to_at=to_at,
+            limit=limit,
+        )
+
     def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:
         self._connectors.update_queue_fields(queue_id, **fields)
 

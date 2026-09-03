@@ -12,7 +12,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from self_healthy_kafka.config import GrafanaWebhookConfig
+from self_healthy_kafka.config import (
+    ChatApiConfig,
+    GrafanaWebhookConfig,
+    OllamaChatConfig,
+)
+from self_healthy_kafka.webhook.chat_api import ChatReadApi
+from self_healthy_kafka.webhook.ollama_chat import OllamaChatService
 from self_healthy_kafka.webhook.security import (
     EventDeduplicator,
     WebhookAuthenticator,
@@ -77,6 +83,12 @@ class GrafanaWebhookService:
         self,
         config: GrafanaWebhookConfig,
         process_connector: Callable[[str, bool], str | None],
+        *,
+        chat_api_config: ChatApiConfig | None = None,
+        queue_lookup: Callable[[str | None, str | None], list[Any]] | None = None,
+        healing_logs: Callable[..., list[dict[str, Any]]] | None = None,
+        ollama_chat_config: OllamaChatConfig | None = None,
+        failure_ranking: Callable[..., list[dict[str, Any]]] | None = None,
     ):
         self._config = config
         self._process_connector = process_connector
@@ -84,6 +96,24 @@ class GrafanaWebhookService:
             maxsize=config.queue_size
         )
         self._authenticator = WebhookAuthenticator(config)
+        self._chat_api = (
+            ChatReadApi(
+                chat_api_config,
+                queue_lookup=queue_lookup or (lambda _queue_id, _connector_name: []),
+                healing_logs=healing_logs or (lambda **_kwargs: []),
+            )
+            if chat_api_config is not None
+            else None
+        )
+        self._ollama_chat = (
+            OllamaChatService(
+                ollama_chat_config,
+                read_api=self._chat_api,
+                failure_ranking=failure_ranking or (lambda **_kwargs: []),
+            )
+            if ollama_chat_config is not None and self._chat_api is not None
+            else None
+        )
         self._deduplicator = EventDeduplicator(config.dedupe_ttl_seconds)
         self._followup_lock = threading.Lock()
         self._followup_timers: dict[str, threading.Timer] = {}
@@ -93,7 +123,7 @@ class GrafanaWebhookService:
         self._stopping = threading.Event()
 
     def start(self) -> None:
-        if not self._config.enabled:
+        if not self._config.enabled and not (self._chat_api and self._chat_api.enabled):
             return
         self._validate_config()
         handler = self._handler_class()
@@ -102,14 +132,15 @@ class GrafanaWebhookService:
             handler,
         )
         self._server.daemon_threads = True
-        self._worker_threads = [
-            threading.Thread(
-                target=self._run_worker,
-                name=f"grafana-webhook-worker-{index + 1}",
-                daemon=True,
-            )
-            for index in range(self._config.worker_count)
-        ]
+        if self._config.enabled:
+            self._worker_threads = [
+                threading.Thread(
+                    target=self._run_worker,
+                    name=f"grafana-webhook-worker-{index + 1}",
+                    daemon=True,
+                )
+                for index in range(self._config.worker_count)
+            ]
         self._server_thread = threading.Thread(
             target=self._server.serve_forever,
             name="grafana-webhook-http",
@@ -119,19 +150,25 @@ class GrafanaWebhookService:
             worker.start()
         self._server_thread.start()
         logger.info(
-            "Grafana webhook receiver started",
+            "HTTP receiver started",
             extra={
-                "event": "grafana_webhook_started",
+                "event": "http_receiver_started",
                 "host": self._config.host,
                 "port": self._config.port,
-                "path": self._config.path,
+                "webhook_path": self._config.path if self._config.enabled else None,
+                "chat_api_path_prefix": (
+                    self._chat_api.path_prefix if self._chat_api and self._chat_api.enabled else None
+                ),
+                "ollama_chat_path": (
+                    self._ollama_chat.path if self._ollama_chat and self._ollama_chat.enabled else None
+                ),
                 "auth_mode": self._config.auth_mode,
                 "worker_count": self._config.worker_count,
             },
         )
 
     def close(self) -> None:
-        if not self._config.enabled:
+        if not self._config.enabled and not (self._chat_api and self._chat_api.enabled):
             return
         self._stopping.set()
         with self._followup_lock:
@@ -191,14 +228,21 @@ class GrafanaWebhookService:
         )
 
     def _validate_config(self) -> None:
-        if not self._config.path.startswith("/"):
-            raise ValueError("GRAFANA_WEBHOOK_PATH must start with '/'")
-        if not self._config.secret:
-            raise ValueError("GRAFANA_WEBHOOK_SECRET is required when webhook is enabled")
-        if self._config.auth_mode.strip().lower() not in {"bearer", "hmac"}:
-            raise ValueError("GRAFANA_WEBHOOK_AUTH_MODE must be 'bearer' or 'hmac'")
-        if self._config.worker_count < 1:
-            raise ValueError("GRAFANA_WEBHOOK_WORKER_COUNT must be at least 1")
+        if self._config.enabled:
+            if not self._config.path.startswith("/"):
+                raise ValueError("GRAFANA_WEBHOOK_PATH must start with '/'")
+            if not self._config.secret:
+                raise ValueError("GRAFANA_WEBHOOK_SECRET is required when webhook is enabled")
+            if self._config.auth_mode.strip().lower() not in {"bearer", "hmac"}:
+                raise ValueError("GRAFANA_WEBHOOK_AUTH_MODE must be 'bearer' or 'hmac'")
+            if self._config.worker_count < 1:
+                raise ValueError("GRAFANA_WEBHOOK_WORKER_COUNT must be at least 1")
+        if self._chat_api and self._chat_api.enabled:
+            self._chat_api.validate()
+        if self._ollama_chat and self._ollama_chat.enabled:
+            if not self._chat_api or not self._chat_api.enabled:
+                raise ValueError("CHAT_API_ENABLED must be true when Ollama chat is enabled")
+            self._ollama_chat.validate()
 
     def _claim_event(self, event: GrafanaAlertEvent) -> bool:
         return self._deduplicator.claim(event.dedupe_key)
@@ -305,24 +349,76 @@ class GrafanaWebhookService:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                if self.path == "/health":
+                request_url = urlsplit(self.path)
+                if request_url.path == "/health":
                     self._json_response(HTTPStatus.OK, {"status": "ok"})
+                    return
+                if service._chat_api and service._chat_api.enabled:
+                    if not service._chat_api.is_authorized(
+                        self.headers.get("Authorization", "")
+                    ):
+                        self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "invalid chat API authentication"})
+                        return
+                    try:
+                        status, payload = service._chat_api.handle_get(
+                            request_url.path,
+                            parse_qs(request_url.query),
+                        )
+                    except ValueError as exc:
+                        self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._json_response(HTTPStatus(status), payload)
                     return
                 self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
             def do_POST(self) -> None:
                 request_url = urlsplit(self.path)
+                if (
+                    service._ollama_chat
+                    and service._ollama_chat.enabled
+                    and request_url.path == service._ollama_chat.path
+                ):
+                    if not service._chat_api or not service._chat_api.is_authorized(
+                        self.headers.get("Authorization", "")
+                    ):
+                        self._json_response(
+                            HTTPStatus.UNAUTHORIZED,
+                            {"error": "invalid chat API authentication"},
+                        )
+                        return
+                    payload = self._read_json_body()
+                    if payload is None:
+                        return
+                    question = payload.get("question")
+                    if not isinstance(question, str):
+                        self._json_response(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "question must be a string"},
+                        )
+                        return
+                    try:
+                        result = service._ollama_chat.ask(question)
+                    except ValueError as exc:
+                        self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    except Exception:
+                        logger.exception("Ollama chat request failed", extra={"event": "ollama_chat_failed"})
+                        self._json_response(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "chat model is unavailable"},
+                        )
+                        return
+                    self._json_response(HTTPStatus.OK, result)
+                    return
+                if not service._config.enabled:
+                    self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
                 if request_url.path != service._config.path:
                     self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
-                length = int(self.headers.get("Content-Length") or 0)
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._json_response(
-                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                        {"error": "invalid body size"},
-                    )
+                body = self._read_body()
+                if body is None:
                     return
-                body = self.rfile.read(length)
                 query_token = (parse_qs(request_url.query).get("token") or [""])[0]
                 if not service.verify_request(
                     self.headers,
@@ -365,10 +461,33 @@ class GrafanaWebhookService:
                 result = service.submit(payload)
                 self._json_response(HTTPStatus.ACCEPTED, result)
 
+            def _read_json_body(self) -> dict[str, Any] | None:
+                body = self._read_body()
+                if body is None:
+                    return None
+                try:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        raise ValueError("payload must be an object")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return None
+                return payload
+
+            def _read_body(self) -> bytes | None:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0 or length > MAX_BODY_BYTES:
+                    self._json_response(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": "invalid body size"},
+                    )
+                    return None
+                return self.rfile.read(length)
+
             def log_message(self, format: str, *args) -> None:
                 logger.debug("Grafana webhook HTTP: " + format, *args)
 
-            def _json_response(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+            def _json_response(self, status: HTTPStatus, payload: Any) -> None:
                 body = json.dumps(payload).encode("utf-8")
                 self._write_response(
                     status,

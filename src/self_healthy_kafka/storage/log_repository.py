@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
-from self_healthy_kafka.storage.common import json_value
+from self_healthy_kafka.storage.common import json_value, rows_to_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,24 @@ class MssqlConnectorLogRepository:
             has_next_step=has_next_step,
             details=log_details,
         )
+
+    def list_for_chat(
+        self,
+        *,
+        queue_id: str | None,
+        connector_name: str | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "EXEC dbo.spGetConnectorHealingLogs "
+                    "@QueueId = ?, @ConnectorName = ?, @FromAt = ?, @ToAt = ?, @Limit = ?",
+                    (queue_id, connector_name, from_at, to_at, limit),
+                )
+                return rows_to_dicts(cur)
 
 def _connector_log_details(
     *,

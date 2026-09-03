@@ -9,6 +9,8 @@ TABLE_FILES = ("ConnectorHealingQueue.sql", "ConnectorHealingLogs.sql")
 PROCEDURE_NAMES = {
     "spEnqueueConnectorHealing",
     "spGetConnectorHealingQueue",
+    "spGetConnectorHealingLogs",
+    "spGetConnectorFailureRanking",
     "spInsertConnectorHealingLog",
     "spUpdateConnectorHealingQueue",
 }
@@ -45,6 +47,7 @@ def test_environment_files_only_define_healing_runtime_endpoints():
         assert f"APP_ENV={environment}" in source
         assert "KAFKA_CONNECT_URL=" in source
         assert "MSSQL_CONNECTION_STRING=" in source
+        assert "OLLAMA_ENABLED=" in source
         for key in removed_keys:
             assert key not in source
 

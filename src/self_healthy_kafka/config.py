@@ -121,6 +121,26 @@ class GrafanaWebhookConfig:
 
 
 @dataclass
+class ChatApiConfig:
+    enabled: bool = _env_bool("CHAT_API_ENABLED")
+    path_prefix: str = _env("CHAT_API_PATH_PREFIX")
+    token: str = _env("CHAT_API_TOKEN")
+    default_limit: int = _env("CHAT_API_DEFAULT_LIMIT", int)
+    max_limit: int = _env("CHAT_API_MAX_LIMIT", int)
+
+
+@dataclass
+class OllamaChatConfig:
+    enabled: bool = _env_bool("OLLAMA_ENABLED")
+    base_url: str = _env("OLLAMA_BASE_URL")
+    model: str = _env("OLLAMA_MODEL")
+    request_timeout_seconds: float = _env("OLLAMA_REQUEST_TIMEOUT_SECONDS", float)
+    max_tool_rounds: int = _env("OLLAMA_MAX_TOOL_ROUNDS", int)
+    think: bool = _env_bool("OLLAMA_THINK")
+    max_tokens: int = _env("OLLAMA_MAX_TOKENS", int)
+
+
+@dataclass
 class StateMachineConfig:
     failure_confirm_checks: int       = _env("FAILURE_CONFIRM_CHECKS", int)
     task_restart_max_attempts: int    = _env("TASK_RESTART_MAX_ATTEMPTS", int)
@@ -151,6 +171,8 @@ class AppConfig:
     kafka_connect: KafkaConnectConfig = field(default_factory=KafkaConnectConfig)
     polling: PollingConfig            = field(default_factory=PollingConfig)
     grafana_webhook: GrafanaWebhookConfig = field(default_factory=GrafanaWebhookConfig)
+    chat_api: ChatApiConfig = field(default_factory=ChatApiConfig)
+    ollama_chat: OllamaChatConfig = field(default_factory=OllamaChatConfig)
     state_machine: StateMachineConfig = field(default_factory=StateMachineConfig)
     mssql: MssqlConfig                = field(default_factory=MssqlConfig)
     logging: LoggingConfig            = field(default_factory=LoggingConfig)

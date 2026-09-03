@@ -44,4 +44,12 @@ def build_grafana_webhook(
     return GrafanaWebhookService(
         config=cfg.grafana_webhook,
         process_connector=state_machine.process_connector,
+        chat_api_config=cfg.chat_api,
+        ollama_chat_config=cfg.ollama_chat,
+        queue_lookup=lambda queue_id, connector_name: state_machine.db.list_queue_for_chat(
+            queue_id=queue_id,
+            connector_name=connector_name,
+        ),
+        healing_logs=state_machine.db.list_healing_logs,
+        failure_ranking=state_machine.db.get_failure_ranking,
     )

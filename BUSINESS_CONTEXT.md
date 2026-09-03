@@ -35,6 +35,39 @@ configuration or credentials.
 The application exposes `GET /health` on the webhook HTTP server. There is no
 `/metrics` endpoint.
 
+## Chatbot Context API
+
+When `CHAT_API_ENABLED=true`, the existing HTTP server additionally exposes a
+read-only, bearer-token-protected API under `CHAT_API_PATH_PREFIX`:
+
+- `GET /api/v1/incidents`: queue history; `status` can be `all`, `open`,
+  `completed`, or `escalated`.
+- `GET /api/v1/incidents/{queue_id}`: one queue item and its healing logs.
+- `GET /api/v1/healing-logs`: healing logs filtered by `queue_id`,
+  `connector_name`, `from`, `to`, and `limit`.
+
+This API is the LLM tool boundary. It never exposes arbitrary SQL, Kafka
+Connect runtime configuration, or credentials. Sensitive keys found in log
+details are redacted before the response is returned. Ollama cannot perform
+healing actions.
+
+When `OLLAMA_ENABLED=true`, `POST /api/v1/chat` accepts `{"question":"..."}`
+with the same bearer token. The local Ollama model can call only the read-only
+tools above plus `dbo.spGetConnectorFailureRanking`. For a question such as
+"liệt kê top connector chết nhiều nhất", the procedure groups actual
+`ConnectorHealingQueue` incidents by `RootConnectorName`; the returned count
+is therefore not hardcoded and is not affected by versioned recreate names.
+After that tool is called, the API formats the ranking from the SP result
+itself, rather than relying on the model to reproduce numeric values.
+For local CPU deployments, bound each model turn with `OLLAMA_MAX_TOKENS`.
+Tool-capable reasoning models may need `OLLAMA_THINK=true` to emit a valid tool
+call; these settings control response latency only and do not change the
+SQL-backed answer contract.
+Routine start-of-day queries are routed directly to the relevant read tool:
+failure ranking, open/escalated/recovered incidents, and healing history. This
+is intent routing only; all returned values remain database results. It keeps
+the answer accurate when a local model does not emit a tool call.
+
 ## Healing Flow
 
 Healing mode is selected when an incident is queued. Generic connectors use
@@ -72,10 +105,12 @@ The application owns two tables:
 - `ConnectorHealingLogs`: append-only actions and observations belonging to a
   queue item through `QueueId`.
 
-The runtime calls exactly four stored procedures:
+The runtime calls six stored procedures:
 
 - `dbo.spEnqueueConnectorHealing`
 - `dbo.spGetConnectorHealingQueue`
+- `dbo.spGetConnectorHealingLogs`
+- `dbo.spGetConnectorFailureRanking`
 - `dbo.spInsertConnectorHealingLog`
 - `dbo.spUpdateConnectorHealingQueue`
 

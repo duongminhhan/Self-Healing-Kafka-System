@@ -7,7 +7,11 @@ import json
 import threading
 import time
 
-from self_healthy_kafka.config import GrafanaWebhookConfig
+from self_healthy_kafka.config import (
+    ChatApiConfig,
+    GrafanaWebhookConfig,
+    OllamaChatConfig,
+)
 from self_healthy_kafka.webhook.grafana import (
     GrafanaWebhookService,
     parse_grafana_alerts,
@@ -49,6 +53,32 @@ def _payload(status: str = "firing") -> dict:
             }
         ],
     }
+
+
+def _chat_config(**overrides) -> ChatApiConfig:
+    values = {
+        "enabled": True,
+        "path_prefix": "/api/v1",
+        "token": "chat-test-token",
+        "default_limit": 10,
+        "max_limit": 50,
+    }
+    values.update(overrides)
+    return ChatApiConfig(**values)
+
+
+def _ollama_config(**overrides) -> OllamaChatConfig:
+    values = {
+        "enabled": True,
+        "base_url": "http://127.0.0.1:11434",
+        "model": "tool-model",
+        "request_timeout_seconds": 10,
+        "max_tool_rounds": 3,
+        "think": False,
+        "max_tokens": 256,
+    }
+    values.update(overrides)
+    return OllamaChatConfig(**values)
 
 
 def test_parse_grafana_alert_accepts_connector_label():
@@ -215,6 +245,87 @@ def test_metrics_endpoint_is_not_exposed():
         response.read()
 
         assert response.status == 404
+    finally:
+        service.close()
+
+
+def test_chat_api_returns_read_only_incidents_with_its_own_token():
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        queue_lookup=lambda _queue_id, _connector_name: [{
+            "id": "queue-1",
+            "active_incident_id": "queue-1",
+            "root_connector_name": "TEST-CONNECTOR",
+            "connector_name": "TEST-CONNECTOR.001",
+            "queue_status": "COMPLETED",
+            "final_outcome": "RECOVERED",
+        }],
+        healing_logs=lambda **_kwargs: [],
+    )
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "GET",
+            "/api/v1/incidents?status=completed",
+            headers={"Authorization": "Bearer chat-test-token"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == 200
+        assert payload["items"][0]["connector_name"] == "TEST-CONNECTOR.001"
+
+        connection.request("GET", "/api/v1/incidents")
+        denied = connection.getresponse()
+        denied.read()
+        assert denied.status == 401
+    finally:
+        service.close()
+
+
+def test_chat_endpoint_requires_chat_token_and_returns_ollama_answer():
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        ollama_chat_config=_ollama_config(),
+        queue_lookup=lambda _queue_id, _connector_name: [],
+        healing_logs=lambda **_kwargs: [],
+        failure_ranking=lambda **_kwargs: [],
+    )
+    service._ollama_chat.ask = lambda question: {"answer": question, "sources": []}
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "POST",
+            "/api/v1/chat",
+            body=json.dumps({"question": "liệt kê top connector chết nhiều nhất"}),
+            headers={
+                "Authorization": "Bearer chat-test-token",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == 200
+        assert payload["answer"] == "liệt kê top connector chết nhiều nhất"
+
+        connection.request(
+            "POST",
+            "/api/v1/chat",
+            body=json.dumps({"question": "top"}),
+            headers={"Content-Type": "application/json"},
+        )
+        denied = connection.getresponse()
+        denied.read()
+        assert denied.status == 401
     finally:
         service.close()
 

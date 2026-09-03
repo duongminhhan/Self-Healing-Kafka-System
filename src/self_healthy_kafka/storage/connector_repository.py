@@ -65,6 +65,34 @@ class MssqlConnectorRepository:
         rows = self._get_queue_items(queue_id=connector_id)
         return rows[0] if rows else None
 
+    def list_queue_for_chat(
+        self,
+        *,
+        queue_id: Any | None = None,
+        connector_name: str | None = None,
+    ) -> list[ConnectorJob]:
+        return self._get_queue_items(
+            queue_id=queue_id,
+            connector_name=connector_name,
+            open_only=False,
+        )
+
+    def get_failure_ranking(
+        self,
+        *,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "EXEC dbo.spGetConnectorFailureRanking "
+                    "@FromAt = ?, @ToAt = ?, @Limit = ?",
+                    (from_at, to_at, limit),
+                )
+                return rows_to_dicts(cur)
+
     def enqueue_connector(
         self,
         *,
@@ -138,13 +166,14 @@ class MssqlConnectorRepository:
         queue_id: Any | None = None,
         connector_name: str | None = None,
         due_only: bool = False,
+        open_only: bool = True,
     ) -> list[ConnectorJob]:
         with self._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "EXEC dbo.spGetConnectorHealingQueue "
-                    "@QueueId = ?, @ConnectorName = ?, @OpenOnly = 1, @DueOnly = ?",
-                    (queue_id, connector_name, due_only),
+                    "@QueueId = ?, @ConnectorName = ?, @OpenOnly = ?, @DueOnly = ?",
+                    (queue_id, connector_name, open_only, due_only),
                 )
                 return [self._hydrate_queue_row(row) for row in rows_to_dicts(cur)]
 
