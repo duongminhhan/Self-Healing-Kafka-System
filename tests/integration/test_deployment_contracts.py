@@ -10,6 +10,8 @@ PROCEDURE_NAMES = {
     "spEnqueueConnectorHealing",
     "spGetConnectorHealingQueue",
     "spGetConnectorHealingLogs",
+    "spSearchConnectorHealingLogs",
+    "spGetConnectorIncidentFacts",
     "spGetConnectorFailureRanking",
     "spInsertConnectorHealingLog",
     "spUpdateConnectorHealingQueue",

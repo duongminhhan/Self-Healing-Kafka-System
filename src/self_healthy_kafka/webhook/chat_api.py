@@ -57,10 +57,12 @@ class ChatReadApi:
         *,
         queue_lookup: Callable[[str | None, str | None], list[Any]],
         healing_logs: Callable[..., list[dict[str, Any]]],
+        log_search: Callable[[str, int], list[dict[str, Any]]] | None = None,
     ):
         self._config = config
         self._queue_lookup = queue_lookup
         self._healing_logs = healing_logs
+        self._log_search = log_search or (lambda _question, _limit: [])
 
     @property
     def enabled(self) -> bool:
@@ -69,6 +71,10 @@ class ChatReadApi:
     @property
     def path_prefix(self) -> str:
         return self._config.path_prefix
+
+    @property
+    def max_limit(self) -> int:
+        return self._config.max_limit
 
     def validate(self) -> None:
         if not self._config.path_prefix.startswith("/"):
@@ -84,6 +90,10 @@ class ChatReadApi:
         if not authorization.startswith("Bearer "):
             return False
         return hmac.compare_digest(authorization[7:].strip(), self._config.token)
+
+    def retrieve_log_context(self, question: str, limit: int) -> list[dict[str, Any]]:
+        """Return only redacted, DB-retrieved log evidence for an LLM prompt."""
+        return [_log_json(item) for item in self._log_search(question, limit)]
 
     def handle_get(self, path: str, query: Mapping[str, list[str]]) -> tuple[int, dict[str, Any]]:
         prefix = self._config.path_prefix.rstrip("/")

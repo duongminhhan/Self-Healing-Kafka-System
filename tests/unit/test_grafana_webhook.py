@@ -73,9 +73,9 @@ def _ollama_config(**overrides) -> OllamaChatConfig:
         "base_url": "http://127.0.0.1:11434",
         "model": "tool-model",
         "request_timeout_seconds": 10,
-        "max_tool_rounds": 3,
         "think": False,
         "max_tokens": 256,
+        "context_log_limit": 20,
     }
     values.update(overrides)
     return OllamaChatConfig(**values)
@@ -245,6 +245,42 @@ def test_metrics_endpoint_is_not_exposed():
         response.read()
 
         assert response.status == 404
+    finally:
+        service.close()
+
+
+def test_chat_ui_is_served_without_auth_and_chat_post_still_requires_token():
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        ollama_chat_config=_ollama_config(),
+        queue_lookup=lambda _queue_id, _connector_name: [],
+        healing_logs=lambda **_kwargs: [],
+        failure_ranking=lambda **_kwargs: [],
+    )
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        page = response.read().decode()
+
+        assert response.status == 200
+        assert response.getheader("Content-Type") == "text/html; charset=utf-8"
+        assert "Self-Healing Kafka Assistant" in page
+        assert "ConnectorHealingLogs" in page
+
+        connection.request(
+            "POST",
+            "/api/v1/chat",
+            body=json.dumps({"question": "ORA-01291"}),
+            headers={"Content-Type": "application/json"},
+        )
+        denied = connection.getresponse()
+        denied.read()
+        assert denied.status == 401
     finally:
         service.close()
 

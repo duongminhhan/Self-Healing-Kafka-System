@@ -1,0 +1,2 @@
+-r ../shared/requirements.txt
+google-genai>=1.75,<2

@@ -135,9 +135,21 @@ class OllamaChatConfig:
     base_url: str = _env("OLLAMA_BASE_URL")
     model: str = _env("OLLAMA_MODEL")
     request_timeout_seconds: float = _env("OLLAMA_REQUEST_TIMEOUT_SECONDS", float)
-    max_tool_rounds: int = _env("OLLAMA_MAX_TOOL_ROUNDS", int)
     think: bool = _env_bool("OLLAMA_THINK")
     max_tokens: int = _env("OLLAMA_MAX_TOKENS", int)
+    context_log_limit: int = _env("OLLAMA_CONTEXT_LOG_LIMIT", int)
+
+
+@dataclass
+class AnalyticsChatConfig:
+    """Optional HF-backed semantic analytics, kept separate from the UI token."""
+
+    enabled: bool = os.getenv("CHAT_ANALYTICS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    timezone: str = os.getenv("CHAT_ANALYTICS_TIMEZONE", "UTC")
+    hf_endpoint_url: str = os.getenv("HF_CHAT_ENDPOINT_URL", "")
+    hf_token: str = os.getenv("HF_CHAT_TOKEN", "")
+    hf_model_id: str = os.getenv("HF_CHAT_MODEL_ID", "")
+    hf_request_timeout_seconds: float = float(os.getenv("HF_CHAT_REQUEST_TIMEOUT_SECONDS", "30"))
 
 
 @dataclass
@@ -173,6 +185,7 @@ class AppConfig:
     grafana_webhook: GrafanaWebhookConfig = field(default_factory=GrafanaWebhookConfig)
     chat_api: ChatApiConfig = field(default_factory=ChatApiConfig)
     ollama_chat: OllamaChatConfig = field(default_factory=OllamaChatConfig)
+    analytics_chat: AnalyticsChatConfig = field(default_factory=AnalyticsChatConfig)
     state_machine: StateMachineConfig = field(default_factory=StateMachineConfig)
     mssql: MssqlConfig                = field(default_factory=MssqlConfig)
     logging: LoggingConfig            = field(default_factory=LoggingConfig)

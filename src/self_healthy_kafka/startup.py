@@ -32,7 +32,13 @@ def _connection_target(connection_string: str) -> str:
 
 def validate_environment() -> None:
     _check_mssql()
-    _check_kafka_connect()
+    if cfg.polling.enabled or cfg.grafana_webhook.enabled:
+        _check_kafka_connect()
+    else:
+        logger.info(
+            "Kafka Connect pre-flight skipped because only the read-only chat API is enabled",
+            extra={"event": "startup_kc_check_skipped_chat_only"},
+        )
 
 
 def log_effective_config() -> None:

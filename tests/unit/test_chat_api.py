@@ -80,6 +80,25 @@ def test_chat_api_redacts_sensitive_log_details():
     assert payload["items"][0]["details"]["reason"] == "FAILED"
 
 
+def test_chat_api_retrieval_context_is_redacted_before_the_llm_receives_it():
+    api = ChatReadApi(
+        _config(),
+        queue_lookup=lambda _queue_id, _connector_name: [],
+        healing_logs=lambda **_kwargs: [],
+        log_search=lambda question, limit: [{
+            "id": "log-1",
+            "message": question,
+            "details": '{"token":"do-not-return"}',
+            "created_at": datetime(2026, 8, 11, tzinfo=timezone.utc),
+        }],
+    )
+
+    rows = api.retrieve_log_context("ORA-01291", 20)
+
+    assert rows[0]["message"] == "ORA-01291"
+    assert rows[0]["details"]["token"] == "[REDACTED]"
+
+
 def test_chat_api_rejects_invalid_time_range():
     with pytest.raises(ValueError, match="ISO-8601"):
         _api().handle_get("/api/v1/healing-logs", {"from": ["2026-08-11"]})

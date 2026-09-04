@@ -97,6 +97,46 @@ class MssqlConnectorLogRepository:
                 )
                 return rows_to_dicts(cur)
 
+    def search_for_chat(self, *, question: str, limit: int) -> list[dict[str, Any]]:
+        """Retrieve relevant persisted Kafka Connect logs without accepting SQL."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "EXEC dbo.spSearchConnectorHealingLogs @SearchText = ?, @Limit = ?",
+                    (question, limit),
+                )
+                return rows_to_dicts(cur)
+
+    def list_incident_facts_for_chat(
+        self,
+        *,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        event_type: str | None,
+        final_outcome: str | None,
+        connector_name: str | None,
+        error_code: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Run the fixed, read-only analytics procedure with bound parameters."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "EXEC dbo.spGetConnectorIncidentFacts "
+                    "@FromAt = ?, @ToAt = ?, @EventType = ?, @FinalOutcome = ?, "
+                    "@ConnectorName = ?, @ErrorCode = ?, @Limit = ?",
+                    (
+                        from_at,
+                        to_at,
+                        event_type,
+                        final_outcome,
+                        connector_name,
+                        error_code,
+                        limit,
+                    ),
+                )
+                return rows_to_dicts(cur)
+
 def _connector_log_details(
     *,
     details: dict[str, Any] | None,

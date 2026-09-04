@@ -100,6 +100,14 @@ class HealingRepository:
             limit=limit,
         )
 
+    def search_healing_logs_for_chat(
+        self, *, question: str, limit: int
+    ) -> list[dict[str, Any]]:
+        return self._logs.search_for_chat(question=question, limit=limit)
+
+    def list_incident_facts_for_chat(self, **filters: Any) -> list[dict[str, Any]]:
+        return self._logs.list_incident_facts_for_chat(**filters)
+
     def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:
         self._connectors.update_queue_fields(queue_id, **fields)
 

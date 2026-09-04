@@ -1,0 +1,4 @@
+sqlglot>=26,<31
+python-dotenv>=1,<2
+nbformat>=5.10,<6
+pytest>=8,<10

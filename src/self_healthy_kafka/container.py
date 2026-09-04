@@ -51,5 +51,10 @@ def build_grafana_webhook(
             connector_name=connector_name,
         ),
         healing_logs=state_machine.db.list_healing_logs,
+        log_search=lambda question, limit: state_machine.db.search_healing_logs_for_chat(
+            question=question, limit=limit
+        ),
         failure_ranking=state_machine.db.get_failure_ranking,
+        analytics_chat_config=cfg.analytics_chat,
+        incident_facts=state_machine.db.list_incident_facts_for_chat,
     )

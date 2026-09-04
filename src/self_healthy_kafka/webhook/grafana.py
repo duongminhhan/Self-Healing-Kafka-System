@@ -13,11 +13,14 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from self_healthy_kafka.config import (
+    AnalyticsChatConfig,
     ChatApiConfig,
     GrafanaWebhookConfig,
     OllamaChatConfig,
 )
+from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 from self_healthy_kafka.webhook.chat_api import ChatReadApi
+from self_healthy_kafka.webhook.chat_ui import page as chat_ui_page
 from self_healthy_kafka.webhook.ollama_chat import OllamaChatService
 from self_healthy_kafka.webhook.security import (
     EventDeduplicator,
@@ -87,8 +90,11 @@ class GrafanaWebhookService:
         chat_api_config: ChatApiConfig | None = None,
         queue_lookup: Callable[[str | None, str | None], list[Any]] | None = None,
         healing_logs: Callable[..., list[dict[str, Any]]] | None = None,
+        log_search: Callable[[str, int], list[dict[str, Any]]] | None = None,
         ollama_chat_config: OllamaChatConfig | None = None,
         failure_ranking: Callable[..., list[dict[str, Any]]] | None = None,
+        analytics_chat_config: AnalyticsChatConfig | None = None,
+        incident_facts: Callable[..., list[dict[str, Any]]] | None = None,
     ):
         self._config = config
         self._process_connector = process_connector
@@ -101,6 +107,7 @@ class GrafanaWebhookService:
                 chat_api_config,
                 queue_lookup=queue_lookup or (lambda _queue_id, _connector_name: []),
                 healing_logs=healing_logs or (lambda **_kwargs: []),
+                log_search=log_search,
             )
             if chat_api_config is not None
             else None
@@ -112,6 +119,14 @@ class GrafanaWebhookService:
                 failure_ranking=failure_ranking or (lambda **_kwargs: []),
             )
             if ollama_chat_config is not None and self._chat_api is not None
+            else None
+        )
+        self._analytics_chat = (
+            AnalyticsChatService(
+                analytics_chat_config,
+                incident_facts=incident_facts or (lambda **_kwargs: []),
+            )
+            if analytics_chat_config is not None
             else None
         )
         self._deduplicator = EventDeduplicator(config.dedupe_ttl_seconds)
@@ -243,6 +258,10 @@ class GrafanaWebhookService:
             if not self._chat_api or not self._chat_api.enabled:
                 raise ValueError("CHAT_API_ENABLED must be true when Ollama chat is enabled")
             self._ollama_chat.validate()
+        if self._analytics_chat and self._analytics_chat.enabled:
+            if not self._chat_api or not self._chat_api.enabled:
+                raise ValueError("CHAT_API_ENABLED must be true when analytics chat is enabled")
+            self._analytics_chat.validate()
 
     def _claim_event(self, event: GrafanaAlertEvent) -> bool:
         return self._deduplicator.claim(event.dedupe_key)
@@ -353,6 +372,13 @@ class GrafanaWebhookService:
                 if request_url.path == "/health":
                     self._json_response(HTTPStatus.OK, {"status": "ok"})
                     return
+                if request_url.path in {"/", "/chat"}:
+                    self._write_response(
+                        HTTPStatus.OK,
+                        "text/html; charset=utf-8",
+                        chat_ui_page(),
+                    )
+                    return
                 if service._chat_api and service._chat_api.enabled:
                     if not service._chat_api.is_authorized(
                         self.headers.get("Authorization", "")
@@ -373,6 +399,34 @@ class GrafanaWebhookService:
 
             def do_POST(self) -> None:
                 request_url = urlsplit(self.path)
+                if (
+                    service._analytics_chat
+                    and service._analytics_chat.enabled
+                    and request_url.path == service._analytics_chat.path
+                ):
+                    if not service._chat_api or not service._chat_api.is_authorized(
+                        self.headers.get("Authorization", "")
+                    ):
+                        self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "invalid chat API authentication"})
+                        return
+                    payload = self._read_json_body()
+                    if payload is None:
+                        return
+                    question = payload.get("question")
+                    if not isinstance(question, str):
+                        self._json_response(HTTPStatus.BAD_REQUEST, {"error": "question must be a string"})
+                        return
+                    try:
+                        result = service._analytics_chat.ask(question)
+                    except ValueError as exc:
+                        self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    except Exception:
+                        logger.exception("Analytics chat request failed", extra={"event": "analytics_chat_failed"})
+                        self._json_response(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "analytics chat is unavailable"})
+                        return
+                    self._json_response(HTTPStatus.OK, result)
+                    return
                 if (
                     service._ollama_chat
                     and service._ollama_chat.enabled

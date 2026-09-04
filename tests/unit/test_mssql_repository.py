@@ -101,6 +101,38 @@ def test_record_connector_log_persists_audit_details_for_queue():
     assert connection.committed is True
 
 
+def test_search_healing_logs_uses_fixed_parameterized_retrieval_procedure():
+    connection = _Connection(results=[[{"id": "log-1", "message": "ORA-01291"}]])
+
+    rows = _repository(connection).search_healing_logs_for_chat(
+        question="TOPO-A ORA-01291", limit=20
+    )
+
+    sql, params = connection.cursor_obj.executed[-1]
+    assert sql == "EXEC dbo.spSearchConnectorHealingLogs @SearchText = ?, @Limit = ?"
+    assert params == ("TOPO-A ORA-01291", 20)
+    assert rows == [{"id": "log-1", "message": "ORA-01291"}]
+
+
+def test_incident_facts_use_fixed_read_only_procedure_and_bound_parameters():
+    connection = _Connection(results=[[{"incident_id": "incident-1"}]])
+
+    rows = _repository(connection).list_incident_facts_for_chat(
+        from_at="2026-09-03T00:00:00+07:00", to_at="2026-09-04T00:00:00+07:00",
+        event_type="HEALTH_FAILED_CONFIRMED", final_outcome="OPEN",
+        connector_name="TOPO-A", error_code="ORA-01013", limit=20,
+    )
+
+    sql, params = connection.cursor_obj.executed[-1]
+    assert sql.startswith("EXEC dbo.spGetConnectorIncidentFacts")
+    assert "ORA-01013" not in sql
+    assert params == (
+        "2026-09-03T00:00:00+07:00", "2026-09-04T00:00:00+07:00",
+        "HEALTH_FAILED_CONFIRMED", "OPEN", "TOPO-A", "ORA-01013", 20,
+    )
+    assert rows == [{"incident_id": "incident-1"}]
+
+
 def test_list_connectors_reads_only_due_open_queue_items():
     connection = _Connection(results=[[{
         "id": "queue-id",
