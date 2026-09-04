@@ -42,16 +42,12 @@ CASES = [
     (
         "Connector nào có ít incident hơn mức trung bình số incident trên mỗi root? Trả tên, số incident, sắp xếp tên tăng dần.",
         "WITH counts AS (SELECT RootConnectorName,COUNT(*) n FROM ConnectorHealingQueue GROUP BY RootConnectorName) SELECT RootConnectorName,n FROM counts WHERE n<(SELECT AVG(n) FROM counts) ORDER BY RootConnectorName",
-    ),
-]
-
-CASES.append(
+    ), 
     (
         "Thời gian xử lý trung bình (tính bằng phút) từ lúc nhận (ReceivedAt) đến khi hoàn tất (CompletedAt) của các queue thành công là bao nhiêu? Trả lần lượt trung bình phút, matched_count, valid_duration_count, excluded_duration_count.",
         "WITH durations AS (SELECT (julianday(CompletedAt)-julianday(ReceivedAt))*1440.0 AS minutes FROM ConnectorHealingQueue WHERE QueueStatus='COMPLETED' AND FinalOutcome='RECOVERED') SELECT ROUND(AVG(CASE WHEN minutes>=0 THEN minutes END),2),COUNT(*),COUNT(CASE WHEN minutes>=0 THEN 1 END),COUNT(*)-COUNT(CASE WHEN minutes>=0 THEN 1 END) FROM durations",
     )
-)
-
+]
 
 def matches(result, expected):
     """Ordered bag comparison: aliases ignored, NULL exact, numerics within 0.005.
@@ -79,7 +75,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", default=str(ROOT / "self_healthy_kafka_snapshot.db"))
     parser.add_argument("--case", type=int, help="Run one 1-based gold case for diagnosis.")
-    parser.add_argument("--backend", choices=["hf", "gemini"], default="hf")
+    parser.add_argument("--backend", choices=["hf", "gemini", "nemotron"], default="hf")
     parser.add_argument(
         "--fixture",
         choices=VARIANTS,
@@ -95,6 +91,8 @@ def main():
         parser.error("--case is outside the gold case range")
     if args.backend == "gemini":
         load_dotenv(ROOT / ".env.gemini")
+    if args.backend == "nemotron":
+        load_dotenv(ROOT / ".env.nemotron")
     load_dotenv(ROOT / ".env")
     fixture_directory = None
     if args.fixture:
@@ -108,7 +106,38 @@ def main():
     model = os.getenv("HF_MODEL_ID", "Qwen/Qwen3-4B-Instruct-2507")
     provider = os.getenv("HF_PROVIDER", "auto").strip().lower() or "auto"
     gemini_template = None
-    if args.live and args.backend == "gemini":
+    if args.live and args.backend == "nemotron":
+        if not os.getenv("OLLAMA_API_KEY", "").strip():
+            print("LIVE SKIPPED: OLLAMA_API_KEY is unavailable; no provider fallback.")
+        else:
+            from notebooks.nemotron.adapter import CloudError, make_nemotron_workflow
+
+            gemini_template = make_nemotron_workflow(args.snapshot, row_limit=1000)
+            client = gemini_template.client
+            try:
+                print(json.dumps({"preflight": client.check_model()}))
+            except CloudError as exc:
+                client.close()
+                print(
+                    json.dumps(
+                        {
+                            "evaluation_summary": {
+                                "mode": "live_nemotron",
+                                "cases": 0,
+                                "not_run_cases": 1 if args.case else len(CASES),
+                                "model_accuracy": None,
+                                "preflight_error": exc.category,
+                                "http_status": exc.response.status_code,
+                            }
+                        }
+                    )
+                )
+                if fixture_directory:
+                    fixture_directory.cleanup()
+                return 1
+            snapshot = gemini_template.snapshot
+            model, provider = gemini_template.model_id, gemini_template.provider
+    elif args.live and args.backend == "gemini":
         if not os.getenv("GEMINI_API_KEY", "").strip():
             print("LIVE SKIPPED: GEMINI_API_KEY is unavailable; no provider fallback.")
         else:
@@ -312,7 +341,16 @@ def main():
             )
         )
     elif not client:
-        print(json.dumps({"mode": "local_executor_checks_only", "model_accuracy": None}))
+        print(
+            json.dumps(
+                {
+                    "mode": "local_executor_checks_only",
+                    "model_accuracy": None,
+                    "model_cases_run": 0,
+                    "model_cases_not_run": 1 if args.case else len(CASES),
+                }
+            )
+        )
     if client and args.case is None and not service_blocked:
         flow = new_flow()
         try:

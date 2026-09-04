@@ -268,7 +268,7 @@ class Snapshot:
             )
         return sqlite3.SQLITE_DENY
 
-    def execute(self, sql):
+    def execute(self, sql, parameters=None):
         if self.signature() != self.initial_signature:
             raise QueryError("Snapshot changed since schema discovery; reinitialize the workflow.")
         sql = self.validate(sql)
@@ -281,7 +281,7 @@ class Snapshot:
             conn.set_authorizer(self.authorize)
             conn.set_progress_handler(lambda: int(time.perf_counter() > deadline), 1000)
             try:
-                cursor = conn.execute(sql)
+                cursor = conn.execute(sql, parameters or {})
                 names = [d[0] for d in cursor.description]
                 if len(set(names)) != len(names):
                     raise QueryError("Duplicate output column names; supply unique aliases.")
@@ -464,7 +464,13 @@ class Workflow:
                 messages=messages, max_tokens=max_tokens, temperature=0
             )
         usage = getattr(completion, "usage", None)
-        if usage:
+        reported_usage = getattr(completion, "reported_usage", None)
+        if reported_usage is not None:
+            bucket = self.metrics["tokens"].setdefault(stage, {})
+            for name, value in reported_usage.items():
+                previous = bucket.get(name, 0)
+                bucket[name] = None if value is None or previous is None else previous + value
+        elif usage:
             bucket = self.metrics["tokens"].setdefault(stage, {"input": 0, "output": 0})
             bucket["input"] += getattr(usage, "prompt_tokens", 0) or 0
             bucket["output"] += getattr(usage, "completion_tokens", 0) or 0

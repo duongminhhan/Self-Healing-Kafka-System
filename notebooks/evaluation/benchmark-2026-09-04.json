@@ -1,0 +1,1008 @@
+{
+  "date": "2026-09-04",
+  "snapshot": {
+    "sha256": "F2296FFEBC19928A3FFA987082510F6AAD17DF70A52D2DDC5B36128002287E75",
+    "queue_rows": 6,
+    "log_rows": 16
+  },
+  "method": "Single run per case; paired latency comparison cases 1-4 only; application end-to-end stages include network, inference and validation; no database refresh.",
+  "hf": {
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "provider": "auto",
+    "cases": [
+      {
+        "case": 1,
+        "match": true,
+        "sql_seconds": 5.347373799999332,
+        "response_seconds": 6.412174199998844
+      },
+      {
+        "case": 2,
+        "match": true,
+        "sql_seconds": 3.5201545000018086,
+        "response_seconds": 4.541198799997801
+      },
+      {
+        "case": 3,
+        "match": true,
+        "sql_seconds": 2.4162276000024576,
+        "response_seconds": 3.056566000002931
+      },
+      {
+        "case": 4,
+        "match": true,
+        "sql_seconds": 2.6893525999985286,
+        "response_seconds": 1.7122608999998192
+      },
+      {
+        "case": 5,
+        "first_sql_match": true,
+        "completed": false,
+        "http_status": 402,
+        "stage": "sql_result_review",
+        "sql_seconds": 5.410290100000566
+      }
+    ],
+    "not_run_cases": [
+      6,
+      7
+    ],
+    "clarification_probe": "not run: billing stop",
+    "sql_max_tokens": 1024,
+    "response_max_tokens": 1500
+  },
+  "nemotron": {
+    "model": "nemotron-3-ultra",
+    "provider": "ollama_cloud",
+    "thinking": true,
+    "sql_max_tokens": 4096,
+    "response_max_tokens": 4096,
+    "records": [
+      {
+        "case": 1,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "SELECT RootConnectorName, COUNT(QueueId) AS incident_count FROM ConnectorHealingQueue GROUP BY RootConnectorName ORDER BY incident_count DESC, RootConnectorName ASC LIMIT 5",
+        "rows": [
+          {
+            "RootConnectorName": "conn-kafka-orders-source",
+            "incident_count": 2
+          },
+          {
+            "RootConnectorName": "conn-oracle-cdc-payments",
+            "incident_count": 1
+          },
+          {
+            "RootConnectorName": "conn-postgres-dw-sink",
+            "incident_count": 1
+          },
+          {
+            "RootConnectorName": "conn-s3-lakehouse-sink",
+            "incident_count": 1
+          },
+          {
+            "RootConnectorName": "conn-salesforce-crm-ingest",
+            "incident_count": 1
+          }
+        ],
+        "expected": [
+          [
+            "conn-kafka-orders-source",
+            2
+          ],
+          [
+            "conn-oracle-cdc-payments",
+            1
+          ],
+          [
+            "conn-postgres-dw-sink",
+            1
+          ],
+          [
+            "conn-s3-lakehouse-sink",
+            1
+          ],
+          [
+            "conn-salesforce-crm-ingest",
+            1
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "conn-kafka-orders-source có 2 incident đã lưu trong snapshot.\nconn-oracle-cdc-payments có 1 incident đã lưu trong snapshot.\nconn-postgres-dw-sink có 1 incident đã lưu trong snapshot.\nconn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.\nconn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+          "claims": [
+            {
+              "text": "conn-kafka-orders-source có 2 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 0,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-oracle-cdc-payments có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 1,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 1,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-postgres-dw-sink có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 2,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 2,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 3,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 3,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 4,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 4,
+                  "column": "incident_count"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4297,
+              "output": 351,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2346,
+              "output": 705,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 22.406274400000257,
+          "response_stage_seconds": 21.86233279999942
+        },
+        "clarification": null
+      },
+      {
+        "case": 2,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "SELECT q.RootConnectorName, COUNT(l.Id) AS total_healing_logs FROM ConnectorHealingQueue q LEFT JOIN ConnectorHealingLogs l ON l.QueueId = q.QueueId GROUP BY q.RootConnectorName ORDER BY q.RootConnectorName",
+        "rows": [
+          {
+            "RootConnectorName": "conn-kafka-orders-source",
+            "total_healing_logs": 7
+          },
+          {
+            "RootConnectorName": "conn-oracle-cdc-payments",
+            "total_healing_logs": 4
+          },
+          {
+            "RootConnectorName": "conn-postgres-dw-sink",
+            "total_healing_logs": 2
+          },
+          {
+            "RootConnectorName": "conn-s3-lakehouse-sink",
+            "total_healing_logs": 1
+          },
+          {
+            "RootConnectorName": "conn-salesforce-crm-ingest",
+            "total_healing_logs": 2
+          }
+        ],
+        "expected": [
+          [
+            "conn-kafka-orders-source",
+            7
+          ],
+          [
+            "conn-oracle-cdc-payments",
+            4
+          ],
+          [
+            "conn-postgres-dw-sink",
+            2
+          ],
+          [
+            "conn-s3-lakehouse-sink",
+            1
+          ],
+          [
+            "conn-salesforce-crm-ingest",
+            2
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "conn-kafka-orders-source có tổng số healing log là 7 trong snapshot.\nconn-oracle-cdc-payments có tổng số healing log là 4 trong snapshot.\nconn-postgres-dw-sink có tổng số healing log là 2 trong snapshot.\nconn-s3-lakehouse-sink có tổng số healing log là 1 trong snapshot.\nconn-salesforce-crm-ingest có tổng số healing log là 2 trong snapshot.",
+          "claims": [
+            {
+              "text": "conn-kafka-orders-source có tổng số healing log là 7 trong snapshot.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 0,
+                  "column": "total_healing_logs"
+                }
+              ]
+            },
+            {
+              "text": "conn-oracle-cdc-payments có tổng số healing log là 4 trong snapshot.",
+              "evidence": [
+                {
+                  "row": 1,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 1,
+                  "column": "total_healing_logs"
+                }
+              ]
+            },
+            {
+              "text": "conn-postgres-dw-sink có tổng số healing log là 2 trong snapshot.",
+              "evidence": [
+                {
+                  "row": 2,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 2,
+                  "column": "total_healing_logs"
+                }
+              ]
+            },
+            {
+              "text": "conn-s3-lakehouse-sink có tổng số healing log là 1 trong snapshot.",
+              "evidence": [
+                {
+                  "row": 3,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 3,
+                  "column": "total_healing_logs"
+                }
+              ]
+            },
+            {
+              "text": "conn-salesforce-crm-ingest có tổng số healing log là 2 trong snapshot.",
+              "evidence": [
+                {
+                  "row": 4,
+                  "column": "RootConnectorName"
+                },
+                {
+                  "row": 4,
+                  "column": "total_healing_logs"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4281,
+              "output": 1392,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2369,
+              "output": 673,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 56.444578399998136,
+          "response_stage_seconds": 42.44062400000257
+        },
+        "clarification": null
+      },
+      {
+        "case": 3,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "SELECT Severity, COUNT(Id) AS log_count FROM ConnectorHealingLogs GROUP BY Severity ORDER BY Severity ASC",
+        "rows": [
+          {
+            "Severity": "ERROR",
+            "log_count": 2
+          },
+          {
+            "Severity": "FATAL",
+            "log_count": 1
+          },
+          {
+            "Severity": "INFO",
+            "log_count": 6
+          },
+          {
+            "Severity": "WARN",
+            "log_count": 7
+          }
+        ],
+        "expected": [
+          [
+            "ERROR",
+            2
+          ],
+          [
+            "FATAL",
+            1
+          ],
+          [
+            "INFO",
+            6
+          ],
+          [
+            "WARN",
+            7
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "Severity ERROR có 2 log trong snapshot.\nSeverity FATAL có 1 log trong snapshot.\nSeverity INFO có 6 log trong snapshot.\nSeverity WARN có 7 log trong snapshot.",
+          "claims": [
+            {
+              "text": "Severity ERROR có 2 log trong snapshot.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "Severity"
+                },
+                {
+                  "row": 0,
+                  "column": "log_count"
+                }
+              ]
+            },
+            {
+              "text": "Severity FATAL có 1 log trong snapshot.",
+              "evidence": [
+                {
+                  "row": 1,
+                  "column": "Severity"
+                },
+                {
+                  "row": 1,
+                  "column": "log_count"
+                }
+              ]
+            },
+            {
+              "text": "Severity INFO có 6 log trong snapshot.",
+              "evidence": [
+                {
+                  "row": 2,
+                  "column": "Severity"
+                },
+                {
+                  "row": 2,
+                  "column": "log_count"
+                }
+              ]
+            },
+            {
+              "text": "Severity WARN có 7 log trong snapshot.",
+              "evidence": [
+                {
+                  "row": 3,
+                  "column": "Severity"
+                },
+                {
+                  "row": 3,
+                  "column": "log_count"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4273,
+              "output": 203,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2262,
+              "output": 448,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 21.58798019999813,
+          "response_stage_seconds": 68.0161623999993
+        },
+        "clarification": null
+      },
+      {
+        "case": 4,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "SELECT Id, AttemptNo FROM ConnectorHealingLogs WHERE AttemptNo IS NULL ORDER BY Id ASC",
+        "rows": [
+          {
+            "Id": "C5C61147-63FD-4082-86CF-FD3EC7E3A2FD",
+            "AttemptNo": null
+          }
+        ],
+        "expected": [
+          [
+            "C5C61147-63FD-4082-86CF-FD3EC7E3A2FD",
+            null
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL) trong snapshot.",
+          "claims": [
+            {
+              "text": "Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL) trong snapshot.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "Id"
+                },
+                {
+                  "row": 0,
+                  "column": "AttemptNo"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4270,
+              "output": 178,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2209,
+              "output": 227,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 43.73639380000168,
+          "response_stage_seconds": 24.004181500000414
+        },
+        "clarification": null
+      },
+      {
+        "case": 5,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "SELECT RootConnectorName, COUNT(*) AS incident_count FROM ConnectorHealingQueue WHERE julianday(ReceivedAt) >= julianday('2026-09-02T00:00:00Z') AND julianday(ReceivedAt) < julianday('2026-09-03T00:00:00Z') GROUP BY RootConnectorName ORDER BY RootConnectorName ASC",
+        "rows": [],
+        "expected": [],
+        "diagnostics": {
+          "status": "inconclusive",
+          "queries": [],
+          "observations": [],
+          "scope": "Diagnostics describe the executed SQL, not proof it matches user intent.",
+          "reason": "Grouped/set results need per-group diagnosis; no global cause inferred."
+        },
+        "response": {
+          "source": "verified_table_fallback",
+          "reason": "empty_result",
+          "text": "| RootConnectorName | incident_count |\n| --- | --- |\nKhông có hàng kết quả trong phạm vi truy vấn này.\nSố hàng trả về: 0.\nChẩn đoán chưa đủ để xác định nguyên nhân; không suy ra dữ liệu nguồn bị thiếu.",
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 2,
+          "response_api_calls": 0,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 1,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 9442,
+              "output": 1229,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 52.11701080000057,
+          "response_stage_seconds": 0.00001790000169421546
+        },
+        "clarification": null
+      },
+      {
+        "case": 6,
+        "semantic_match": false,
+        "first_attempt_match": false,
+        "sql": "WITH root_counts AS (SELECT RootConnectorName, COUNT(*) AS root_incident_count FROM ConnectorHealingQueue GROUP BY RootConnectorName), avg_root AS (SELECT AVG(root_incident_count) AS avg_incidents_per_root FROM root_counts), connector_counts AS (SELECT CurrentConnectorName, COUNT(*) AS incident_count FROM ConnectorHealingQueue GROUP BY CurrentConnectorName) SELECT CurrentConnectorName AS connector_name, incident_count FROM connector_counts, avg_root WHERE incident_count < avg_incidents_per_root ORDER BY CurrentConnectorName",
+        "rows": [
+          {
+            "connector_name": "conn-oracle-cdc-payments-v2",
+            "incident_count": 1
+          },
+          {
+            "connector_name": "conn-postgres-dw-sink",
+            "incident_count": 1
+          },
+          {
+            "connector_name": "conn-s3-lakehouse-sink",
+            "incident_count": 1
+          },
+          {
+            "connector_name": "conn-salesforce-crm-ingest",
+            "incident_count": 1
+          }
+        ],
+        "expected": [
+          [
+            "conn-oracle-cdc-payments",
+            1
+          ],
+          [
+            "conn-postgres-dw-sink",
+            1
+          ],
+          [
+            "conn-s3-lakehouse-sink",
+            1
+          ],
+          [
+            "conn-salesforce-crm-ingest",
+            1
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "conn-oracle-cdc-payments-v2 có 1 incident đã lưu trong snapshot.\nconn-postgres-dw-sink có 1 incident đã lưu trong snapshot.\nconn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.\nconn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+          "claims": [
+            {
+              "text": "conn-oracle-cdc-payments-v2 có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "connector_name"
+                },
+                {
+                  "row": 0,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-postgres-dw-sink có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 1,
+                  "column": "connector_name"
+                },
+                {
+                  "row": 1,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 2,
+                  "column": "connector_name"
+                },
+                {
+                  "row": 2,
+                  "column": "incident_count"
+                }
+              ]
+            },
+            {
+              "text": "conn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+              "evidence": [
+                {
+                  "row": 3,
+                  "column": "connector_name"
+                },
+                {
+                  "row": 3,
+                  "column": "incident_count"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4278,
+              "output": 2433,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2401,
+              "output": 514,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 52.56741300000067,
+          "response_stage_seconds": 50.02069140000094
+        },
+        "clarification": null
+      },
+      {
+        "case": 7,
+        "semantic_match": true,
+        "first_attempt_match": true,
+        "sql": "WITH filtered AS (SELECT QueueId, ReceivedAt, CompletedAt, (julianday(CompletedAt) - julianday(ReceivedAt)) * 1440.0 AS duration_min FROM ConnectorHealingQueue WHERE QueueStatus = 'COMPLETED' AND FinalOutcome = 'RECOVERED'), durations AS (SELECT QueueId, duration_min, CASE WHEN duration_min IS NOT NULL AND duration_min >= 0 THEN 1 ELSE 0 END AS is_valid FROM filtered) SELECT ROUND(AVG(CASE WHEN is_valid = 1 THEN duration_min END), 2) AS avg_minutes, COUNT(*) AS matched_count, SUM(is_valid) AS valid_duration_count, COUNT(*) - SUM(is_valid) AS excluded_duration_count FROM durations",
+        "rows": [
+          {
+            "avg_minutes": 35,
+            "matched_count": 2,
+            "valid_duration_count": 2,
+            "excluded_duration_count": 0
+          }
+        ],
+        "expected": [
+          [
+            35,
+            2,
+            2,
+            0
+          ]
+        ],
+        "diagnostics": null,
+        "response": {
+          "source": "ollama_cloud",
+          "text": "Thời gian xử lý trung bình từ lúc nhận đến khi hoàn tất của các queue thành công là 35.0 phút.\nCó 2 queue khớp bộ lọc thành công (matched_count).\nCó 2 queue có durée hợp lệ (valid_duration_count).\nCó 0 queue bị loại vì duration missing, unparseable hoặc âm (excluded_duration_count).",
+          "claims": [
+            {
+              "text": "Thời gian xử lý trung bình từ lúc nhận đến khi hoàn tất của các queue thành công là 35.0 phút.",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "avg_minutes"
+                }
+              ]
+            },
+            {
+              "text": "Có 2 queue khớp bộ lọc thành công (matched_count).",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "matched_count"
+                }
+              ]
+            },
+            {
+              "text": "Có 2 queue có durée hợp lệ (valid_duration_count).",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "valid_duration_count"
+                }
+              ]
+            },
+            {
+              "text": "Có 0 queue bị loại vì duration missing, unparseable hoặc âm (excluded_duration_count).",
+              "evidence": [
+                {
+                  "row": 0,
+                  "column": "excluded_duration_count"
+                }
+              ]
+            }
+          ],
+          "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+        },
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 1,
+          "response_api_calls": 1,
+          "sql_attempts": 1,
+          "valid_sql_attempts": 1,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 4307,
+              "output": 932,
+              "cached_tokens": null
+            },
+            "response": {
+              "input": 2471,
+              "output": 628,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "response",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 27.867323999998916,
+          "response_stage_seconds": 27.283211999998457
+        },
+        "clarification": null
+      },
+      {
+        "evaluation_summary": {
+          "mode": "live_nemotron",
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "cases": 7,
+          "planned_cases": 7,
+          "not_run_cases": 0,
+          "service_blocked": false,
+          "infrastructure_error_cases": 0,
+          "response_service_error_cases": 0,
+          "accuracy_denominator": "Attempted cases, including SQL service failures as unsuccessful; unrun cases excluded and reported separately.",
+          "first_attempt_execution_accuracy": 0.8571428571428571,
+          "final_execution_accuracy": 0.8571428571428571,
+          "valid_sql_rate": 1,
+          "correction_frequency": 0,
+          "review_frequency": 0.14285714285714285,
+          "fallback_frequency": 0.14285714285714285,
+          "sql_api_calls": 8,
+          "response_api_calls": 6,
+          "mean_sql_seconds": 39.532424942856906,
+          "mean_response_seconds": 33.375317428571826,
+          "comparison": "Ordered rows and columns; aliases ignored; NULL exact; absolute numeric tolerance 0.005; tie order explicit in gold question.",
+          "first_attempt_definition": "First SQL-stage model call must produce executable matching SQL; clarification/invalid output counts as failure."
+        }
+      },
+      {
+        "ambiguous_question_clarified": true,
+        "metrics": {
+          "model": "nemotron-3-ultra",
+          "provider": "ollama_cloud",
+          "sql_api_calls": 2,
+          "response_api_calls": 0,
+          "sql_attempts": 0,
+          "valid_sql_attempts": 0,
+          "policy_rejections": 0,
+          "result_reviews": 0,
+          "diagnostic_queries": 0,
+          "correction_count": 0,
+          "tokens": {
+            "sql": {
+              "input": 8695,
+              "output": 904,
+              "cached_tokens": null
+            }
+          },
+          "few_shot_enabled": true,
+          "model_responses": [
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            },
+            {
+              "stage": "sql",
+              "model": "nemotron-3-ultra",
+              "provider": "ollama_cloud",
+              "done_reason": "stop",
+              "thinking_present": true
+            }
+          ],
+          "sql_stage_seconds": 101.4511421999996
+        }
+      }
+    ]
+  }
+}

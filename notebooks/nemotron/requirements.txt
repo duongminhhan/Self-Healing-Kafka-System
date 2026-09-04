@@ -1,2 +1,2 @@
 -r ../shared/requirements.txt
-google-genai>=1.75,<2
+httpx>=0.27,<1

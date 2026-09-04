@@ -1,0 +1,616 @@
+{
+  "kind": "offline_compiler_checks",
+  "snapshot_sha256": "f2296ffebc19928a3ffa987082510f6aad17df70a52d2ddc5b36128002287e75",
+  "snapshot": {
+    "file_name": "self_healthy_kafka_snapshot.db",
+    "file_size_bytes": 20480,
+    "file_modified_at": "2026-09-04T06:17:38.817320+00:00",
+    "source_refresh": null,
+    "scope": "SQLite snapshot, not live connector health. File modification time is NOT source freshness. Separate table loads are not an atomic source snapshot."
+  },
+  "configuration": {
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "provider": "auto",
+    "modes": [
+      "legacy",
+      "shadow",
+      "strict"
+    ],
+    "sql_max_tokens": 1024,
+    "response_max_tokens": 1500,
+    "max_sql_calls": 3,
+    "temperature": 0,
+    "few_shot": true,
+    "timeouts": null,
+    "structured_output": null
+  },
+  "model_accuracy": null,
+  "records": [
+    {
+      "case": "gold-1",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COUNT(DISTINCT q.\"QueueId\") AS \"incident_count\" FROM \"ConnectorHealingQueue\" q GROUP BY q.\"RootConnectorName\") SELECT * FROM base ORDER BY \"incident_count\" DESC, \"root\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 5
+      },
+      "rows": [
+        {
+          "root": "conn-kafka-orders-source",
+          "incident_count": 2
+        },
+        {
+          "root": "conn-oracle-cdc-payments",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-s3-lakehouse-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "incident_count": 1
+        }
+      ],
+      "expected": [
+        [
+          "conn-kafka-orders-source",
+          2
+        ],
+        [
+          "conn-oracle-cdc-payments",
+          1
+        ],
+        [
+          "conn-postgres-dw-sink",
+          1
+        ],
+        [
+          "conn-s3-lakehouse-sink",
+          1
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          1
+        ]
+      ]
+    },
+    {
+      "case": "gold-2",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COALESCE(SUM((SELECT COUNT(*) FROM \"ConnectorHealingLogs\" lx WHERE lx.\"QueueId\"=q.\"QueueId\")),0) AS \"log_count\" FROM \"ConnectorHealingQueue\" q GROUP BY q.\"RootConnectorName\") SELECT * FROM base ORDER BY \"root\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 1000
+      },
+      "rows": [
+        {
+          "root": "conn-kafka-orders-source",
+          "log_count": 7
+        },
+        {
+          "root": "conn-oracle-cdc-payments",
+          "log_count": 4
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "log_count": 2
+        },
+        {
+          "root": "conn-s3-lakehouse-sink",
+          "log_count": 1
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "log_count": 2
+        }
+      ],
+      "expected": [
+        [
+          "conn-kafka-orders-source",
+          7
+        ],
+        [
+          "conn-oracle-cdc-payments",
+          4
+        ],
+        [
+          "conn-postgres-dw-sink",
+          2
+        ],
+        [
+          "conn-s3-lakehouse-sink",
+          1
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          2
+        ]
+      ]
+    },
+    {
+      "case": "gold-3",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT l.\"Severity\" AS \"severity\", COUNT(l.\"Id\") AS \"log_count\" FROM \"ConnectorHealingLogs\" l LEFT JOIN \"ConnectorHealingQueue\" q ON l.\"QueueId\"=q.\"QueueId\" GROUP BY l.\"Severity\") SELECT * FROM base ORDER BY \"severity\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 1000
+      },
+      "rows": [
+        {
+          "severity": "ERROR",
+          "log_count": 2
+        },
+        {
+          "severity": "FATAL",
+          "log_count": 1
+        },
+        {
+          "severity": "INFO",
+          "log_count": 6
+        },
+        {
+          "severity": "WARN",
+          "log_count": 7
+        }
+      ],
+      "expected": [
+        [
+          "ERROR",
+          2
+        ],
+        [
+          "FATAL",
+          1
+        ],
+        [
+          "INFO",
+          6
+        ],
+        [
+          "WARN",
+          7
+        ]
+      ]
+    },
+    {
+      "case": "gold-4",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT l.\"Id\" AS \"event_id\", l.\"AttemptNo\" AS \"attempt\" FROM \"ConnectorHealingLogs\" l LEFT JOIN \"ConnectorHealingQueue\" q ON l.\"QueueId\"=q.\"QueueId\" WHERE l.\"AttemptNo\" IS NULL) SELECT * FROM base ORDER BY \"event_id\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 1000
+      },
+      "rows": [
+        {
+          "event_id": "C5C61147-63FD-4082-86CF-FD3EC7E3A2FD",
+          "attempt": null
+        }
+      ],
+      "expected": [
+        [
+          "C5C61147-63FD-4082-86CF-FD3EC7E3A2FD",
+          null
+        ]
+      ]
+    },
+    {
+      "case": "gold-5",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COUNT(DISTINCT q.\"QueueId\") AS \"incident_count\" FROM \"ConnectorHealingQueue\" q WHERE julianday(q.\"ReceivedAt\") >= julianday(:p0) AND julianday(q.\"ReceivedAt\") < julianday(:p1) GROUP BY q.\"RootConnectorName\") SELECT * FROM base ORDER BY \"root\" ASC LIMIT :p2",
+      "parameters": {
+        "p0": "2026-09-02T00:00:00+00:00",
+        "p1": "2026-09-03T00:00:00+00:00",
+        "p2": 1000
+      },
+      "rows": [],
+      "expected": []
+    },
+    {
+      "case": "gold-6",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COUNT(DISTINCT q.\"QueueId\") AS \"incident_count\" FROM \"ConnectorHealingQueue\" q GROUP BY q.\"RootConnectorName\") SELECT * FROM base WHERE \"incident_count\" < (SELECT AVG(\"incident_count\") FROM base) ORDER BY \"root\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 1000
+      },
+      "rows": [
+        {
+          "root": "conn-oracle-cdc-payments",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-s3-lakehouse-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "incident_count": 1
+        }
+      ],
+      "expected": [
+        [
+          "conn-oracle-cdc-payments",
+          1
+        ],
+        [
+          "conn-postgres-dw-sink",
+          1
+        ],
+        [
+          "conn-s3-lakehouse-sink",
+          1
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          1
+        ]
+      ]
+    },
+    {
+      "case": "gold-7",
+      "split": "gold",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT ROUND(AVG(CASE WHEN ((julianday(q.\"CompletedAt\")-julianday(q.\"ReceivedAt\"))*1440.0) >= 0 THEN (julianday(q.\"CompletedAt\")-julianday(q.\"ReceivedAt\"))*1440.0 END),2) AS \"avg_duration_minutes\", COUNT(*) AS \"matched_count\", COUNT(CASE WHEN ((julianday(q.\"CompletedAt\")-julianday(q.\"ReceivedAt\"))*1440.0) >= 0 THEN 1 END) AS \"valid_duration_count\", COUNT(*)-COUNT(CASE WHEN ((julianday(q.\"CompletedAt\")-julianday(q.\"ReceivedAt\"))*1440.0) >= 0 THEN 1 END) AS \"excluded_duration_count\" FROM \"ConnectorHealingQueue\" q WHERE q.\"QueueStatus\" = :p0 AND q.\"FinalOutcome\" = :p1) SELECT * FROM base LIMIT :p2",
+      "parameters": {
+        "p0": "COMPLETED",
+        "p1": "RECOVERED",
+        "p2": 1000
+      },
+      "rows": [
+        {
+          "avg_duration_minutes": 35.0,
+          "matched_count": 2,
+          "valid_duration_count": 2,
+          "excluded_duration_count": 0
+        }
+      ],
+      "expected": [
+        [
+          35.0,
+          2,
+          2,
+          0
+        ]
+      ]
+    },
+    {
+      "case": "holdout-grain",
+      "split": "holdout",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", q.\"QueueStatus\" AS \"queue_status\", COUNT(DISTINCT q.\"QueueId\") AS \"incident_count\", COALESCE(SUM((SELECT COUNT(*) FROM \"ConnectorHealingLogs\" lx WHERE lx.\"QueueId\"=q.\"QueueId\")),0) AS \"log_count\" FROM \"ConnectorHealingQueue\" q GROUP BY q.\"RootConnectorName\", q.\"QueueStatus\") SELECT * FROM base ORDER BY \"root\" ASC, \"queue_status\" ASC LIMIT :p0",
+      "parameters": {
+        "p0": 1000
+      },
+      "rows": [
+        {
+          "root": "conn-kafka-orders-source",
+          "queue_status": "COMPLETED",
+          "incident_count": 2,
+          "log_count": 7
+        },
+        {
+          "root": "conn-oracle-cdc-payments",
+          "queue_status": "ESCALATED",
+          "incident_count": 1,
+          "log_count": 4
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "queue_status": "PROCESSING",
+          "incident_count": 1,
+          "log_count": 2
+        },
+        {
+          "root": "conn-s3-lakehouse-sink",
+          "queue_status": "PENDING",
+          "incident_count": 1,
+          "log_count": 1
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "queue_status": "WAITING",
+          "incident_count": 1,
+          "log_count": 2
+        }
+      ],
+      "expected": [
+        [
+          "conn-kafka-orders-source",
+          "COMPLETED",
+          2,
+          7
+        ],
+        [
+          "conn-oracle-cdc-payments",
+          "ESCALATED",
+          1,
+          4
+        ],
+        [
+          "conn-postgres-dw-sink",
+          "PROCESSING",
+          1,
+          2
+        ],
+        [
+          "conn-s3-lakehouse-sink",
+          "PENDING",
+          1,
+          1
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          "WAITING",
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "case": "holdout-filtered-events",
+      "split": "holdout",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COUNT(DISTINCT q.\"QueueId\") AS \"incident_count\" FROM \"ConnectorHealingLogs\" l LEFT JOIN \"ConnectorHealingQueue\" q ON l.\"QueueId\"=q.\"QueueId\" WHERE l.\"Severity\" = :p0 GROUP BY q.\"RootConnectorName\") SELECT * FROM base ORDER BY \"root\" ASC LIMIT :p1",
+      "parameters": {
+        "p0": "WARN",
+        "p1": 1000
+      },
+      "rows": [
+        {
+          "root": "conn-kafka-orders-source",
+          "incident_count": 2
+        },
+        {
+          "root": "conn-oracle-cdc-payments",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-s3-lakehouse-sink",
+          "incident_count": 1
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "incident_count": 1
+        }
+      ],
+      "expected": [
+        [
+          "conn-kafka-orders-source",
+          2
+        ],
+        [
+          "conn-oracle-cdc-payments",
+          1
+        ],
+        [
+          "conn-postgres-dw-sink",
+          1
+        ],
+        [
+          "conn-s3-lakehouse-sink",
+          1
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          1
+        ]
+      ]
+    },
+    {
+      "case": "holdout-latest",
+      "split": "holdout",
+      "model_executed": false,
+      "compiler_match": true,
+      "sql": "WITH base AS (SELECT q.\"RootConnectorName\" AS \"root\", COALESCE(SUM((SELECT COUNT(*) FROM \"ConnectorHealingLogs\" lx WHERE lx.\"QueueId\"=q.\"QueueId\")),0) AS \"log_count\" FROM \"ConnectorHealingQueue\" q GROUP BY q.\"RootConnectorName\"), latest AS (SELECT \"RootConnectorName\" AS root, \"QueueStatus\", ROW_NUMBER() OVER (PARTITION BY \"RootConnectorName\" ORDER BY julianday(\"ReceivedAt\") DESC,\"QueueId\" DESC) AS rn FROM \"ConnectorHealingQueue\") SELECT b.*, latest.\"QueueStatus\" AS latest_queue_status FROM base b LEFT JOIN latest ON latest.root IS b.root AND latest.rn=1 WHERE \"log_count\" >= :p0 ORDER BY \"log_count\" DESC, \"root\" ASC LIMIT :p1",
+      "parameters": {
+        "p0": 2,
+        "p1": 1000
+      },
+      "rows": [
+        {
+          "root": "conn-kafka-orders-source",
+          "log_count": 7,
+          "latest_queue_status": "COMPLETED"
+        },
+        {
+          "root": "conn-oracle-cdc-payments",
+          "log_count": 4,
+          "latest_queue_status": "ESCALATED"
+        },
+        {
+          "root": "conn-postgres-dw-sink",
+          "log_count": 2,
+          "latest_queue_status": "PROCESSING"
+        },
+        {
+          "root": "conn-salesforce-crm-ingest",
+          "log_count": 2,
+          "latest_queue_status": "WAITING"
+        }
+      ],
+      "expected": [
+        [
+          "conn-kafka-orders-source",
+          7,
+          "COMPLETED"
+        ],
+        [
+          "conn-oracle-cdc-payments",
+          4,
+          "ESCALATED"
+        ],
+        [
+          "conn-postgres-dw-sink",
+          2,
+          "PROCESSING"
+        ],
+        [
+          "conn-salesforce-crm-ingest",
+          2,
+          "WAITING"
+        ]
+      ]
+    },
+    {
+      "case": "holdout-ambiguous",
+      "split": "holdout",
+      "model_executed": false,
+      "compiler_match": null,
+      "not_run_reason": "Clarification behavior requires model or separate mock contract test"
+    }
+  ],
+  "service_blocked": false,
+  "comparison": "Ordered rows/columns, aliases ignored, NULL exact, numeric absolute tolerance 0.005",
+  "limitations": [
+    "Small evaluation set; no statistical superiority claim",
+    "Shadow uses only remaining calls from the shared 3-call SQL budget",
+    "Provider auto is routing policy, not a verified fixed inference host"
+  ],
+  "summaries": {},
+  "offline_compiler_passed": true,
+  "verification": {
+    "tests_passed": 172,
+    "tests_failed": 0,
+    "lint": "passed for goal runtime/evaluator/tests",
+    "notebook": "nbformat valid; cells parse; inference-only ordered execution tested",
+    "live_status": "not_run_known_prior_HF_HTTP_402",
+    "live_model_accuracy": null,
+    "live_cases_not_run": 33,
+    "preexisting_diff_check_issue": "notebooks/evaluation/evaluate.py:45 trailing whitespace; not introduced by semantic goal"
+  },
+  "completion_audit": [
+    {
+      "requirement": "Qwen-only opt-in with unchanged default legacy",
+      "evidence": "SemanticWorkflow.__init__/query; notebook cell 17; test_default_mode_is_legacy; other consumer regression tests",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Preserve configured HF model/provider, no provider substitution",
+      "evidence": "Notebook cell 12 reads HF_MODEL_ID/HF_PROVIDER; actual config Qwen/Qwen3-4B-Instruct-2507 and auto; adapter preserves both; warning for non-Qwen",
+      "status": "verified"
+    },
+    {
+      "requirement": "Environment-only credentials, safe errors, no saved inference secrets",
+      "evidence": "HF_TOKEN guard in notebook and adapter; safe HFServiceError; notebook mock-HTTP tests assert token absent from output; changed inference outputs cleared",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Typed catalog with source definitions and discovered fields",
+      "evidence": "semantic_plan.Field/Metric/catalog; sql/init-table/ConnectorHealingQueue.sql and ConnectorHealingLogs.sql; connector_repository.complete and HealingStep definitions inspected",
+      "status": "verified"
+    },
+    {
+      "requirement": "Composable plans and model-independent business validation",
+      "evidence": "compile_plan validates shape, types, enums, grain, success filters, duration counts, limits and operations; 10 Gold/holdout SQL equivalence checks",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Bound SQL compilation with grain/JOIN protection and no free-SQL strict fallback",
+      "evidence": "compile_plan owns identifiers/operators, binds values, validates SQL; tests cover injection, duplicates, zero logs, orphans, nullable identities and schema-valid raw SQL rejection",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Read-only executor, allowlist, timeout, row/byte limits and cache invalidation",
+      "evidence": "Snapshot.execute/connect/authorize; analytics/grounding tests; evaluator main hash and WAL signature guard",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Schema requests when supported; local validation without provider change when unsupported",
+      "evidence": "output_schema and QwenClient auto/json_schema/local; explicit incompatibility consumes one counted call; format fallback and local schema tests",
+      "status": "verified_offline_live_support_unverified"
+    },
+    {
+      "requirement": "Distinguish empty, truncated, blocked, JSON/schema, timeout, auth, provider/model, billing/quota errors",
+      "evidence": "QwenClient.complete_stage and test_qwen_adapter; thinking is never substituted for message.content",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Separate timeouts/output limits and at most 3 total SQL-stage calls",
+      "evidence": "Notebook HF_SQL_REQUEST_TIMEOUT_SECONDS/HF_RESPONSE_REQUEST_TIMEOUT_SECONDS and token budgets; Workflow max_attempts cap; shadow remaining budget; installed SDK HTTP count tests",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Stop live evaluation on billing/quota; no hidden retries",
+      "evidence": "test_billing_stops_remaining_modes_and_cases; strict/shadow service guards; SDK HTTP 402/429/503 tests see exactly one POST",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Separate SQL and Vietnamese response cells with observability",
+      "evidence": "Notebook cells 19/20; ordered tests from repo and provider cwd, plus actual adapter/SDK with mocked HTTP; plan/SQL/parameters/diagnostics/source/timing printed",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Separate shadow telemetry without changing the legacy result",
+      "evidence": "test_shadow_budget_separate_metrics; metrics.shadow and total_sql_api_calls; independent shadow trace/result/timing",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Preserve refresh flow and source data, do not execute refresh by default",
+      "evidence": "Refresh source retained; tests execute only inference cells; snapshot hash unchanged; evaluator opens SQLite read-only and never connects MSSQL",
+      "status": "verified"
+    },
+    {
+      "requirement": "Evidence validation plus deterministic fallback",
+      "evidence": "Inherited Workflow.respond/validate_claims; generic analytics tests and Qwen notebook valid/fallback mock-HTTP tests",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Duration NULL, timezone and quality counts including 60/10 => 35 fixture",
+      "evidence": "test_duration_quality and grounding duration tests; explicit normal/missing/malformed/offsets/negative/zero/no_success fixtures; no runtime constant result",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Gold Queries, holdout and metamorphic evaluation",
+      "evidence": "semantic_cases evaluation-only plans; 10 queries plus one ambiguous case; log duplication/time-offset metamorphic tests; holdout latest combines log HAVING and latest status",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Same configuration and comparison rules across legacy/shadow/strict",
+      "evidence": "evaluate_qwen_semantics.evaluate shares client/snapshot/settings/cases and matches; per-request settings recorded; mode order rotates",
+      "status": "verified_offline_live_comparison_not_run"
+    },
+    {
+      "requirement": "First/final execution accuracy, valid SQL rate, latency/fallback and service failure reporting",
+      "evidence": "evaluate_qwen_semantics.summarize; unrun statuses excluded rather than marked pass; billing stop test checks denominators",
+      "status": "verified_offline"
+    },
+    {
+      "requirement": "Regression tests, lint, notebook validity and limits report",
+      "evidence": "172 tests passed; scoped Ruff passed; nbformat and AST checks passed; SEMANTIC_ENFORCEMENT.md documents supported/unsupported operations and interpretation limits",
+      "status": "verified"
+    },
+    {
+      "requirement": "Do not mistake mocks/offline matches for Qwen accuracy; permitted blocked-live completion",
+      "evidence": "model_accuracy is null; previous HF benchmark HTTP 402 recorded in benchmark-2026-09-04.md; no charged inference repeated; 33 live mode/case runs unrun",
+      "status": "allowed_live_exception_reported"
+    },
+    {
+      "requirement": "No Gemini edits/restoration or live calls to another provider",
+      "evidence": "No goal edits to Gemini/Nemotron provider files; existing Gemini deletions preserved; consumer regressions use mock HTTP only",
+      "status": "verified"
+    }
+  ]
+}

@@ -1,0 +1,757 @@
+{
+  "method": "Paired live response-only replay on 4 gold cases; SQL originally generated with thinking=true and re-executed/read-only verified against Gold rows. No SQL model calls in this experiment. Same evidence/question/interpretation(null)/budget within each pair. Order counterbalanced. Single observation per configuration per case.",
+  "model": "nemotron-3-ultra",
+  "response_max_tokens": 4096,
+  "summary": {
+    "true": {
+      "mean_response_seconds": 40.52214275000006,
+      "output_tokens": 1995,
+      "fallbacks": 0,
+      "cases": 4
+    },
+    "false": {
+      "mean_response_seconds": 25.587065599999733,
+      "output_tokens": 853,
+      "fallbacks": 0,
+      "cases": 4
+    },
+    "latency_reduction_percent": 36.85658293575875,
+    "output_token_reduction_percent": 57.24310776942356
+  },
+  "records": [
+    {
+      "case": 1,
+      "response_thinking": false,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "conn-kafka-orders-source có 2 incident đã lưu trong snapshot.\nconn-oracle-cdc-payments có 1 incident đã lưu trong snapshot.\nconn-postgres-dw-sink có 1 incident đã lưu trong snapshot.\nconn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.\nconn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+        "claims": [
+          {
+            "text": "conn-kafka-orders-source có 2 incident đã lưu trong snapshot.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 0,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-oracle-cdc-payments có 1 incident đã lưu trong snapshot.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 1,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-postgres-dw-sink có 1 incident đã lưu trong snapshot.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 2,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-s3-lakehouse-sink có 1 incident đã lưu trong snapshot.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 3,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-salesforce-crm-ingest có 1 incident đã lưu trong snapshot.",
+            "evidence": [
+              {
+                "row": 4,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 4,
+                "column": "incident_count"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2292,
+            "output": 284,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": false,
+            "thinking_requested": false
+          }
+        ],
+        "response_stage_seconds": 24.398639800001547
+      }
+    },
+    {
+      "case": 1,
+      "response_thinking": true,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "conn-kafka-orders-source có 2 incident đã lưu trong hàng đợi tự sửa theo snapshot.\nconn-oracle-cdc-payments có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.\nconn-postgres-dw-sink có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.\nconn-s3-lakehouse-sink có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.\nconn-salesforce-crm-ingest có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+        "claims": [
+          {
+            "text": "conn-kafka-orders-source có 2 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 0,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-oracle-cdc-payments có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 1,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-postgres-dw-sink có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 2,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-s3-lakehouse-sink có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 3,
+                "column": "incident_count"
+              }
+            ]
+          },
+          {
+            "text": "conn-salesforce-crm-ingest có 1 incident đã lưu trong hàng đợi tự sửa theo snapshot.",
+            "evidence": [
+              {
+                "row": 4,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 4,
+                "column": "incident_count"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2292,
+            "output": 550,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": true,
+            "thinking_requested": true
+          }
+        ],
+        "response_stage_seconds": 27.01423249999789
+      }
+    },
+    {
+      "case": 2,
+      "response_thinking": true,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "conn-kafka-orders-source có 7 healing log trong snapshot.\nconn-oracle-cdc-payments có 4 healing log trong snapshot.\nconn-postgres-dw-sink có 2 healing log trong snapshot.\nconn-s3-lakehouse-sink có 1 healing log trong snapshot.\nconn-salesforce-crm-ingest có 2 healing log trong snapshot.",
+        "claims": [
+          {
+            "text": "conn-kafka-orders-source có 7 healing log trong snapshot.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 0,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-oracle-cdc-payments có 4 healing log trong snapshot.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 1,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-postgres-dw-sink có 2 healing log trong snapshot.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 2,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-s3-lakehouse-sink có 1 healing log trong snapshot.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 3,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-salesforce-crm-ingest có 2 healing log trong snapshot.",
+            "evidence": [
+              {
+                "row": 4,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 4,
+                "column": "total_healing_logs"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2314,
+            "output": 573,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": true,
+            "thinking_requested": true
+          }
+        ],
+        "response_stage_seconds": 27.794692999999825
+      }
+    },
+    {
+      "case": 2,
+      "response_thinking": false,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "conn-kafka-orders-source có tổng cộng 7 healing log.\nconn-oracle-cdc-payments có tổng cộng 4 healing log.\nconn-postgres-dw-sink có tổng cộng 2 healing log.\nconn-s3-lakehouse-sink có tổng cộng 1 healing log.\nconn-salesforce-crm-ingest có tổng cộng 2 healing log.",
+        "claims": [
+          {
+            "text": "conn-kafka-orders-source có tổng cộng 7 healing log.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 0,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-oracle-cdc-payments có tổng cộng 4 healing log.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 1,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-postgres-dw-sink có tổng cộng 2 healing log.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 2,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-s3-lakehouse-sink có tổng cộng 1 healing log.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 3,
+                "column": "total_healing_logs"
+              }
+            ]
+          },
+          {
+            "text": "conn-salesforce-crm-ingest có tổng cộng 2 healing log.",
+            "evidence": [
+              {
+                "row": 4,
+                "column": "RootConnectorName"
+              },
+              {
+                "row": 4,
+                "column": "total_healing_logs"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2314,
+            "output": 294,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": false,
+            "thinking_requested": false
+          }
+        ],
+        "response_stage_seconds": 25.657941099998425
+      }
+    },
+    {
+      "case": 3,
+      "response_thinking": false,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "Severity ERROR có 2 log.\nSeverity FATAL có 1 log.\nSeverity INFO có 6 log.\nSeverity WARN có 7 log.",
+        "claims": [
+          {
+            "text": "Severity ERROR có 2 log.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "Severity"
+              },
+              {
+                "row": 0,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity FATAL có 1 log.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "Severity"
+              },
+              {
+                "row": 1,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity INFO có 6 log.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "Severity"
+              },
+              {
+                "row": 2,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity WARN có 7 log.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "Severity"
+              },
+              {
+                "row": 3,
+                "column": "log_count"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2201,
+            "output": 188,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": false,
+            "thinking_requested": false
+          }
+        ],
+        "response_stage_seconds": 25.905428199999733
+      }
+    },
+    {
+      "case": 3,
+      "response_thinking": true,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "Severity ERROR có 2 log trong snapshot.\nSeverity FATAL có 1 log trong snapshot.\nSeverity INFO có 6 log trong snapshot.\nSeverity WARN có 7 log trong snapshot.",
+        "claims": [
+          {
+            "text": "Severity ERROR có 2 log trong snapshot.",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "Severity"
+              },
+              {
+                "row": 0,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity FATAL có 1 log trong snapshot.",
+            "evidence": [
+              {
+                "row": 1,
+                "column": "Severity"
+              },
+              {
+                "row": 1,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity INFO có 6 log trong snapshot.",
+            "evidence": [
+              {
+                "row": 2,
+                "column": "Severity"
+              },
+              {
+                "row": 2,
+                "column": "log_count"
+              }
+            ]
+          },
+          {
+            "text": "Severity WARN có 7 log trong snapshot.",
+            "evidence": [
+              {
+                "row": 3,
+                "column": "Severity"
+              },
+              {
+                "row": 3,
+                "column": "log_count"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2201,
+            "output": 313,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": true,
+            "thinking_requested": true
+          }
+        ],
+        "response_stage_seconds": 58.183100000002014
+      }
+    },
+    {
+      "case": 4,
+      "response_thinking": true,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "Log có Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL).",
+        "claims": [
+          {
+            "text": "Log có Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL).",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "Id"
+              },
+              {
+                "row": 0,
+                "column": "AttemptNo"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2172,
+            "output": 559,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": true,
+            "thinking_requested": true
+          }
+        ],
+        "response_stage_seconds": 49.0965455000005
+      }
+    },
+    {
+      "case": 4,
+      "response_thinking": false,
+      "sql_origin": "replayed from prior thinking=true run; no new SQL inference",
+      "response": {
+        "source": "ollama_cloud",
+        "text": "Log có Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL).",
+        "claims": [
+          {
+            "text": "Log có Id C5C61147-63FD-4082-86CF-FD3EC7E3A2FD có AttemptNo không có giá trị (NULL).",
+            "evidence": [
+              {
+                "row": 0,
+                "column": "Id"
+              },
+              {
+                "row": 0,
+                "column": "AttemptNo"
+              }
+            ]
+          }
+        ],
+        "scope": "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
+      },
+      "metrics": {
+        "model": "nemotron-3-ultra",
+        "provider": "ollama_cloud",
+        "sql_api_calls": 0,
+        "response_api_calls": 1,
+        "sql_attempts": 0,
+        "valid_sql_attempts": 0,
+        "policy_rejections": 0,
+        "result_reviews": 0,
+        "diagnostic_queries": 0,
+        "correction_count": 0,
+        "tokens": {
+          "response": {
+            "input": 2172,
+            "output": 87,
+            "cached_tokens": null
+          }
+        },
+        "few_shot_enabled": true,
+        "model_responses": [
+          {
+            "stage": "response",
+            "model": "nemotron-3-ultra",
+            "provider": "ollama_cloud",
+            "done_reason": "stop",
+            "thinking_present": false,
+            "thinking_requested": false
+          }
+        ],
+        "response_stage_seconds": 26.386253299999225
+      }
+    }
+  ]
+}
