@@ -1,0 +1,42 @@
+{
+  "target": "poc-mssql / 127.0.0.1:14330 / ingest_reference",
+  "deleted": {
+    "ConnectorHealingQueue": 6,
+    "ConnectorHealingLogs": 16
+  },
+  "inserted": {
+    "ConnectorHealingQueue": 27,
+    "ConnectorHealingLogs": 293
+  },
+  "backup": "C:\\Users\\ROG STRIX\\Documents\\GitHub\\self-healthy-kafka\\backups\\healing\\20260905T155607-efa948fd623041e09668812a7b6c2e49.json.bak",
+  "readback_matches": true,
+  "stored_procedure_hydration_checked": 27,
+  "summary": {
+    "queues": 27,
+    "logs": 293,
+    "statuses": {
+      "COMPLETED": 15,
+      "ESCALATED": 9,
+      "WAITING": 1,
+      "PENDING": 1,
+      "PROCESSING": 1
+    },
+    "events": {
+      "HEALTH_FAILURE_OBSERVED": 148,
+      "HEALTH_FAILED_CONFIRMED": 24,
+      "TASK_RESTART": 59,
+      "HEALING_RECOVERED": 14,
+      "CONNECTOR_RESTART": 18,
+      "OFFSET_CAPTURED": 7,
+      "CONNECTOR_RECREATE_WITH_OFFSET": 5,
+      "CONNECTOR_RECREATE_WITHOUT_OFFSET": 5,
+      "HEALING_ESCALATED": 1,
+      "CONNECTOR_RECREATE_WITH_OFFSET_TIMEOUT": 1,
+      "OFFSET_PATCH_FAILED": 1,
+      "CONNECTOR_RECREATE_WITH_OFFSET_FAILED": 2,
+      "HEALING_LEVEL_LIMIT_REACHED": 8
+    }
+  },
+  "sample_file": "C:\\Users\\ROG STRIX\\Documents\\GitHub\\self-healthy-kafka\\sql\\test-data\\generated-healing-samples.json",
+  "snapshot_unchanged": true
+}

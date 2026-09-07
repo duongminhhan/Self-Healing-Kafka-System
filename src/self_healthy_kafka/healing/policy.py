@@ -73,7 +73,7 @@ class TransitionPolicy:
             return RecoveryDecision(RecoveryAction.ESCALATE)
         if event in TERMINAL_EVENTS and job.latest_has_next_step is False:
             return RecoveryDecision(RecoveryAction.STOP)
-        if job.failed_count < self.policy.failure_confirm_checks:
+        if not job.failure_confirmed and job.failed_count < self.policy.failure_confirm_checks:
             return RecoveryDecision(RecoveryAction.DEBOUNCE)
         if has_failed_tasks and (
             job.task_restart_count < self.policy.task_restart_max_attempts
@@ -103,11 +103,11 @@ class TransitionPolicy:
         if job.failed_task:
             return (
                 job.task_restart_count >= self.policy.task_restart_max_attempts
-                and job.failed_count
+                and (job.failure_confirmed or job.failed_count
                 >= (
                     self.policy.failure_confirm_checks
                     + self.policy.task_restart_max_attempts
-                )
+                ))
             )
         return True
 

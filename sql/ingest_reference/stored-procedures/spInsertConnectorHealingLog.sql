@@ -10,6 +10,31 @@ CREATE OR ALTER PROCEDURE dbo.spInsertConnectorHealingLog
 as
 begin
     set nocount on;
+    set xact_abort on;
+
+    -- Serialize confirmation writers on the parent row, even when no log exists.
+    -- Other event types intentionally retain their append-only semantics.
+    begin transaction;
+    if @eventtype = 'HEALTH_FAILED_CONFIRMED'
+    begin
+        declare @existingqueue uniqueidentifier;
+        select @existingqueue = [QueueId]
+        from dbo.ConnectorHealingQueue with (updlock, holdlock)
+        where [QueueId] = @queueid;
+        if @existingqueue is null
+        begin
+            rollback transaction;
+            throw 50002, 'Queue does not exist.', 1;
+        end;
+        if exists (
+            select 1 from dbo.ConnectorHealingLogs
+            where [QueueId] = @queueid and [EventType] = 'HEALTH_FAILED_CONFIRMED'
+        )
+        begin
+            commit transaction;
+            return;
+        end;
+    end;
 
     insert into [dbo].[ConnectorHealingLogs] (
         [QueueId],
@@ -31,4 +56,5 @@ begin
         @message,
         @details
     );
+    commit transaction;
 END;

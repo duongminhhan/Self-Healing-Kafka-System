@@ -455,9 +455,13 @@ class Workflow:
             "few_shot_enabled": self.few_shot,
         }
 
-    def call(self, messages, stage, max_tokens):
+    def call(self, messages, stage, max_tokens, *, contract=None):
         self.metrics[stage + "_api_calls"] += 1
-        if callable(getattr(self.client, "complete_stage", None)):
+        if contract and callable(getattr(self.client, "complete_contract", None)):
+            completion = self.client.complete_contract(
+                messages, stage, max_tokens, contract=contract
+            )
+        elif callable(getattr(self.client, "complete_stage", None)):
             completion = self.client.complete_stage(messages, stage, max_tokens)
         else:
             completion = self.client.chat_completion(
@@ -483,7 +487,8 @@ class Workflow:
             self.metrics.setdefault("model_responses", []).append({"stage": stage, **metadata})
         output_error = getattr(completion, "output_error", None)
         if output_error:
-            raise QueryError(output_error)
+            detail = getattr(completion, "validation_detail", None)
+            raise QueryError(output_error + (": " + detail if detail else ""))
         if not completion.choices or completion.choices[0].finish_reason != "stop":
             raise QueryError("Model output did not complete normally (possibly token limit).")
         return parse_json_output(completion.choices[0].message.content)
@@ -505,15 +510,24 @@ class Workflow:
         try:
             clarification_reviewed = False
             pending_result = None
+            pending_interpretation = None
             reviewed_sql = set()
             for attempt in range(self.max_attempts):
                 if self.trace and self.trace[-1].get("status") == "rejected":
                     self.metrics["correction_count"] += 1
                 decision = None
                 try:
-                    decision = self.call(messages, "sql", self.sql_max_tokens)
+                    decision = self.call(
+                        messages,
+                        "sql",
+                        self.sql_max_tokens,
+                        contract="legacy_review"
+                        if pending_result is not None
+                        else "legacy_generation",
+                    )
                     if decision.get("kind") == "accept_result" and pending_result is not None:
                         self.result = pending_result
+                        self.interpretation = pending_interpretation
                         self.trace.append({"attempt": attempt + 1, "status": "result_confirmed"})
                         return self.result
                     if decision.get("kind") == "clarification":
@@ -585,6 +599,7 @@ class Workflow:
                         if candidate["sql"] not in reviewed_sql and attempt + 1 < self.max_attempts:
                             reviewed_sql.add(candidate["sql"])
                             pending_result = candidate
+                            pending_interpretation = self.interpretation
                             self.metrics["result_reviews"] += 1
                             messages.extend(
                                 [
@@ -628,7 +643,7 @@ class Workflow:
                             "content": json.dumps(
                                 {
                                     "correction_needed": str(exc),
-                                    "instruction": "Correct the query/output using the original schema and question; do not change the metric.",
+                                    "instruction": "Return compact corrected JSON using the original schema and question; preserve metric, filters and time scope. Never use incomplete output.",
                                 }
                             ),
                         }

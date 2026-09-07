@@ -11,6 +11,7 @@ from self_healthy_kafka.domain.healing import (
     ConnectorJob,
     HealingStep,
     RecoveryAction,
+    RecoveryDecision,
     RecoveryPolicy,
 )
 from self_healthy_kafka.domain.models import HealthResult, HealthStatus
@@ -92,6 +93,7 @@ class ConnectorStateMachine:
         del scn_poll_interval_seconds
         self._recreate_keep_base_connector = recreate_keep_base_connector
         self._healthy_since: dict[str, datetime] = {}
+        self._uncertain_actions: set[str] = set()
         self._connector_locks: dict[str, threading.Lock] = {}
         self._connector_locks_guard = threading.Lock()
         self._actions = HealingActions(
@@ -199,6 +201,9 @@ class ConnectorStateMachine:
                 failure_confirmed=failure_confirmed,
             )
         except Exception as exc:
+            if str(job.id) in self._uncertain_actions:
+                logger.error("Healing action quarantined; persistence unavailable; manual reconciliation required")
+                return ConnectorProcessingOutcome(processed=True, requires_followup=False)
             logger.exception(
                 "[%s] state machine error", connector_name,
                 extra={
@@ -250,6 +255,12 @@ class ConnectorStateMachine:
     ) -> bool:
         job = ConnectorJob.from_mapping(job)
         connector_name = job.connector_name
+        if str(job.id) in self._uncertain_actions:
+            self._quarantine_uncertain_action(job)
+            return False
+        if job.latest_event_type in {EventType.HEALING_ESCALATED, EventType.HEALING_LEVEL_LIMIT_REACHED}:
+            self._db.complete(job.id, "ESCALATED")
+            return False
         wait_until = self._action_wait_until(job)
         if wait_until and utc_now() < wait_until:
             logger.debug(
@@ -296,20 +307,8 @@ class ConnectorStateMachine:
             self._handle_healthy(job, result)
             return job.failed_count > 0
 
-        if failure_confirmed:
-            job = self._mark_failure_confirmed_from_webhook(job, result)
-        self._handle_unhealthy(job, result)
+        self._handle_unhealthy(job, result, failure_confirmed=failure_confirmed)
         return True
-
-    def _mark_failure_confirmed_from_webhook(
-        self,
-        job: ConnectorJob,
-        result: HealthResult,
-    ) -> ConnectorJob:
-        failed_count = max(job.failed_count, self._failure_confirm_checks)
-        if failed_count == job.failed_count:
-            return job
-        return job.copy(failed_count=failed_count)
 
     @staticmethod
     def _is_healing_managed_stopped(job: ConnectorJob) -> bool:
@@ -332,11 +331,10 @@ class ConnectorStateMachine:
             self._handle_post_action_healthy(job, result)
             return
 
-        if int(job.get("failed_count") or 0):
-            self._record_recovered(job, result)
-            return
-
-        # No action is needed for a healthy queue item without an incident step.
+        # Discovery and processing are separate observations: a connector can
+        # recover before the first queue poll. It still needs terminal persistence.
+        # _record_recovered avoids an automated-action audit for this case.
+        self._record_recovered(job, result)
 
     def _handle_post_action_healthy(
         self,
@@ -418,7 +416,9 @@ class ConnectorStateMachine:
                     },
                 )
 
-    def _handle_unhealthy(self, job: JobLike, result: HealthResult) -> None:
+    def _handle_unhealthy(
+        self, job: JobLike, result: HealthResult, *, failure_confirmed: bool = False,
+    ) -> None:
         job = ConnectorJob.from_mapping(job)
         self._healthy_since.pop(str(job.id), None)
 
@@ -457,17 +457,10 @@ class ConnectorStateMachine:
             failed_connector=not bool(result.failed_task_ids),
         )
 
-        decision = self._transitions.decide_unhealthy(
-            job,
-            has_failed_tasks=bool(result.failed_task_ids or job.failed_task),
-        )
-
         incident_id = self._db.ensure_active_incident(job["id"])
-
-        if decision.action == RecoveryAction.DEBOUNCE:
-            return
-
-        if failed_count == self._failure_confirm_checks:
+        if not job.failure_confirmed and (
+            failure_confirmed or failed_count >= self._failure_confirm_checks
+        ):
             self._db.record_connector_log(
                 connector_id=job["id"],
                 connector_name=job["connector_name"],
@@ -488,39 +481,60 @@ class ConnectorStateMachine:
                 ),
             )
 
+            # Set only after persistence succeeds. The insert procedure deduplicates
+            # by queue under a DB lock, including an uncertain-commit retry.
+            job = job.copy(failure_confirmed=True)
+
+        decision = self._transitions.decide_unhealthy(
+            job, has_failed_tasks=bool(result.failed_task_ids or job.failed_task),
+        )
+        if decision.action == RecoveryAction.DEBOUNCE:
+            return
+
+        self._execute_decision(job, result, incident_id, decision)
+
+    def _execute_decision(
+        self, job: ConnectorJob, result: HealthResult, incident_id: str,
+        decision: RecoveryDecision,
+    ) -> None:
+        try:
+            self._dispatch_decision(job, result, incident_id, decision)
+        except Exception:
+            # The external request may have committed before its audit failed.
+            # Never infer success or replay it automatically within this process.
+            self._uncertain_actions.add(str(job.id))
+            self._quarantine_uncertain_action(job)
+
+    def _quarantine_uncertain_action(self, job: ConnectorJob) -> None:
+        self._db.record_connector_log(
+            connector_id=job.id, connector_name=job.connector_name,
+            incident_id=active_incident_id(job), event_type=EventType.HEALING_ESCALATED,
+            message="Action outcome or audit persistence is uncertain; manual reconciliation required.",
+            severity="CRITICAL", has_next_step=False,
+            details={"outcome_uncertain": True, "automatic_replay": False},
+        )
+        self._db.complete(job.id, "ESCALATED")
+        self._uncertain_actions.discard(str(job.id))
+
+    def _dispatch_decision(
+        self, job: ConnectorJob, result: HealthResult, incident_id: str,
+        decision: RecoveryDecision,
+    ) -> None:
+        """One safety gate for all actions, including recreation retries."""
+        if decision.required_level is not None and not self._level_allows(
+            job, result, incident_id, decision.required_level, decision.attempted_event,
+        ):
+            return
+
         if decision.action == RecoveryAction.RESTART_TASKS:
-            if not self._level_allows(
-                job,
-                result,
-                incident_id,
-                decision.required_level,
-                decision.attempted_event,
-            ):
-                return
             self._actions.restart_failed_tasks(job, result, incident_id)
             return
 
         if decision.action == RecoveryAction.RESTART_CONNECTOR:
-            if not self._level_allows(
-                job,
-                result,
-                incident_id,
-                decision.required_level,
-                decision.attempted_event,
-            ):
-                return
             self._actions.restart_connector(job, result, incident_id)
             return
 
         if decision.action == RecoveryAction.RECREATE_WITH_OFFSET:
-            if not self._level_allows(
-                job,
-                result,
-                incident_id,
-                decision.required_level,
-                decision.attempted_event,
-            ):
-                return
             job = self._load_runtime_config(job)
             self._actions.recreate_with_offset(job, result, incident_id)
             return
@@ -537,14 +551,6 @@ class ConnectorStateMachine:
             return
 
         if decision.action == RecoveryAction.RECREATE_WITHOUT_OFFSET:
-            if not self._level_allows(
-                job,
-                result,
-                incident_id,
-                decision.required_level,
-                decision.attempted_event,
-            ):
-                return
             job = self._load_runtime_config(job)
             if self._actions.recreate_without_offset(job, result):
                 return
@@ -568,12 +574,16 @@ class ConnectorStateMachine:
         job: JobLike,
         result: HealthResult,
     ) -> None:
-        job = self._load_runtime_config(ConnectorJob.from_mapping(job))
+        job = ConnectorJob.from_mapping(job)
         incident_id = active_incident_id(job) or self._db.ensure_active_incident(job["id"])
-        if int(job.get("recreate_with_offset_timeout_count") or 0) <= 1:
-            if self._actions.retry_timed_out_recreate_with_offset(job, result, incident_id):
-                return
-        self._actions.escalate(job, result)
+        if job.recreate_with_offset_timeout_count < self._policy.recreate_with_offset_timeout_max_attempts:
+            decision = RecoveryDecision(
+                RecoveryAction.RETRY_RECREATE_WITH_OFFSET,
+                HealingStep.RECREATE_WITH_OFFSET, EventType.CONNECTOR_RECREATE_WITH_OFFSET,
+            )
+        else:
+            decision = RecoveryDecision(RecoveryAction.ESCALATE)
+        self._execute_decision(job, result, incident_id, decision)
 
     def _level_allows(
         self,

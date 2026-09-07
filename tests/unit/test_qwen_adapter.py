@@ -74,7 +74,7 @@ def test_output_contract(content, reason, error):
             ]
         )
     )
-    result = client(fake).complete_stage([], "sql", 512)
+    result = client(fake).complete_contract([], "sql", 512, contract="strict_planning")
     assert result.output_error == error
     assert result.reported_usage == {"input": None, "output": None}
     assert len(fake.calls) == 1

@@ -49,7 +49,10 @@ def latest_event_at(job: Mapping[str, Any]) -> datetime | None:
 
 def level(job: Mapping[str, Any]) -> int:
     """Get healing level from job record."""
-    return int(job.get("level") or 1)
+    configured = int(job.get("level") or 1)
+    if job.get("healing_mode") == "RESTART_ONLY":
+        return min(configured, 2)
+    return configured
 
 
 def recovery_details(

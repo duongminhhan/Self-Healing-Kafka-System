@@ -126,7 +126,8 @@ def test_default_mode_is_legacy(snapshot_file, monkeypatch):
     assert state["workflow"].mode == "legacy"
 
 
-def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, capsys):
+@pytest.mark.parametrize("mode", ["legacy", "strict", "shadow"])
+def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, capsys, mode):
     import httpx
     import huggingface_hub.inference._client as sdk
 
@@ -138,7 +139,14 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
     def handler(request):
         body = json.loads(request.content)
         requests.append(body)
-        if len(requests) == 1:
+        contract = body["response_format"]["json_schema"]["name"]
+        if contract == "qwen_legacy_generation":
+            content = {
+                "kind": "sql",
+                "sql": "SELECT QueueStatus AS queue_status,COUNT(*) AS incident_count FROM ConnectorHealingQueue GROUP BY QueueStatus ORDER BY QueueStatus",
+                "interpretation": "All queue incidents by status",
+            }
+        elif contract == "qwen_strict_planning":
             content = {
                 "kind": "query",
                 "entity": "incidents",
@@ -179,7 +187,7 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
     monkeypatch.setenv("HF_MODEL_ID", "Qwen/test")
     monkeypatch.setenv("HF_PROVIDER", "auto")
     monkeypatch.setenv("HF_STRUCTURED_OUTPUT", "auto")
-    monkeypatch.setenv("QWEN_SEMANTIC_MODE", "strict")
+    monkeypatch.setenv("QWEN_SEMANTIC_MODE", mode)
     monkeypatch.setenv("BENCHMARK_SQLITE_PATH", str(snapshot_file))
     monkeypatch.delenv("HF_SQL_ALLOWED_TABLES", raising=False)
     state = {"os": os, "Path": Path, "REPO_ROOT": ROOT}
@@ -189,7 +197,7 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
             exec(
                 compile("".join(nb["cells"][index]["source"]), f"qwen-cell-{index}", "exec"), state
             )
-    assert len(requests) == 2
+    assert len(requests) == (3 if mode == "shadow" else 2)
     assert all(r["response_format"]["type"] == "json_schema" for r in requests)
     assert state["final_answer"]["source"] == "huggingface"
     assert state["workflow"].metrics["tokens"]["sql"] == {"input": 100, "output": 30}

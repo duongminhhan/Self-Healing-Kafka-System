@@ -15,7 +15,7 @@ BEGIN
 
     SELECT TOP (@Limit)
         [IncidentId], [JobName], [ConnectorName], [FailureAt], [RecoveredAt],
-        [FinalOutcome], [EventType], [Severity], [ErrorCode]
+        [FinalOutcome], [EventType], [Severity], [ErrorCode], [CompletedAt], [QueueStatus]
     FROM [dbo].[vConnectorIncidentFacts]
     WHERE (@FromAt IS NULL OR [FailureAt] >= @FromAt)
       AND (@ToAt IS NULL OR [FailureAt] < @ToAt)

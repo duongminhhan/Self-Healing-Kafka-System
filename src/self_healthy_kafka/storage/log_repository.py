@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from self_healthy_kafka.redaction import redact, redact_text
 from self_healthy_kafka.storage.common import json_value, rows_to_dicts
 
 logger = logging.getLogger(__name__)
@@ -35,13 +36,14 @@ class MssqlConnectorLogRepository:
         details: dict[str, Any] | None = None,
         **ignored: Any,
     ) -> None:
-        log_details = _connector_log_details(
+        message = redact_text(message)
+        log_details = redact(_connector_log_details(
             details=details,
             severity=severity,
             task_id=task_id,
             scn=scn,
             commit_scn=commit_scn,
-        )
+        ))
         if connector_id is None:
             raise ValueError("queue id is required to persist a healing log")
         sql = (

@@ -13,14 +13,34 @@ root `.env` or process environment, never notebook cells or outputs.
 HF_TOKEN=<secret supplied outside the notebook>
 HF_MODEL_ID=<keep current Qwen model>
 HF_PROVIDER=<keep current provider>
-QWEN_SEMANTIC_MODE=strict
+QWEN_SEMANTIC_MODE=legacy
 HF_STRUCTURED_OUTPUT=auto
 HF_SQL_REQUEST_TIMEOUT_SECONDS=30
 HF_RESPONSE_REQUEST_TIMEOUT_SECONDS=30
-HF_MAX_TOKENS=1024
+HF_MAX_TOKENS=2048
+HF_SQL_MAX_TOKEN_CEILING=4096
 HF_RESPONSE_MAX_TOKENS=1500
 HF_AGENT_MAX_STEPS=3
 ```
+
+`HF_MAX_TOKENS` is the initial SQL output budget, not a minimum imposed on explicit
+settings. An existing `.env` value of 1024 remains 1024. Only `finish_reason=length`
+doubles the next budgeted SQL call, up to `HF_SQL_MAX_TOKEN_CEILING`. Its default is
+4096, or the explicit initial budget if higher. Set the ceiling equal to the initial
+budget to disable growth. `HF_MODEL_OUTPUT_TOKEN_LIMIT` optionally supplies a known
+lower deployment output cap for both SQL and response requests. Initial SQL settings
+exceeding either cap, or `HF_RESPONSE_MAX_TOKENS` exceeding the deployment cap, fail
+before inference; explicit settings are not silently clamped.
+There is no universal provider cap discovery via HF auto routing. Configure a lower cap
+for deployments that need one; unsupported parameters are service errors, not permission
+to increase or silently switch providers. Growth does not add attempts; rerunning the
+question resets the initial budget. Response budget is independent and never auto-grown.
+
+The [HF chat API](https://huggingface.co/docs/inference-providers/tasks/chat-completion)
+defines `max_tokens` as the maximum generated completion tokens and returns finish reasons
+and usage. The [Qwen model card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
+describes the model, not every hosted provider's capacity. Actual requested budgets,
+finish reasons and token usage are recorded per call; missing usage stays unknown.
 
 Open `text_to_sql_self_healthy_kafka.ipynb`. Run zero-based cells **3, 10, 12, 17, 19, 20**
 in order for inference on the existing snapshot. Cell 0 is optional dependency installation.
@@ -75,6 +95,28 @@ passing evidence checks do not prove end-to-end business correctness.
 
 ## HF output and service contract
 
+Contracts are state-specific: legacy generation requires `kind=sql`, `sql`, and
+`interpretation`, or a clarification; strict planning accepts only a semantic plan or
+clarification. `accept_result` is allowed only in legacy review after a verified candidate
+exists. Shadow uses each branch's own contract. All payloads are validated locally against
+the exact contract sent to the provider. Invalid/truncated output cannot reach SQLite.
+Accepting a pending result also restores that candidate's interpretation, even after a
+replacement SQL attempt was rejected; rejected SQL cannot relabel the accepted evidence.
+
+The wire schema is a root object with a typed `kind` discriminator and conditional
+branches. Live probes on the configured Qwen/auto route repeatedly over-clarified with
+root union schemas; the conditional shape produced SQL for the original question without
+changing the prompt's metric or removing clarification. This is observed routing behavior,
+not proof about provider internals or universal support for conditional constrained decoding.
+Local branch enforcement remains mandatory even when a provider accepts the schema.
+
+`workflow.metrics['calls']` contains mode/stage/contract, requested budget, bounded
+output kind and validation details, finish reason, per-call tokens and latency, correction
+and result-review counts. `response_source` and `fallback_reason` identify the answer path.
+No raw model body, thinking, unknown model-controlled keys or credential is logged by this
+diagnostic layer. Missing required fields and invalid kind/type are correction feedback,
+not fabricated defaults. The SQL and response cells remain separately timed.
+
 Schema requests follow the official [HF structured-output guide](https://huggingface.co/docs/inference-providers/guides/structured-output).
 `auto` attempts schema on the ordinary budgeted request, without an extra generation preflight.
 Only an explicit HTTP 400/422 format-unsupported error permits the next budgeted SQL call to use
@@ -126,9 +168,9 @@ Qwen notebook cells from repo/provider directories. HTTP is mocked, not live-mod
 Other consumers have offline regressions. No refresh cells or live provider endpoints are used.
 
 ```powershell
-python -m pytest tests/unit/test_qwen_adapter.py tests/unit/test_qwen_semantic_integration.py tests/unit/test_semantic_plan.py tests/unit/test_notebook_analytics.py tests/unit/test_notebook_grounding.py tests/unit/test_notebook_nemotron.py -q
+python -m pytest tests/unit/test_qwen_contract_recovery.py tests/unit/test_qwen_adapter.py tests/unit/test_qwen_semantic_integration.py tests/unit/test_semantic_plan.py tests/unit/test_notebook_analytics.py tests/unit/test_notebook_grounding.py tests/unit/test_notebook_nemotron.py -q
 ```
 
-Live semantic comparison has not run: the preceding HF benchmark ended in HTTP 402. Offline
-results are in `../evaluation/qwen-semantic-validation.json`. No claim that strict is faster or
-more accurate follows from offline tests. Deleted legacy documentation has not been recreated.
+Historical generated validation reports have been removed. Run the evaluator on the
+current snapshot to obtain fresh results; offline tests do not establish live model
+accuracy or latency, and matching rows on a small fixture is not a semantic proof.

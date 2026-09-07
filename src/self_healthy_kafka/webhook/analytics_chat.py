@@ -201,15 +201,23 @@ def _aggregate(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, An
                     if duration is not None:
                         durations.append(duration)
                 fact[metric.name] = round(sum(durations) / len(durations), 2) if durations else None
+                fact["valid_recovery_duration_count"] = len(durations)
+                fact["excluded_recovery_duration_count"] = len(items) - len(durations)
         facts.append(fact)
     return sorted(facts, key=lambda item: (item.get(plan.order_by) is None, item.get(plan.order_by, 0)), reverse=plan.direction == "desc")[:plan.limit]
 
 
 def _duration(item: dict[str, Any]) -> float | None:
+    if item.get("final_outcome") != "RECOVERED" or item.get("queue_status") != "COMPLETED":
+        return None
     start, end = item.get("failure_at"), item.get("recovered_at")
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return None
-    return (end - start).total_seconds() / 60
+    # MSSQL timestamps are offset-aware. Unknown timezones must not be guessed.
+    if start.utcoffset() is None or end.utcoffset() is None:
+        return None
+    minutes = (end - start).total_seconds() / 60
+    return minutes if minutes >= 0 else None
 
 
 def _answer(facts: list[dict[str, Any]], plan: QueryPlan, from_at: datetime | None, to_at: datetime | None, comparison_facts: list[dict[str, Any]]) -> str:

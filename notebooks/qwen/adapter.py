@@ -11,9 +11,13 @@ from types import SimpleNamespace
 
 import httpx
 from huggingface_hub import InferenceClient
-from jsonschema import Draft202012Validator
 
-from notebooks.qwen.output_schema import SCHEMAS, response_format
+from notebooks.qwen.output_schema import (
+    SCHEMAS,
+    contract_error,
+    contract_instruction,
+    response_format,
+)
 
 
 class HFServiceError(RuntimeError):
@@ -59,18 +63,37 @@ class QwenClient:
             if response_formats is not None
             else {stage: response_format(stage) for stage in SCHEMAS}
         )
+        for name, value in self.response_formats.items():
+            if name not in SCHEMAS or value != response_format(name):
+                raise ValueError("Custom response formats must match the local contract exactly")
 
     def complete_stage(self, messages, stage, max_tokens):
+        return self.complete_contract(
+            messages,
+            stage,
+            max_tokens,
+            contract="legacy_generation" if stage == "sql" else "response",
+        )
+
+    def complete_contract(self, messages, stage, max_tokens, *, contract):
         if stage not in self.timeouts:
             raise ValueError("Unknown HF generation stage")
+        if contract not in SCHEMAS or (stage == "response") != (contract == "response"):
+            raise ValueError("Contract does not match HF stage")
+        messages = [dict(message) for message in messages]
+        instruction = contract_instruction(contract)
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] += "\n" + instruction
+        else:
+            messages.insert(0, {"role": "system", "content": instruction})
         kwargs = {"messages": messages, "max_tokens": max_tokens, "temperature": 0}
         format_requested = (
             self.structured_output != "local"
-            and stage not in self.format_rejected
-            and stage in self.response_formats
+            and contract not in self.format_rejected
+            and contract in self.response_formats
         )
         if format_requested:
-            kwargs["response_format"] = self.response_formats[stage]
+            kwargs["response_format"] = self.response_formats[contract]
         try:
             with self.factory(
                 model=self.model,
@@ -127,6 +150,8 @@ class QwenClient:
         message = getattr(choice, "message", None)
         content = getattr(message, "content", None)
         error = None
+        validation_detail = None
+        output_kind = None
         if reason == "length":
             error = "output_truncated"
         elif reason in {"content_filter", "safety"}:
@@ -150,14 +175,24 @@ class QwenClient:
                 )
                 if not isinstance(parsed, dict):
                     error = "invalid_json_object"
-                elif not Draft202012Validator(SCHEMAS[stage]).is_valid(parsed):
-                    error = "invalid_output_schema"
+                else:
+                    kind = parsed.get("kind")
+                    output_kind = (
+                        kind
+                        if isinstance(kind, str)
+                        and kind in {"sql", "query", "clarification", "accept_result"}
+                        else "other_or_missing"
+                    )
+                    validation_detail = contract_error(parsed, contract)
+                    if validation_detail:
+                        error = "invalid_output_schema"
             except (ValueError, TypeError, RecursionError):
                 error = "invalid_json"
         usage = getattr(completion, "usage", None)
         return SimpleNamespace(
             choices=choices,
             output_error=error,
+            validation_detail=validation_detail,
             reported_usage={
                 "input": getattr(usage, "prompt_tokens", None),
                 "output": getattr(usage, "completion_tokens", None),
@@ -167,9 +202,16 @@ class QwenClient:
                 "provider": self.provider,
                 "finish_reason": reason,
                 "output_error": error,
+                "contract": contract,
+                "output_kind": output_kind,
+                "validation_error": validation_detail,
                 "timeout_seconds": self.timeouts[stage],
                 "max_tokens": max_tokens,
                 "temperature": 0,
+                "token_usage": {
+                    "input": getattr(usage, "prompt_tokens", None),
+                    "output": getattr(usage, "completion_tokens", None),
+                },
                 "format_requested": format_requested,
                 "format_status": (
                     "accepted_and_locally_valid"

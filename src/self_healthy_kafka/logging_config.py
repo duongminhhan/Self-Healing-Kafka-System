@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 
 from pythonjsonlogger import jsonlogger
 
 from self_healthy_kafka.config import cfg
+from self_healthy_kafka.redaction import redact, redact_text
 
 
 class _SafeStreamHandler(logging.StreamHandler):
     def emit(self, record):
         try:
-            msg = self.format(record)
+            formatted = self.format(record)
+            try:
+                msg = json.dumps(redact(json.loads(formatted)), ensure_ascii=False)
+            except (ValueError, TypeError):
+                msg = redact_text(formatted)
             self.stream.write(msg + self.terminator)
             try:
                 self.stream.flush()

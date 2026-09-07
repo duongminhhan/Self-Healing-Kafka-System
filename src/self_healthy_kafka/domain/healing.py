@@ -82,6 +82,7 @@ class ConnectorJob(MutableMapping[str, Any]):
     level: int = 1
     active_config: dict[str, Any] | None = None
     failed_count: int = 0
+    failure_confirmed: bool = False
     failed_connector: bool = False
     failed_task: bool = False
     active_incident_id: str | None = None

@@ -41,7 +41,9 @@ def evaluate(
     provider="auto",
     modes=MODES,
     cases=SEMANTIC_CASES,
-    sql_max_tokens=1024,
+    sql_max_tokens=2048,
+    sql_token_ceiling=None,
+    model_output_token_limit=None,
     response_max_tokens=1500,
     max_attempts=3,
     few_shot=True,
@@ -59,6 +61,8 @@ def evaluate(
             "provider": provider,
             "modes": list(modes),
             "sql_max_tokens": sql_max_tokens,
+            "sql_token_ceiling": sql_token_ceiling,
+            "model_output_token_limit": model_output_token_limit,
             "response_max_tokens": response_max_tokens,
             "max_sql_calls": min(3, max(1, max_attempts)),
             "temperature": 0,
@@ -127,6 +131,8 @@ def evaluate(
                     provider=provider,
                     mode=mode,
                     sql_max_tokens=sql_max_tokens,
+                    sql_token_ceiling=sql_token_ceiling,
+                    model_output_token_limit=model_output_token_limit,
                     response_max_tokens=response_max_tokens,
                     max_attempts=max_attempts,
                     few_shot=few_shot,
@@ -265,7 +271,13 @@ def main():
         provider=provider,
         modes=tuple(args.modes),
         cases=cases,
-        sql_max_tokens=int(os.getenv("HF_MAX_TOKENS", "1024")),
+        sql_max_tokens=int(os.getenv("HF_MAX_TOKENS", "2048")),
+        sql_token_ceiling=int(os.environ["HF_SQL_MAX_TOKEN_CEILING"])
+        if os.getenv("HF_SQL_MAX_TOKEN_CEILING")
+        else None,
+        model_output_token_limit=int(os.environ["HF_MODEL_OUTPUT_TOKEN_LIMIT"])
+        if os.getenv("HF_MODEL_OUTPUT_TOKEN_LIMIT")
+        else None,
         response_max_tokens=int(os.getenv("HF_RESPONSE_MAX_TOKENS", "1500")),
         max_attempts=int(os.getenv("HF_AGENT_MAX_STEPS", "3")),
         few_shot=os.getenv("HF_FEW_SHOT", "true").lower() in {"true", "1", "yes"},

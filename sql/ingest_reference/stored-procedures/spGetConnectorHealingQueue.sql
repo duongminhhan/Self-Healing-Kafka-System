@@ -29,6 +29,8 @@ begin
         case when q.[QueueStatus] in ('PENDING', 'PROCESSING', 'WAITING')
             then cast(1 as bit) else cast(0 as bit) end as [LatestHasNextStep],
         coalesce(counts.[FailedCount], 0) as [FailedCount],
+        cast(case when counts.[ConfirmationCount] > 0 then 1 else 0 end as bit)
+            as [FailureConfirmed],
         coalesce(counts.[TaskRestartCount], 0) as [TaskRestartCount],
         coalesce(counts.[ConnectorRestartCount], 0) as [ConnectorRestartCount],
         coalesce(counts.[RecreateWithOffsetCount], 0) as [RecreateWithOffsetCount],
@@ -50,6 +52,8 @@ begin
     ) as latest
     outer apply (
         select
+            sum(case when l.[EventType] = 'HEALTH_FAILED_CONFIRMED' then 1 else 0 end)
+                as [ConfirmationCount],
             sum(case when l.[EventType] = 'HEALTH_FAILURE_OBSERVED' then 1 else 0 end)
                 as [FailedCount],
             sum(case when l.[EventType] = 'TASK_RESTART' then 1 else 0 end)

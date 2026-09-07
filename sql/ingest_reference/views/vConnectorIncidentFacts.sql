@@ -5,7 +5,10 @@ SELECT
     q.[RootConnectorName] AS [JobName],
     q.[CurrentConnectorName] AS [ConnectorName],
     failure.[CreatedAt] AS [FailureAt],
-    q.[CompletedAt] AS [RecoveredAt],
+    q.[CompletedAt] AS [CompletedAt],
+    q.[QueueStatus] AS [QueueStatus],
+    CASE WHEN q.[QueueStatus] = 'COMPLETED' AND q.[FinalOutcome] = 'RECOVERED'
+        THEN q.[CompletedAt] END AS [RecoveredAt],
     CASE
         WHEN q.[QueueStatus] IN ('PENDING', 'PROCESSING', 'WAITING') THEN 'OPEN'
         ELSE q.[FinalOutcome]
