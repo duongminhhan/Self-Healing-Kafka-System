@@ -5,7 +5,9 @@ CATALOG = {
     "entities": {
         "ConnectorHealingQueue": {
             "grain": "One persisted incident per QueueId; active enqueue requests reuse it.",
-            "dimensions": ["RootConnectorName", "QueueStatus", "FinalOutcome", "HealingMode"],
+            "dimensions": [
+                "RootConnectorName", "CurrentConnectorName", "QueueStatus", "FinalOutcome", "HealingMode"
+            ],
             "timestamps": {
                 "ReceivedAt": "Incident receipt time, not worker start time.",
                 "StartedAt": "Processing start time; nullable.",
@@ -13,6 +15,13 @@ CATALOG = {
             },
             "metrics": {
                 "incident_count": {"aggregation": "COUNT", "grain_key": "QueueId"},
+                "recovery_count": {"filters": {"FinalOutcome": "RECOVERED"}, "meaning": "Persisted recovered incidents."},
+                "recovery_rate_percent": {
+                    "numerator": "FinalOutcome=RECOVERED",
+                    "denominator": "Terminal incidents with FinalOutcome in RECOVERED, FAILED, ESCALATED",
+                    "unit": "percent; NULL when denominator is zero",
+                },
+                "escalation_count": {"filters": {"FinalOutcome": "ESCALATED"}, "meaning": "Persisted escalated incidents."},
                 "successful_healing": {
                     "filters": {"QueueStatus": "COMPLETED", "FinalOutcome": "RECOVERED"},
                     "meaning": "Recovered incident, not proof of current live health.",
@@ -25,7 +34,7 @@ CATALOG = {
                     "policy": "Exclude missing, unparseable and negative durations from averages; report matched, valid and excluded counts. Zero duration is valid. Round reported averages to 2 decimals. Apply success filters only when success is requested.",
                 },
             },
-            "caveats": "COMPLETED alone is not success: repository.complete marks any non-ESCALATED outcome COMPLETED. Latest incident status requires per-root timestamp ordering, not GROUP BY status.",
+            "caveats": "RootConnectorName is the logical connector identity; CurrentConnectorName is the physical instance for this incident. COMPLETED alone is not success: repository.complete marks any non-ESCALATED outcome COMPLETED. Latest incident status requires per-root timestamp ordering, not GROUP BY status.",
             "sources": [
                 "src/self_healthy_kafka/storage/connector_repository.py:complete",
                 "src/self_healthy_kafka/healing/db_state_machine.py",
@@ -34,11 +43,16 @@ CATALOG = {
             ],
         },
         "ConnectorHealingLogs": {
-            "grain": "One recorded event per Id, not necessarily a failure or incident.",
+            "grain": "One recorded healing action/observation per Id, not necessarily a failure or incident.",
             "dimensions": ["ConnectorName", "Severity", "EventType"],
             "timestamps": {"CreatedAt": "Recorded event time."},
-            "metrics": {"event_count": {"aggregation": "COUNT", "grain_key": "Id"}},
-            "caveats": "Informational actions are included. Error-event criteria must be defined; AttemptNo is not an event count.",
+            "metrics": {
+                "event_count": {"aggregation": "COUNT", "grain_key": "Id"},
+                "confirmed_failure_count": {"EventType": "HEALTH_FAILED_CONFIRMED"},
+                "task_restart_count": {"EventType": "TASK_RESTART"},
+                "connector_restart_count": {"EventType": "CONNECTOR_RESTART"},
+            },
+            "caveats": "Informational actions are included. EventType distinguishes confirmed failures, restart actions, recovery and escalation events; AttemptNo is not an event count.",
             "sources": ["sql/ingest_reference/stored-procedures/spGetConnectorHealingQueue.sql"],
         },
     },

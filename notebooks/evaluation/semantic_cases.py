@@ -66,6 +66,116 @@ GOLD = [
 
 HOLDOUT = [
     {
+        "id": "holdout-independent-totals",
+        "split": "holdout",
+        "question": "Tổng cộng có bao nhiêu incident và healing log?",
+        "reference_sql": "SELECT (SELECT COUNT(*) FROM ConnectorHealingQueue), (SELECT COUNT(*) FROM ConnectorHealingLogs)",
+        "plan": {
+            "kind": "independent",
+            "queries": [
+                {"kind": "query", "entity": "incidents", "dimensions": [], "metrics": ["incident_count"]},
+                {"kind": "query", "entity": "events", "dimensions": [], "metrics": ["log_count"]},
+            ],
+        },
+    },
+    {
+        "id": "holdout-natural-day-independent-totals",
+        "split": "holdout",
+        "question": "Ngày 5 tháng 9 năm 2026 có bao nhiêu incident và healing log?",
+        "reference_sql": (
+            "SELECT "
+            "(SELECT COUNT(*) FROM ConnectorHealingQueue WHERE "
+            "julianday(ReceivedAt)>=julianday('2026-09-04T17:00:00Z') AND "
+            "julianday(ReceivedAt)<julianday('2026-09-05T17:00:00Z')),"
+            "(SELECT COUNT(*) FROM ConnectorHealingLogs WHERE "
+            "julianday(CreatedAt)>=julianday('2026-09-04T17:00:00Z') AND "
+            "julianday(CreatedAt)<julianday('2026-09-05T17:00:00Z'))"
+        ),
+        "plan": {
+            "kind": "independent",
+            "queries": [
+                {
+                    "kind": "query", "entity": "incidents", "dimensions": [],
+                    "metrics": ["incident_count"], "filters": [
+                        {"field": "received_at", "op": "gte", "value": "2026-09-04T17:00:00Z"},
+                        {"field": "received_at", "op": "lt", "value": "2026-09-05T17:00:00Z"},
+                    ],
+                },
+                {
+                    "kind": "query", "entity": "events", "dimensions": [],
+                    "metrics": ["log_count"], "filters": [
+                        {"field": "event_at", "op": "gte", "value": "2026-09-04T17:00:00Z"},
+                        {"field": "event_at", "op": "lt", "value": "2026-09-05T17:00:00Z"},
+                    ],
+                },
+            ],
+        },
+    },
+    {
+        "id": "holdout-natural-recovery-rate",
+        "split": "holdout",
+        "question": "Tỷ lệ phục hồi là bao nhiêu?",
+        "reference_sql": (
+            "SELECT ROUND(100.0*COUNT(CASE WHEN FinalOutcome='RECOVERED' THEN 1 END) "
+            "/NULLIF(COUNT(CASE WHEN FinalOutcome IN ('RECOVERED','FAILED','ESCALATED') "
+            "THEN 1 END),0),2) FROM ConnectorHealingQueue"
+        ),
+        "plan": plan(dimensions=[], metrics=["recovery_rate_percent"], order_by=[]),
+    },
+    {
+        "id": "holdout-natural-recovery-duration",
+        "split": "holdout",
+        "question": "Mất bao lâu để phục hồi?",
+        "reference_sql": (
+            "WITH durations AS (SELECT (julianday(CompletedAt)-julianday(ReceivedAt))*1440.0 "
+            "AS minutes FROM ConnectorHealingQueue WHERE QueueStatus='COMPLETED' "
+            "AND FinalOutcome='RECOVERED') SELECT ROUND(AVG(CASE WHEN minutes>=0 THEN minutes END),2),"
+            "COUNT(*),COUNT(CASE WHEN minutes>=0 THEN 1 END),COUNT(*)-COUNT(CASE WHEN minutes>=0 THEN 1 END) "
+            "FROM durations"
+        ),
+        "plan": plan(
+            dimensions=[],
+            metrics=[
+                "avg_duration_minutes", "matched_count", "valid_duration_count",
+                "excluded_duration_count",
+            ],
+            success_only=True,
+            order_by=[],
+        ),
+    },
+    {
+        "id": "holdout-natural-unfinished",
+        "split": "holdout",
+        "question": "Những connector nào vẫn chưa xử lý xong?",
+        "reference_sql": (
+            "SELECT RootConnectorName,QueueStatus,COUNT(QueueId) FROM ConnectorHealingQueue "
+            "WHERE QueueStatus!='COMPLETED' AND QueueStatus!='ESCALATED' "
+            "GROUP BY RootConnectorName,QueueStatus "
+            "ORDER BY COUNT(QueueId) DESC,RootConnectorName,QueueStatus"
+        ),
+        "plan": plan(
+            dimensions=["root", "queue_status"],
+            metrics=["incident_count"],
+            filters=[
+                {"field": "queue_status", "op": "ne", "value": "COMPLETED"},
+                {"field": "queue_status", "op": "ne", "value": "ESCALATED"},
+            ],
+            order_by=[
+                {"field": "incident_count", "direction": "desc"},
+                {"field": "root", "direction": "asc"},
+                {"field": "queue_status", "direction": "asc"},
+            ],
+        ),
+    },
+    {
+        "id": "holdout-ingestion-time-unavailable",
+        "split": "holdout",
+        "question": "Hôm nay có bao nhiêu incident được insert vào database?",
+        "reference_sql": None,
+        "plan": None,
+        "expected_clarification": True,
+    },
+    {
         "id": "holdout-grain",
         "split": "holdout",
         "question": "Với mỗi root và QueueStatus, trả root, trạng thái, số incident khác nhau và tổng log. Giữ cả incident không có log. Sắp xếp root rồi trạng thái tăng dần.",

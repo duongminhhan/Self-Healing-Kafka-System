@@ -85,8 +85,6 @@ confirmation inserts and rollback/retry tests in a disposable database.
 - Final runtime unit and deployment-contract suite: **149 passed**.
 - Ruff passed on runtime source and changed/new test/generator files.
 - mypy: no issues in **39 source files**. git diff --check passed.
-- Full tests/unit collection was attempted but stopped on an unrelated missing
-  notebooks.gemini module. No deleted Gemini files were recreated to hide it.
 - Tests importing application config need these process-local values in this
   checkout: OLLAMA_REQUEST_TIMEOUT_SECONDS=30, OLLAMA_THINK=false,
   OLLAMA_MAX_TOKENS=512, OLLAMA_CONTEXT_LOG_LIMIT=10. They do not enable live calls.

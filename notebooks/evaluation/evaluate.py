@@ -1,4 +1,4 @@
-"""Read-only reference checks; --live evaluates HF (default) or --backend gemini."""
+"""Read-only reference checks; --live evaluates the selected available backend."""
 
 import argparse
 import json
@@ -75,7 +75,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", default=str(ROOT / "self_healthy_kafka_snapshot.db"))
     parser.add_argument("--case", type=int, help="Run one 1-based gold case for diagnosis.")
-    parser.add_argument("--backend", choices=["hf", "gemini", "nemotron"], default="hf")
+    parser.add_argument("--backend", choices=["hf", "nemotron"], default="hf")
     parser.add_argument(
         "--fixture",
         choices=VARIANTS,
@@ -89,8 +89,6 @@ def main():
     args = parser.parse_args()
     if args.case is not None and not 1 <= args.case <= len(CASES):
         parser.error("--case is outside the gold case range")
-    if args.backend == "gemini":
-        load_dotenv(ROOT / ".env.gemini")
     if args.backend == "nemotron":
         load_dotenv(ROOT / ".env.nemotron")
     load_dotenv(ROOT / ".env")
@@ -105,15 +103,15 @@ def main():
     client = None
     model = os.getenv("HF_MODEL_ID", "Qwen/Qwen3-4B-Instruct-2507")
     provider = os.getenv("HF_PROVIDER", "auto").strip().lower() or "auto"
-    gemini_template = None
+    provider_template = None
     if args.live and args.backend == "nemotron":
         if not os.getenv("OLLAMA_API_KEY", "").strip():
             print("LIVE SKIPPED: OLLAMA_API_KEY is unavailable; no provider fallback.")
         else:
             from notebooks.nemotron.adapter import CloudError, make_nemotron_workflow
 
-            gemini_template = make_nemotron_workflow(args.snapshot, row_limit=1000)
-            client = gemini_template.client
+            provider_template = make_nemotron_workflow(args.snapshot, row_limit=1000)
+            client = provider_template.client
             try:
                 print(json.dumps({"preflight": client.check_model()}))
             except CloudError as exc:
@@ -135,18 +133,8 @@ def main():
                 if fixture_directory:
                     fixture_directory.cleanup()
                 return 1
-            snapshot = gemini_template.snapshot
-            model, provider = gemini_template.model_id, gemini_template.provider
-    elif args.live and args.backend == "gemini":
-        if not os.getenv("GEMINI_API_KEY", "").strip():
-            print("LIVE SKIPPED: GEMINI_API_KEY is unavailable; no provider fallback.")
-        else:
-            from notebooks.gemini.adapter import make_gemini_workflow
-
-            gemini_template = make_gemini_workflow(args.snapshot, row_limit=1000)
-            snapshot = gemini_template.snapshot
-            client = gemini_template.client
-            model, provider = gemini_template.model_id, gemini_template.provider
+            snapshot = provider_template.snapshot
+            model, provider = provider_template.model_id, provider_template.provider
     elif args.live:
         token = os.getenv("HF_TOKEN", "").strip()
         if not token:
@@ -157,16 +145,16 @@ def main():
             client = InferenceClient(model=model, provider=provider, api_key=token, timeout=30)
 
     def new_flow():
-        if gemini_template is not None:
+        if provider_template is not None:
             return Workflow(
                 snapshot,
                 client,
                 model_id=model,
                 provider=provider,
                 max_attempts=3,
-                sql_max_tokens=gemini_template.sql_max_tokens,
-                response_max_tokens=gemini_template.response_max_tokens,
-                few_shot=gemini_template.few_shot,
+                sql_max_tokens=provider_template.sql_max_tokens,
+                response_max_tokens=provider_template.response_max_tokens,
+                few_shot=provider_template.few_shot,
             )
         return Workflow(
             snapshot,
@@ -363,7 +351,7 @@ def main():
             failures += 1
     if fixture_directory:
         fixture_directory.cleanup()
-    if gemini_template is not None:
+    if provider_template is not None:
         client.close()
     return int(bool(failures))
 

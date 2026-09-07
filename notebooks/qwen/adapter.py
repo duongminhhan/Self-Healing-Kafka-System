@@ -39,7 +39,7 @@ class QwenClient:
         sql_timeout=30,
         response_timeout=30,
         output_byte_limit=16000,
-        client_factory=InferenceClient,
+        client_factory=None,
         response_formats=None,
         structured_output="auto",
     ):
@@ -53,7 +53,7 @@ class QwenClient:
         if not isinstance(output_byte_limit, int) or not 1 <= output_byte_limit <= 64000:
             raise ValueError("HF output byte limit must be between 1 and 64000")
         self.output_byte_limit = output_byte_limit
-        self.factory = client_factory
+        self.factory = client_factory or InferenceClient
         if structured_output not in {"auto", "json_schema", "local"}:
             raise ValueError("HF_STRUCTURED_OUTPUT must be auto, json_schema or local")
         self.structured_output = structured_output

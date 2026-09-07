@@ -12,7 +12,6 @@ import httpx
 from self_healthy_kafka.config import AnalyticsChatConfig
 from self_healthy_kafka.storage.common import json_safe
 from self_healthy_kafka.webhook.analytics import (
-    ALLOWED_METRICS,
     MAX_LIMIT,
     QueryPlan,
     parse_plan,
@@ -223,11 +222,25 @@ def _duration(item: dict[str, Any]) -> float | None:
 def _answer(facts: list[dict[str, Any]], plan: QueryPlan, from_at: datetime | None, to_at: datetime | None, comparison_facts: list[dict[str, Any]]) -> str:
     if not facts:
         return "Không có dữ liệu phù hợp trong khoảng thời gian đã truy vấn."
-    lines = _summary_lines(facts, plan) + ["Kết quả phân tích dựa trên incident đã truy xuất:"]
+    lines = _summary_lines(facts, plan)
     for fact in facts:
-        label = ", ".join(f"{key}={value}" for key, value in fact.items() if key not in {"evidence_ids"} and key not in ALLOWED_METRICS)
-        metrics = ", ".join(f"{metric.name}={fact.get(metric.name)}" for metric in plan.metrics)
-        lines.append(f"- {label}: {metrics}; evidence={', '.join(fact['evidence_ids'])}")
+        label = ", ".join(
+            str(fact.get(key) or "—") for key in plan.group_by
+        ) or "Toàn bộ phạm vi"
+        metrics = []
+        for metric in plan.metrics:
+            value = fact.get(metric.name)
+            if metric.name == "failure_count":
+                metrics.append(f"{value} incident đã xác nhận")
+            elif metric.name == "recovered_count":
+                metrics.append(f"{value} incident đã phục hồi")
+            elif metric.name == "open_count":
+                metrics.append(f"{value} incident chưa có kết quả cuối")
+            elif value is None:
+                metrics.append("chưa có thời gian phục hồi hợp lệ để tính trung bình")
+            else:
+                metrics.append(f"thời gian phục hồi trung bình {value} phút")
+        lines.append(f"{label}: {', '.join(metrics)}.")
     if from_at and to_at:
         lines.append(f"Khoảng thời gian: {from_at.isoformat()} đến {to_at.isoformat()}.")
     if plan.comparison:

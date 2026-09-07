@@ -6,6 +6,7 @@ validates plan semantics, not that a plan perfectly captures natural language.
 
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -112,6 +113,31 @@ METRICS = {
         ("event_id",),
         LOG_SOURCE,
     ),
+    "confirmed_failure_count": Metric(
+        ("events",), "Recorded HEALTH_FAILED_CONFIRMED events; not every log is a failure",
+        ("event_id", "event_type"), "src/self_healthy_kafka/healing/phases.py:EventType",
+    ),
+    "task_restart_count": Metric(
+        ("events",), "Recorded task restart actions, not a count of attempts",
+        ("event_id", "event_type"), "src/self_healthy_kafka/healing/phases.py:EventType",
+    ),
+    "connector_restart_count": Metric(
+        ("events",), "Recorded connector restart actions, not a count of incidents",
+        ("event_id", "event_type"), "src/self_healthy_kafka/healing/phases.py:EventType",
+    ),
+    "recovery_count": Metric(
+        ("incidents",), "Persisted incidents completed with RECOVERED outcome",
+        ("incident_id", "outcome"), BUSINESS_SOURCE,
+    ),
+    "recovery_rate_percent": Metric(
+        ("incidents",),
+        "Recovered incidents divided by terminal incidents with RECOVERED, FAILED or ESCALATED outcome; NULL when no terminal incidents",
+        ("incident_id", "outcome"), BUSINESS_SOURCE,
+    ),
+    "escalation_count": Metric(
+        ("incidents",), "Persisted incidents with ESCALATED outcome",
+        ("incident_id", "outcome"), BUSINESS_SOURCE,
+    ),
     "avg_duration_minutes": Metric(
         ("incidents",),
         "Receipt to completion, exclude missing/unparseable/negative durations; retain zero; round 2 decimals",
@@ -137,6 +163,49 @@ METRICS = {
         BUSINESS_SOURCE,
     ),
 }
+
+# Presentation metadata is part of the semantic contract. It lets both the
+# response model and deterministic fallback use business language without
+# reverse-engineering SQL aliases. Provenance describes how the returned value
+# is produced; it does not claim that a model-selected intent is correct.
+METRIC_PRESENTATION = {
+    "incident_count": {
+        "label_vi": "incident", "unit": "incident", "provenance": "database_aggregate",
+    },
+    "log_count": {
+        "label_vi": "healing log", "unit": "healing log", "provenance": "database_aggregate",
+    },
+    "confirmed_failure_count": {
+        "label_vi": "lần lỗi được xác nhận", "unit": "sự kiện", "provenance": "database_aggregate",
+    },
+    "task_restart_count": {
+        "label_vi": "lần khởi động lại task", "unit": "sự kiện", "provenance": "database_aggregate",
+    },
+    "connector_restart_count": {
+        "label_vi": "lần khởi động lại connector", "unit": "sự kiện", "provenance": "database_aggregate",
+    },
+    "recovery_count": {
+        "label_vi": "incident đã phục hồi", "unit": "incident", "provenance": "database_aggregate",
+    },
+    "recovery_rate_percent": {
+        "label_vi": "tỷ lệ phục hồi", "unit": "percent", "provenance": "deterministic_calculation",
+    },
+    "escalation_count": {
+        "label_vi": "incident đã chuyển cấp", "unit": "incident", "provenance": "database_aggregate",
+    },
+    "avg_duration_minutes": {
+        "label_vi": "thời gian phục hồi trung bình", "unit": "minute", "provenance": "deterministic_calculation",
+    },
+    "matched_count": {
+        "label_vi": "incident phù hợp", "unit": "incident", "provenance": "database_aggregate",
+    },
+    "valid_duration_count": {
+        "label_vi": "incident có thời lượng hợp lệ", "unit": "incident", "provenance": "database_aggregate",
+    },
+    "excluded_duration_count": {
+        "label_vi": "incident bị loại khỏi phép tính thời lượng", "unit": "incident", "provenance": "deterministic_calculation",
+    },
+}
 DURATION = {
     "avg_duration_minutes",
     "matched_count",
@@ -147,6 +216,20 @@ ENUMS = {
     "queue_status": {"PENDING", "PROCESSING", "WAITING", "COMPLETED", "ESCALATED"},
     "outcome": {"RECOVERED", "FAILED", "ESCALATED"},
     "mode": {"RESTART_ONLY", "RECOVERY"},
+}
+
+BUSINESS_TERMS = {
+    "incident": ["incident", "sự cố", "ca healing", "lần cần healing", "hàng chờ tự sửa"],
+    "healing_log": [
+        "healing log", "log healing", "nhật ký healing", "nhật ký tự sửa", "sự kiện healing",
+    ],
+    "confirmed_failure": ["lỗi", "failure", "thất bại được xác nhận"],
+    "recovery": ["phục hồi", "recovery", "khôi phục"],
+    "unfinished": [
+        "chưa xử lý xong", "chưa hoàn tất", "vẫn đang xử lý", "chưa giải quyết", "unresolved",
+        "still pending",
+    ],
+    "root": ["connector", "kết nối", "root connector", "logical connector"],
 }
 
 
@@ -160,7 +243,10 @@ def catalog(snapshot):
     return {
         "version": 1,
         "fields": {k: asdict(v) for k, v in fields.items()},
-        "metrics": {k: asdict(v) for k, v in metrics.items()},
+        "metrics": {
+            k: {**asdict(v), "presentation": METRIC_PRESENTATION[k]}
+            for k, v in metrics.items()
+        },
         "success": {"queue_status": "COMPLETED", "outcome": "RECOVERED", "source": BUSINESS_SOURCE},
         "relationship": {
             "from": "events.QueueId",
@@ -168,6 +254,12 @@ def catalog(snapshot):
             "cardinality": "many-to-one",
             "source": LOG_SOURCE,
             "missing_parent_policy": "Events retain orphan logs with NULL parent attributes; incident_count counts only matched incident IDs",
+        },
+        "business_terms": BUSINESS_TERMS,
+        "time_basis": {
+            "incidents": {"field": "received_at", "meaning": "Incident receipt time"},
+            "events": {"field": "event_at", "meaning": "Healing-log recording time"},
+            "ingestion": "Unavailable: the snapshot does not record database insert time.",
         },
         "timezone": "UTC; timestamp filter values must include an explicit offset",
         "limits": {
@@ -207,6 +299,8 @@ def compile_plan(plan, snapshot):
         raise PlanError("Plan must contain finite JSON values") from None
     if len(encoded.encode("utf-8")) > 16000:
         raise PlanError("Plan exceeds 16000 bytes")
+    if isinstance(plan, dict) and plan.get("kind") == "independent":
+        return _compile_independent(plan, snapshot, encoded)
     _keys(
         plan,
         {
@@ -359,6 +453,12 @@ def compile_plan(plan, snapshot):
         "avg_duration_minutes": f"ROUND(AVG(CASE WHEN {valid} THEN {duration} END),2)",
         "valid_duration_count": f"COUNT(CASE WHEN {valid} THEN 1 END)",
         "excluded_duration_count": f"COUNT(*)-COUNT(CASE WHEN {valid} THEN 1 END)",
+        "recovery_count": "COUNT(CASE WHEN q.\"FinalOutcome\"='RECOVERED' THEN 1 END)",
+        "recovery_rate_percent": (
+            "ROUND(100.0*COUNT(CASE WHEN q.\"FinalOutcome\"='RECOVERED' THEN 1 END)"
+            "/NULLIF(COUNT(CASE WHEN q.\"FinalOutcome\" IN ('RECOVERED','FAILED','ESCALATED') THEN 1 END),0),2)"
+        ),
+        "escalation_count": "COUNT(CASE WHEN q.\"FinalOutcome\"='ESCALATED' THEN 1 END)",
     }
     if "log_count" in metrics:
         if not any(c["name"] == "QueueId" for c in snapshot.schema.get(LOGS, [])):
@@ -367,6 +467,14 @@ def compile_plan(plan, snapshot):
             'COUNT(l."Id")'
             if entity == "events"
             else f'COALESCE(SUM((SELECT COUNT(*) FROM "{LOGS}" lx WHERE lx."QueueId"=q."QueueId")),0)'
+        )
+    if entity == "events":
+        metric_sql.update(
+            {
+                "confirmed_failure_count": "COUNT(CASE WHEN l.\"EventType\"='HEALTH_FAILED_CONFIRMED' THEN 1 END)",
+                "task_restart_count": "COUNT(CASE WHEN l.\"EventType\"='TASK_RESTART' THEN 1 END)",
+                "connector_restart_count": "COUNT(CASE WHEN l.\"EventType\"='CONNECTOR_RESTART' THEN 1 END)",
+            }
         )
     expressions.update({k: metric_sql[k] for k in metrics})
     selected = ", ".join(f'{v} AS "{k}"' for k, v in expressions.items())
@@ -433,3 +541,30 @@ def compile_plan(plan, snapshot):
         raise PlanError("Assumptions must be bounded strings")
     snapshot.validate(sql)
     return CompiledQuery(sql, parameters, json.loads(encoded), tuple(assumptions))
+
+
+def _compile_independent(plan, snapshot, encoded):
+    """Combine proven scalar aggregates, never their underlying populations."""
+    _keys(plan, {"kind", "queries"}, {"kind", "queries"})
+    queries = _list(plan["queries"], 4)
+    if len(queries) < 2:
+        raise PlanError("Independent aggregation requires two to four populations")
+    columns, sources, parameters, seen = [], [], {}, set()
+    for index, child in enumerate(queries):
+        _keys(child, {"kind", "entity", "dimensions", "metrics", "filters", "success_only"},
+              {"kind", "entity", "dimensions", "metrics"})
+        if child["kind"] != "query" or child["dimensions"] != [] or not child["metrics"]:
+            raise PlanError("Independent populations must be ungrouped aggregate queries")
+        compiled = compile_plan(child, snapshot)
+        for metric in child["metrics"]:
+            if metric in seen or len(seen) >= 6:
+                raise PlanError("Independent outputs require unique metrics, at most six")
+            seen.add(metric)
+            columns.append(f'b{index}."{metric}" AS "{metric}"')
+        sql = re.sub(r":(p\d+)\b", lambda m: f":b{index}_{m[1]}", compiled.sql)
+        parameters.update({f"b{index}_{key}": value for key, value in compiled.parameters.items()})
+        sources.append(f"({sql}) b{index}")
+    # Each child has aggregates, no grouping/HAVING: exactly one row, even empty.
+    sql = "SELECT " + ", ".join(columns) + " FROM " + " CROSS JOIN ".join(sources)
+    snapshot.validate(sql)
+    return CompiledQuery(sql, parameters, json.loads(encoded), ())

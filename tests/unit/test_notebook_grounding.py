@@ -189,6 +189,83 @@ def test_numeric_response_equivalence_is_exact(snapshot):
     assert notebook_analytics.validate_claims(claim("Trung bình 35 phút trên 9 queue."), result)
 
 
+def test_verified_calendar_date_is_allowed_but_extra_count_is_rejected(snapshot):
+    result = snapshot.execute("SELECT COUNT(*) AS incident_count FROM ConnectorHealingQueue")
+    context = {"calendar_day": {"local_date": "2026-09-05"}}
+    def claim(text):
+        return {"claims": [{"text": text, "evidence": [{"row": 0, "column": "incident_count"}]}]}
+    assert notebook_analytics.validate_claims(
+        claim("Ngày 5/9/2026 có 2 incident."), result, context
+    ) is None
+    assert notebook_analytics.validate_claims(
+        claim("Ngày 05/09 có 2 incident."), result, context
+    ) is None
+    assert notebook_analytics.validate_claims(
+        claim("Ngày 5/9/2026 có 2 incident và 9 log."), result, context
+    ) == "unsupported_numeric_claim"
+
+
+def test_friendly_fallback_uses_verified_metric_labels_not_sql_aliases():
+    result = {
+        "rows": [{"incident_count": 3, "log_count": 25}],
+        "columns": [{"name": "incident_count"}, {"name": "log_count"}],
+        "returned_row_count": 1,
+        "truncated": False,
+        "evidence_context": {"calendar_day": {"local_date": "2026-09-05"}},
+    }
+    assert notebook_analytics.render_friendly_fallback(result) == (
+        "Ngày 5/9/2026, có 3 incident và 25 healing log được ghi nhận trong snapshot."
+    )
+    envelope = notebook_analytics.evidence_envelope(
+        question="Có bao nhiêu?", result=result,
+        semantic_plan={"kind": "query", "entity": "incidents", "metrics": ["incident_count"]},
+    )
+    assert envelope["verified_result"]["rows"] == result["rows"]
+    assert "sql_interpretation_unverified" not in envelope
+
+
+def test_friendly_fallback_leads_with_ranking_conclusion():
+    result = {
+        "rows": [
+            {"root": "connector-a", "confirmed_failure_count": 7},
+            {"root": "connector-b", "confirmed_failure_count": 3},
+        ],
+        "columns": [{"name": "root"}, {"name": "confirmed_failure_count"}],
+        "returned_row_count": 2,
+        "truncated": False,
+    }
+    plan = {
+        "kind": "query", "entity": "events", "dimensions": ["root"],
+        "metrics": ["confirmed_failure_count"],
+        "order_by": [{"field": "confirmed_failure_count", "direction": "desc"}],
+    }
+    text = notebook_analytics.render_friendly_fallback(result, plan)
+    assert text.startswith("connector-a đứng đầu với 7 lần lỗi được xác nhận.")
+    assert "| root | confirmed_failure_count |" in text
+
+
+def test_friendly_fallback_explains_null_duration_and_empty_result():
+    duration = {
+        "rows": [{
+            "avg_duration_minutes": None, "matched_count": 2,
+            "valid_duration_count": 0, "excluded_duration_count": 2,
+        }],
+        "columns": [
+            {"name": "avg_duration_minutes"}, {"name": "matched_count"},
+            {"name": "valid_duration_count"}, {"name": "excluded_duration_count"},
+        ],
+        "returned_row_count": 1,
+        "truncated": False,
+    }
+    assert notebook_analytics.render_friendly_fallback(duration).startswith(
+        "Chưa thể tính thời gian phục hồi trung bình. Có 2 incident phù hợp nhưng 2"
+    )
+    empty = {**duration, "rows": [], "returned_row_count": 0}
+    assert notebook_analytics.render_friendly_fallback(empty) == (
+        "Không có dữ liệu phù hợp trong snapshot."
+    )
+
+
 def test_safe_average_excludes_negative_but_keeps_zero(snapshot):
     with sqlite3.connect(snapshot.path) as c:
         c.execute("UPDATE ConnectorHealingQueue SET CompletedAt=ReceivedAt WHERE QueueId=1")

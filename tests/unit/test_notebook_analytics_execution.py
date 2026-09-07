@@ -25,7 +25,7 @@ def test_notebook_format_and_no_fixed_contract():
     assert "ollama" not in source.lower()
     question = next(
         n
-        for n in ast.parse(nb.cells[19].source).body
+        for n in ast.parse(nb.cells[18].source).body
         if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "question" for t in n.targets)
     )
@@ -49,6 +49,9 @@ def test_ordered_cells_and_idempotent_refresh(
     monkeypatch.setenv("BENCHMARK_MSSQL_CONNECTION_STRING", "mock-only")
     monkeypatch.setenv("BENCHMARK_SQLITE_PATH", str(db))
     monkeypatch.setenv("HF_PROVIDER", "auto")
+    # This test exercises the loader/idempotency path; strict planning is
+    # exercised separately with its typed plan mock.
+    monkeypatch.setenv("QWEN_SEMANTIC_MODE", "legacy")
     monkeypatch.setattr(pyodbc, "drivers", lambda: ["ODBC Driver 17 for SQL Server"])
     queue = [
         (
@@ -133,6 +136,12 @@ def test_ordered_cells_and_idempotent_refresh(
         def __init__(self, **kwargs):
             self.calls = 0
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
         def chat_completion(self, **kwargs):
             self.calls += 1
             value = (
@@ -146,6 +155,8 @@ def test_ordered_cells_and_idempotent_refresh(
             )
 
     monkeypatch.setattr(huggingface_hub, "InferenceClient", HF)
+    # The adapter imports the SDK class at module load; bind its dependency too.
+    monkeypatch.setattr("notebooks.qwen.adapter.InferenceClient", HF)
     scope = {}
     for iteration in range(2):
         # Include both real SQLite loading cells, against synthetic read-only source results.

@@ -4,7 +4,7 @@
 
 New snapshot-only notebook: `nemotron/text_to_sql_self_healthy_kafka_nemotron.ipynb`.
 Its `adapter.py` calls **https://ollama.com** directly; it does not install or use
-local Ollama and never falls back to HF/Gemini. Analytics, semantic catalog,
+local Ollama and never falls back to Hugging Face. Analytics, semantic catalog,
 SQL enforcement and evidence validation remain in `shared/`.
 
 From the repository root:
@@ -68,15 +68,11 @@ Raw log Message/Details reads are blocked by the SQLite authorizer even through
 aliases, expressions or filters. These are partial semantic guards, not complete
 ontology enforcement or a proof that a model-generated SQL query is correct.
 
-The Gemini paths below describe the previous layout. Gemini files are currently
-deleted in the user's worktree; this change does not restore them. Its old tests
-requiring those files are not part of the Nemotron/Qwen regression gate.
-
 ## Layout
 
 - `qwen/`: Hugging Face/Qwen notebook and provider dependencies.
-- `gemini/`: Gemini notebook, API adapter, dependencies and historical live report.
-- `shared/`: analytics runtime, semantic catalog, diagnostics and few-shot examples. One implementation for both providers.
+- `nemotron/`: Nemotron/Ollama Cloud notebook and provider dependencies.
+- `shared/`: analytics runtime, semantic catalog, diagnostics and few-shot examples.
 - `evaluation/`: common gold queries, comparison rules and synthetic fixtures.
 - Tests remain in `tests/unit/test_notebook*.py` for normal test discovery.
 
@@ -88,16 +84,15 @@ Install from the repository root:
 
 ```powershell
 python -m pip install -r notebooks/qwen/requirements.txt
-python -m pip install -r notebooks/gemini/requirements.txt
 ```
 
-Open `qwen/text_to_sql_self_healthy_kafka.ipynb` or `gemini/text_to_sql_self_healthy_kafka_gemini.ipynb`. Run setup, Step A (SQL) and Step B (Vietnamese response). Kernels can start from repository root or from either provider directory; setup resolves imports and configuration against the repository root.
+Open `qwen/text_to_sql_self_healthy_kafka.ipynb`. Run setup, Step A (SQL) and Step B (Vietnamese response). Kernels can start from the repository root or provider directory; setup resolves imports and configuration against the repository root.
 
-Credentials stay outside source: Qwen reads root `.env` (`HF_TOKEN`, `HF_MODEL_ID`, `HF_PROVIDER`). Gemini reads root `.env.gemini` first (`GEMINI_API_KEY`, `GEMINI_MODEL_ID`), then `.env` without overwriting environment values. No credentials or databases were moved.
+Credentials stay outside source: Qwen reads root `.env` (`HF_TOKEN`, `HF_MODEL_ID`, `HF_PROVIDER`). No credentials or databases are stored in the repository.
 
 Both use root `self_healthy_kafka_snapshot.db` by default. `BENCHMARK_SQLITE_PATH` can override it; relative notebook paths resolve against repository root.
 
-**Qwen retains its MSSQL refresh cells.** Running all its cells refreshes the local snapshot and requires MSSQL/Docker. Gemini is snapshot-only. Do not refresh while comparing providers. This reorganization does not change either flow.
+**Qwen retains its MSSQL refresh cells.** Running all its cells refreshes the local snapshot and requires MSSQL/Docker.
 
 ## Evaluate
 
@@ -105,8 +100,6 @@ Run from repository root (offline by default):
 
 ```powershell
 python -m notebooks.evaluation.evaluate
-python -m notebooks.evaluation.evaluate --backend gemini
-python -m notebooks.evaluation.evaluate --backend gemini --fixture normal
 ```
 
-Add `--live` only for intentional API calls, which may incur charges. HF remains the evaluator default. `python notebooks/evaluation/evaluate.py` also works. Results in `gemini/evaluation_report.json` are historical, not new live results from this move.
+Add `--live` only for intentional API calls, which may incur charges. HF remains the evaluator default. `python notebooks/evaluation/evaluate.py` also works.

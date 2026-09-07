@@ -114,10 +114,23 @@ def alternatives(*branches):
     }
 
 
+SCALAR_PLAN = obj(
+    {key: value for key, value in PLAN["properties"].items()
+     if key in {"kind", "entity", "dimensions", "metrics", "filters", "success_only"}},
+    ["kind", "entity", "dimensions", "metrics"],
+)
+SCALAR_PLAN["properties"]["dimensions"] = array(ID, 0)
+SCALAR_PLAN["properties"]["metrics"] = {**array(ID, 6), "minItems": 1}
+INDEPENDENT = obj(
+    {"kind": {"const": "independent"},
+     "queries": {**array(SCALAR_PLAN, 4), "minItems": 2}},
+    ["kind", "queries"],
+)
+
 SCHEMAS = {
     "legacy_generation": alternatives(SQL, CLARIFICATION),
     "legacy_review": alternatives(SQL, CLARIFICATION, REVIEW),
-    "strict_planning": alternatives(PLAN, CLARIFICATION),
+    "strict_planning": alternatives(PLAN, INDEPENDENT, CLARIFICATION),
     "response": RESPONSE_SCHEMA,
 }
 

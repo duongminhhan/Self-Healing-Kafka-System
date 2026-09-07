@@ -64,6 +64,8 @@ def test_analytics_chat_uses_backend_time_range_and_parameterized_fact_callable(
     assert result["query_plan"]["dataset"] == "connector_incidents"
     assert result["evidence_ids"] == ["incident-1"]
     assert "TOPO-CLI-G043" in result["answer"]
+    assert "evidence=" not in result["answer"]
+    assert "incident-1" not in result["answer"]
 
 
 def test_hugging_face_planner_receives_only_catalog_and_returns_validated_json():

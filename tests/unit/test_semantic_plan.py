@@ -7,7 +7,8 @@ import pytest
 
 from notebooks.evaluation.fixtures import EXPECTED, VARIANTS, create_duration_fixture
 from notebooks.shared.analytics import Snapshot
-from notebooks.shared.semantic_plan import PlanError, compile_plan
+from notebooks.shared.semantic_plan import PlanError, catalog, compile_plan
+from notebooks.shared.semantic_workflow import default_business_plan
 
 
 def run(snapshot, plan):
@@ -28,6 +29,11 @@ def snapshot(tmp_path):
                 (1,1,'INFO',NULL,'2026-01-01T00:01:00Z'),
                 (2,1,'WARNING',1,'2026-01-01T00:02:00Z'),
                 (3,2,'ERROR',1,'2026-01-01T00:03:00Z');
+            ALTER TABLE ConnectorHealingLogs ADD EventType TEXT;
+            UPDATE ConnectorHealingLogs SET EventType=CASE Id
+                WHEN 1 THEN 'HEALTH_FAILED_CONFIRMED'
+                WHEN 2 THEN 'TASK_RESTART'
+                ELSE 'CONNECTOR_RESTART' END;
         """)
     return Snapshot(path)
 
@@ -52,10 +58,116 @@ def test_join_grain_and_zero_logs(snapshot):
     ]
 
 
+def test_documented_action_metrics_count_only_their_event_types(snapshot):
+    result = run(snapshot, query(
+        entity="events", dimensions=[],
+        metrics=["confirmed_failure_count", "task_restart_count", "connector_restart_count"],
+        order_by=[],
+    ))
+    assert result["rows"] == [{
+        "confirmed_failure_count": 1, "task_restart_count": 1, "connector_restart_count": 1,
+    }]
+    result = run(snapshot, query(
+        dimensions=[], metrics=["recovery_count", "escalation_count", "recovery_rate_percent"], order_by=[],
+    ))
+    assert result["rows"] == [{"recovery_count": 2, "escalation_count": 1, "recovery_rate_percent": 66.67}]
+    assert catalog(snapshot)["time_basis"]["ingestion"].startswith("Unavailable")
+
+
+def test_business_defaults_are_compiled_plans_not_sample_question_answers(snapshot):
+    totals = default_business_plan("Ngày 5 tháng 9 có bao nhiêu incident và healing log?")
+    assert totals["kind"] == "independent"
+    assert run(snapshot, totals)["rows"] == [{"incident_count": 3, "log_count": 3}]
+    plain_totals = default_business_plan(
+        "Ngày 5 tháng 9 có bao nhiêu sự cố và nhật ký healing?"
+    )
+    assert plain_totals == totals
+    ranking = default_business_plan("Connector nào hay lỗi nhất?")
+    assert ranking["metrics"] == ["confirmed_failure_count"]
+    assert run(snapshot, ranking)["rows"][0]["confirmed_failure_count"] == 1
+    rate = default_business_plan("Tỷ lệ phục hồi là bao nhiêu?")
+    assert run(snapshot, rate)["rows"] == [{"recovery_rate_percent": 66.67}]
+
+
+def test_plain_vietnamese_day_counts_populations_independently(snapshot, monkeypatch):
+    from notebooks.shared.semantic_workflow import SemanticWorkflow
+
+    with sqlite3.connect(snapshot.path) as connection:
+        connection.executemany(
+            "UPDATE ConnectorHealingQueue SET ReceivedAt=? WHERE QueueId=?",
+            [
+                ("2026-09-04T17:00:00Z", 1),
+                ("2026-09-04T16:59:59Z", 2),
+                ("2026-09-05T16:59:59Z", 3),
+            ],
+        )
+        connection.executemany(
+            "UPDATE ConnectorHealingLogs SET CreatedAt=? WHERE Id=?",
+            [
+                ("2026-09-04T16:59:59Z", 1),
+                ("2026-09-04T17:00:00Z", 2),
+                ("2026-09-05T17:00:00Z", 3),
+            ],
+        )
+    monkeypatch.setattr(
+        "notebooks.shared.analytics.utc_now", lambda: "2026-09-07T00:00:00+00:00"
+    )
+    client = PlansClient({"unexpected": "response"})
+    flow = SemanticWorkflow(Snapshot(snapshot.path), client, model_id="test", mode="strict")
+
+    result = flow.query("Ngày 5 tháng 9 có bao nhiêu incident và healing log?")
+
+    assert result["rows"] == [{"incident_count": 2, "log_count": 1}]
+    assert " CROSS JOIN " in result["sql"]
+    assert client.calls == []
+    assert result["evidence_context"]["query_scope"]["metrics"]["incident_count"] == {
+        "meaning": "Count unique incident IDs in selected population",
+        "label_vi": "incident",
+        "unit": "incident",
+        "provenance": "database_aggregate",
+    }
+    assert [
+        item["time_basis"]["field"]
+        for item in result["evidence_context"]["query_scope"]["populations"]
+    ] == ["received_at", "event_at"]
+    answer = flow.respond()
+    assert answer["source"] == "verified_table_fallback"
+    assert answer["reason"] == "missing_claims"
+    assert answer["text"].startswith("Ngày 5/9/2026, có 2 incident và 1 healing log")
+    assert "compiler_enforced" not in answer["text"]
+    assert answer["diagnostics_text"]
+
+
+def test_independent_populations_preserve_counts_and_time_basis(snapshot):
+    from notebooks.qwen.output_schema import contract_error
+
+    plan = {"kind": "independent", "queries": [
+        {"kind": "query", "entity": "incidents", "dimensions": [],
+         "metrics": ["incident_count"]},
+        {"kind": "query", "entity": "events", "dimensions": [],
+         "metrics": ["log_count"], "filters": [
+             {"field": "event_at", "op": "gte", "value": "2026-01-01T00:02:00Z"}]},
+    ]}
+    assert contract_error(plan, "strict_planning") is None
+    assert run(snapshot, plan)["rows"] == [{"incident_count": 3, "log_count": 2}]
+    with sqlite3.connect(snapshot.path) as connection:
+        connection.execute("INSERT INTO ConnectorHealingLogs VALUES(99,999,'INFO',NULL,'2026-01-02T00:00:00Z',NULL)")
+    assert run(Snapshot(snapshot.path), plan)["rows"] == [{"incident_count": 3, "log_count": 3}]
+    plan["queries"][1]["filters"][0]["value"] = "2030-01-01T00:00:00Z"
+    assert run(Snapshot(snapshot.path), plan)["rows"] == [{"incident_count": 3, "log_count": 0}]
+
+
+@pytest.mark.parametrize("extra", [{"dimensions": ["root"]}, {"having": []}, {"kind": "independent"}])
+def test_independent_rejects_non_scalar_or_recursive_populations(snapshot, extra):
+    child = {"kind": "query", "entity": "incidents", "dimensions": [], "metrics": ["incident_count"]}
+    with pytest.raises(PlanError):
+        run(snapshot, {"kind": "independent", "queries": [child, {**child, **extra}]})
+
+
 def test_orphan_event_is_not_silently_dropped(snapshot):
     with sqlite3.connect(snapshot.path) as connection:
         connection.execute(
-            "INSERT INTO ConnectorHealingLogs VALUES(100,999,'ORPHAN',NULL,'2026-01-01T00:00:00Z')"
+            "INSERT INTO ConnectorHealingLogs VALUES(100,999,'ORPHAN',NULL,'2026-01-01T00:00:00Z',NULL)"
         )
     current = Snapshot(snapshot.path)
     result = run(
@@ -185,7 +297,7 @@ def test_log_duplication_does_not_change_incident_count(snapshot):
     before = run(snapshot, plan)["rows"]
     with sqlite3.connect(snapshot.path) as connection:
         connection.execute(
-            "INSERT INTO ConnectorHealingLogs SELECT 10,QueueId,Severity,AttemptNo,CreatedAt FROM ConnectorHealingLogs WHERE Id=1"
+            "INSERT INTO ConnectorHealingLogs SELECT 10,QueueId,Severity,AttemptNo,CreatedAt,EventType FROM ConnectorHealingLogs WHERE Id=1"
         )
     after = run(Snapshot(snapshot.path), plan)["rows"]
     assert [r["incident_count"] for r in before] == [r["incident_count"] for r in after]

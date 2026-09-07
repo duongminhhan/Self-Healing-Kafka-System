@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from notebooks.evaluation.evaluate_qwen_semantics import evaluate
+from notebooks.evaluation.evaluate_qwen_semantics import evaluate, summarize
 from notebooks.evaluation.fixtures import create_duration_fixture
 from notebooks.evaluation.semantic_cases import GOLD, HOLDOUT
 from notebooks.qwen.adapter import HFServiceError
@@ -56,6 +56,32 @@ def test_billing_stops_remaining_modes_and_cases(snapshot_file):
     assert report["summaries"]["strict"]["final_execution_accuracy"] is None
 
 
+def test_evaluation_reports_false_clarification_on_clear_questions():
+    metrics = {
+        "sql_attempts": 0, "valid_sql_attempts": 0, "sql_api_calls": 1,
+        "response_api_calls": 0,
+    }
+    records = [
+        {
+            "mode": "strict", "status": "attempted", "expected_clarification": False,
+            "clarified": True, "clarification_match": False, "first_match": False,
+            "final_match": False, "fallback": False, "friendly_fallback": False,
+            "unsupported_claim_rejected": False, "service_errors": [], "metrics": metrics,
+            "end_to_end_seconds": 0.1,
+        },
+        {
+            "mode": "strict", "status": "attempted", "expected_clarification": True,
+            "clarified": True, "clarification_match": True, "first_match": False,
+            "final_match": False, "fallback": False, "friendly_fallback": False,
+            "unsupported_claim_rejected": False, "service_errors": [], "metrics": metrics,
+            "end_to_end_seconds": 0.1,
+        },
+    ]
+    summary = summarize(records, ("strict",))["strict"]
+    assert summary["clarification_rate_on_clear_questions"] == 1.0
+    assert summary["clarification_accuracy"] == 1.0
+
+
 @pytest.mark.parametrize("mode", ["legacy", "shadow", "strict"])
 @pytest.mark.parametrize("cwd", ["root", "notebook"])
 def test_notebook_cells_in_order_without_refresh(snapshot_file, monkeypatch, capsys, mode, cwd):
@@ -86,10 +112,11 @@ def test_notebook_cells_in_order_without_refresh(snapshot_file, monkeypatch, cap
     monkeypatch.setenv("QWEN_SEMANTIC_MODE", mode)
     monkeypatch.setenv("BENCHMARK_SQLITE_PATH", str(snapshot_file))
     monkeypatch.delenv("HF_SQL_ALLOWED_TABLES", raising=False)
+    monkeypatch.delenv("SHOW_RESPONSE_DETAILS", raising=False)
     monkeypatch.chdir(ROOT if cwd == "root" else ROOT / "notebooks/qwen")
     state = {"os": os, "Path": Path, "REPO_ROOT": ROOT}
     before = hashlib.sha256(snapshot_file.read_bytes()).hexdigest()
-    for index in [10, 12, 17, 19, 20]:
+    for index in [10, 12, 17, 18, 19]:
         source = "".join(nb["cells"][index]["source"])
         assert "pyodbc.connect" not in source and "local_poc_connection_string()" not in source
         exec(compile(source, f"qwen-cell-{index}", "exec"), state)
@@ -99,11 +126,12 @@ def test_notebook_cells_in_order_without_refresh(snapshot_file, monkeypatch, cap
     assert len(client.calls) == (3 if mode == "shadow" else 2)
     assert hashlib.sha256(snapshot_file.read_bytes()).hexdigest() == before
     output = capsys.readouterr().out
-    assert "Response source:" in output and "Step B" in output
+    assert "Response source:" not in output and "Fallback reason:" not in output
+    assert "Step B" in output
     assert "offline-test-only" not in output
 
 
-def test_default_mode_is_legacy(snapshot_file, monkeypatch):
+def test_default_mode_is_strict(snapshot_file, monkeypatch):
     nb = json.loads(
         (ROOT / "notebooks/qwen/text_to_sql_self_healthy_kafka.ipynb").read_text(encoding="utf-8")
     )
@@ -123,7 +151,7 @@ def test_default_mode_is_legacy(snapshot_file, monkeypatch):
         "hf_provider": "auto",
     }
     exec("".join(nb["cells"][17]["source"]), state)
-    assert state["workflow"].mode == "legacy"
+    assert state["workflow"].mode == "strict"
 
 
 @pytest.mark.parametrize("mode", ["legacy", "strict", "shadow"])
@@ -155,7 +183,7 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
                 "order_by": [{"field": "queue_status", "direction": "asc"}],
             }
         else:
-            evidence = json.loads(body["messages"][-1]["content"])["verified_result"]
+            evidence = json.loads(body["messages"][-1]["content"])["evidence_envelope"]["verified_result"]
             content = {
                 "claims": [
                     {
@@ -193,7 +221,7 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
     state = {"os": os, "Path": Path, "REPO_ROOT": ROOT}
     with httpx.Client(transport=httpx.MockTransport(handler)) as session:
         monkeypatch.setattr(sdk, "get_session", lambda: session)
-        for index in [10, 12, 17, 19, 20]:
+        for index in [10, 12, 17, 18, 19]:
             exec(
                 compile("".join(nb["cells"][index]["source"]), f"qwen-cell-{index}", "exec"), state
             )

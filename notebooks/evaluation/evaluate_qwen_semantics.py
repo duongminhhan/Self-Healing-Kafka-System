@@ -145,14 +145,20 @@ def evaluate(
                     "first_match": False,
                     "final_match": False,
                     "clarification_match": None,
+                    "expected_clarification": bool(case.get("expected_clarification")),
+                    "clarified": False,
                     "fallback": False,
+                    "friendly_fallback": False,
+                    "unsupported_claim_rejected": False,
                 }
                 start = time.perf_counter()
                 try:
                     result = flow.query(case["question"])
+                    record["clarified"] = bool(flow.clarification) and result is None
                     if case.get("expected_clarification"):
-                        record["clarification_match"] = bool(flow.clarification) and result is None
+                        record["clarification_match"] = record["clarified"]
                     else:
+                        record["clarification_match"] = not record["clarified"]
                         record["first_match"] = matches(flow.first_result, expected)
                         record["final_match"] = matches(result, expected)
                     response = flow.respond() if result is not None or flow.clarification else None
@@ -160,6 +166,14 @@ def evaluate(
                         result=result,
                         response=response,
                         fallback=bool(response and response["source"] == "verified_table_fallback"),
+                        friendly_fallback=bool(
+                            response
+                            and response["source"] == "verified_table_fallback"
+                            and not response["text"].lstrip().startswith("|")
+                        ),
+                        unsupported_claim_rejected=bool(
+                            response and response.get("reason") == "unsupported_numeric_claim"
+                        ),
                     )
                 except QueryError as exc:
                     record["error"] = str(exc)
@@ -201,7 +215,8 @@ def summarize(records, modes):
     for mode in modes:
         selected = [r for r in records if r.get("mode") == mode]
         attempted = [r for r in selected if r["status"] == "attempted"]
-        sql_cases = [r for r in attempted if r["clarification_match"] is None]
+        sql_cases = [r for r in attempted if not r["expected_clarification"]]
+        clarification_cases = [r for r in attempted if r["expected_clarification"]]
         n = len(sql_cases)
         attempts = sum(r["metrics"]["sql_attempts"] for r in attempted)
         summaries[mode] = {
@@ -217,10 +232,26 @@ def summarize(records, modes):
             if attempts
             else None,
             "service_error_cases": sum(bool(r["service_errors"]) for r in attempted),
-            "clarification_passed": sum(r["clarification_match"] is True for r in attempted),
+            "clarification_passed": sum(r["clarification_match"] is True for r in clarification_cases),
+            "clarification_accuracy": sum(
+                r["clarification_match"] is True for r in clarification_cases
+            ) / len(clarification_cases) if clarification_cases else None,
+            "clarification_rate_on_clear_questions": sum(r["clarified"] for r in sql_cases) / n
+            if n
+            else None,
             "fallback_rate": sum(r["fallback"] for r in attempted) / len(attempted)
             if attempted
             else None,
+            "friendly_fallback_rate": sum(r["friendly_fallback"] for r in attempted) / len(attempted)
+            if attempted
+            else None,
+            "unsupported_claim_rejection_rate": sum(
+                r["unsupported_claim_rejected"] for r in attempted
+            ) / len(attempted) if attempted else None,
+            "unsupported_claim_false_rejection_rate": None,
+            "unsupported_claim_false_rejection_note": (
+                "Not measured by model SQL evaluation; covered by deterministic grounding tests."
+            ),
             "mean_end_to_end_seconds": statistics.mean(r["end_to_end_seconds"] for r in attempted)
             if attempted
             else None,

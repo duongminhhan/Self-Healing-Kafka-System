@@ -65,7 +65,7 @@ def flow_for(tmp_path, values, **kwargs):
     [
         ("legacy", {"kind": "sql", "sql": SQL["sql"]}, "Missing required fields: interpretation"),
         ("legacy", PLAN, "kind must be one of: sql, clarification"),
-        ("strict", SQL, "kind must be one of: query, clarification"),
+        ("strict", SQL, "kind must be one of: query, independent, clarification"),
         ("legacy", {"kind": "accept_result"}, "kind must be one of: sql, clarification"),
         ("legacy", {**SQL, "interpretation": 123}, "Invalid interpretation: type"),
         ("strict", {**PLAN, "entity": "incidents|events"}, "expected one of incidents, events"),
@@ -95,6 +95,28 @@ def test_review_contract_only_after_verified_candidate(tmp_path):
         transport.calls[1]["response_format"]["json_schema"]["schema"] == SCHEMAS["legacy_review"]
     )
     assert flow.metrics["result_reviews"] == 1
+
+
+def test_strict_plan_enforces_explicit_calendar_day(tmp_path, monkeypatch):
+    monkeypatch.setattr("notebooks.shared.analytics.utc_now", lambda: "2026-09-07T00:00:00+00:00")
+    flow, _ = flow_for(tmp_path, [PLAN], mode="strict")
+    flow.query("Ngày 5 tháng 9 có bao nhiêu incident?")
+    filters = flow.semantic_plan["filters"]
+    assert filters == [
+        {"field": "received_at", "op": "gte", "value": "2026-09-04T17:00:00+00:00"},
+        {"field": "received_at", "op": "lt", "value": "2026-09-05T17:00:00+00:00"},
+    ]
+    assert flow.result["evidence_context"]["calendar_day"]["time_basis"] == (
+        "ReceivedAt for incidents; CreatedAt for healing logs"
+    )
+
+
+def test_strict_rejects_unrecorded_ingestion_time_without_model_call(tmp_path):
+    flow, transport = flow_for(tmp_path, [], mode="strict")
+    assert flow.query("Có bao nhiêu incident được insert vào database hôm nay?") is None
+    assert "không lưu thời điểm INSERT" in flow.clarification
+    assert transport.calls == []
+    assert flow.trace == [{"attempt": 0, "status": "unavailable_information"}]
 
 
 def test_review_accept_restores_interpretation_of_pending_result(tmp_path):

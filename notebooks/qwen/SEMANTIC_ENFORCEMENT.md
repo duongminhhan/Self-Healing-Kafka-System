@@ -1,7 +1,17 @@
 # Qwen semantic enforcement
 
-This opt-in HF workflow preserves the configured Qwen model/provider. Other providers
+This Qwen HF workflow defaults to strict semantic enforcement while preserving the configured
+model/provider. Other providers
 do not opt in. No deleted provider artifacts are restored. No source/snapshot refresh is needed.
+
+## Runtime boundary
+
+The Qwen notebook workflow is separate from the HTTP endpoint implemented by
+`src/self_healthy_kafka/webhook/analytics_chat.py`. The endpoint currently receives only
+bounded incident facts from `vConnectorIncidentFacts`; it is not silently redirected to the
+notebook snapshot and therefore cannot safely answer independent healing-log totals until a
+separate bounded log-fact contract is introduced. Its user-facing wording has been simplified,
+but this semantic compiler, calendar resolver and two-population count run in the notebook path.
 
 ## Run
 
@@ -13,7 +23,7 @@ root `.env` or process environment, never notebook cells or outputs.
 HF_TOKEN=<secret supplied outside the notebook>
 HF_MODEL_ID=<keep current Qwen model>
 HF_PROVIDER=<keep current provider>
-QWEN_SEMANTIC_MODE=legacy
+QWEN_SEMANTIC_MODE=strict
 HF_STRUCTURED_OUTPUT=auto
 HF_SQL_REQUEST_TIMEOUT_SECONDS=30
 HF_RESPONSE_REQUEST_TIMEOUT_SECONDS=30
@@ -42,17 +52,18 @@ and usage. The [Qwen model card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2
 describes the model, not every hosted provider's capacity. Actual requested budgets,
 finish reasons and token usage are recorded per call; missing usage stays unknown.
 
-Open `text_to_sql_self_healthy_kafka.ipynb`. Run zero-based cells **3, 10, 12, 17, 19, 20**
+Open `text_to_sql_self_healthy_kafka.ipynb`. Run zero-based cells **3, 10, 12, 17, 18, 19**
 in order for inference on the existing snapshot. Cell 0 is optional dependency installation.
 **Do not Run All**: cells 5, 8, 15 remain the existing explicit loader/refresh path.
-Edit your question in Cell A (19), then run Cell B (20). Rerun configuration/workflow cells
+Edit your question in zero-based cell 18 (the “SQL stage” cell), then run zero-based cell 19
+(the “Vietnamese response” cell). Rerun configuration/workflow cells
 after settings or snapshot changes. Restart the kernel after changing runtime modules.
 After editing `.env`, also restart the kernel: already-loaded environment variables retain
 precedence over file values. Direct `os.environ` changes need only the configuration/workflow cells rerun.
 
-`QWEN_SEMANTIC_MODE` defaults to `legacy`. `strict` compiles validated plans and never falls
-back to free SQL. `shadow` retains the legacy result and collects a separate strict comparison
-only within the remaining total SQL-call budget. Stage timings, traces, plan, assumptions,
+`QWEN_SEMANTIC_MODE` defaults to `strict`; it compiles validated plans and never falls
+back to free SQL. Set `legacy` only to reproduce the former behavior. `shadow` retains the
+legacy result and collects a separate strict comparison only within the remaining total SQL-call budget. Stage timings, traces, plan, assumptions,
 parameters, diagnostics and response source are visible. Modified inference outputs were cleared
 so saved old results do not masquerade as a new run; refresh code and the user's question remain.
 
@@ -68,7 +79,9 @@ bounded plans and mandatory validation inside a closed compiler. Model input can
 SQL identifiers, expressions or operators. Evaluation Gold plans are never runtime templates.
 
 Supported compositions: incident/event populations, projection, multiple group dimensions,
-incident/log counts, receipt-to-completion averages with quality counts, AND filters using
+independent incident/log totals, confirmed failures, task/connector restart actions, recovery/
+escalation counts, recovery rate with a documented terminal-incident denominator,
+receipt-to-completion averages with quality counts, AND filters using
 typed comparisons/NULL predicates, time ranges, numeric HAVING or comparison to the grouped
 population mean, ordering/limit, and latest incident status per root. Logical root names and
 physical replacement names remain separate fields.
@@ -86,7 +99,31 @@ timeouts and snapshot/WAL cache invalidation remain independent of the model.
 Outside this compiler version: arbitrary formulas/ratios, arbitrary nested aggregates/windows,
 UNION, OR, time buckets and arbitrary distinct measures. These require clarification, never silent
 approximation or a strict-mode free-SQL fallback. Extend catalog/compiler/tests for new metrics;
-do not add question-string routing. Explicit legacy mode retains the wider existing SQL language.
+do not add database- or sample-value-specific routing. Strict mode has small documented business
+defaults for common wording (for example, “hay lỗi nhất” means a confirmed failure event); all
+defaults still go through the same closed compiler. Explicit legacy mode retains the wider existing SQL language.
+
+An explicit Vietnamese calendar day is evaluated in `Asia/Ho_Chi_Minh` by default. A missing year
+uses the configurable request clock, never whichever year happens to have rows. Incident day filters
+use `ReceivedAt`; healing-log day filters use `CreatedAt`. The snapshot does not record database
+INSERT/ingestion time, so such a question receives a limitation rather than an invented zero.
+
+## Business-question smoke checks
+
+After the SQL and response cells run, try these questions without using database column names:
+
+- `Connector nào hay lỗi nhất?`
+- `Ngày 5 tháng 9 có bao nhiêu incident và healing log?`
+- `Mất bao lâu để phục hồi?`
+- `Những connector nào vẫn chưa xử lý xong?`
+- `Tỷ lệ phục hồi là bao nhiêu?`
+
+For an explicit day, the answer may state the timezone/year assumption. SQL, diagnostics,
+fallback reason and timings are technical details in the notebook output, not required prose in
+the user-facing answer. Set `SHOW_RESPONSE_DETAILS=true` only when you want response source,
+fallback reason and snapshot scope printed below the answer. A scalar fallback is a Vietnamese
+sentence; a ranked result leads with its conclusion, and multi-row detail may remain a table.
+Never treat the snapshot as live health.
 
 Validation proves plan invariants, not complete equivalence to natural language: a model may still
 choose the wrong permitted metric/filter. Response checks verify references, literal values/numbers
@@ -152,8 +189,11 @@ python -m notebooks.evaluation.evaluate_qwen_semantics --live --modes legacy sha
 ```
 
 The evaluator reuses the same questions, snapshot, Qwen/provider and generation settings, rotating
-mode order per question. It reports first/final execution matches, valid SQL rate, latency, fallback,
-API calls, tokens, corrections/reviews and service failures. HTTP 401/402/403/429 stops remaining
+mode order per question. It reports first/final execution matches, valid SQL rate, clarification rate
+for clear questions, latency, table versus friendly fallback, unsupported-claim rejection, API calls,
+tokens, corrections/reviews and service failures. False rejection is intentionally reported as
+not measured there: it has a labelled deterministic grounding test instead of a made-up model metric.
+HTTP 401/402/403/429 stops remaining
 modes/cases. Unrun cases are never passes. Accuracy denominators include attempted service failures
 as unsuccessful; separate service-error counters prevent attributing those failures to SQL semantics.
 

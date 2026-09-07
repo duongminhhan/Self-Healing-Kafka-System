@@ -707,8 +707,11 @@ class Workflow:
                         "content": json.dumps(
                             {
                                 "question": self.question,
-                                "sql_interpretation_unverified": self.interpretation,
-                                "verified_result": self.result,
+                                "evidence_envelope": evidence_envelope(
+                                    question=self.question,
+                                    result=self.result,
+                                    semantic_plan=getattr(self, "semantic_plan", None),
+                                ),
                                 "business_definitions": self.snapshot.definitions,
                                 "semantic_catalog": self.snapshot.catalog,
                             },
@@ -718,7 +721,9 @@ class Workflow:
                 ]
                 try:
                     output = self.call(messages, "response", self.response_max_tokens)
-                    reason = validate_claims(output, self.result)
+                    reason = validate_claims(
+                        output, self.result, self.result.get("evidence_context")
+                    )
                     if reason is None:
                         self.answer = {
                             "source": getattr(self.client, "response_source", "huggingface"),
@@ -739,13 +744,19 @@ class Workflow:
                     )
             if reason:
                 self.answer = {
+                    # Keep the stable telemetry source name; the renderer is now
+                    # prose-first for scalar evidence and table-first otherwise.
                     "source": "verified_table_fallback",
                     "reason": reason,
-                    "text": render_table(self.result),
+                    "text": render_friendly_fallback(
+                        self.result, getattr(self, "semantic_plan", None)
+                    ),
                 }
                 diagnostics = self.result.get("diagnostics")
                 if diagnostics:
-                    self.answer["text"] += "\n" + render_diagnostics(diagnostics)
+                    # Keep user prose factual and concise. Notebook debug/UI
+                    # detail can render this separately when requested.
+                    self.answer["diagnostics_text"] = render_diagnostics(diagnostics)
             self.answer["scope"] = (
                 "Dữ liệu từ SQLite snapshot, không phải trạng thái hoạt động trực tiếp. Chỉ các hàng được trả về được hiển thị."
             )
@@ -772,7 +783,40 @@ Không dùng markdown code block. Không thêm các trường dữ liệu chưa 
 """
 
 
-def validate_claims(output, result):
+def evidence_envelope(*, question, result, semantic_plan=None):
+    """Only verified rows plus compiler-owned scope are exposed to response models."""
+    context = result.get("evidence_context", {})
+    return {
+        "question": question,
+        "verified_result": {
+            "columns": result["columns"], "rows": result["rows"],
+            "truncated": result["truncated"],
+        },
+        "semantic_plan": semantic_plan,
+        "query_context": context,
+        "snapshot": result.get("snapshot_metadata"),
+        "diagnostics": result.get("diagnostics"),
+    }
+
+
+def _strip_verified_date_mentions(text, context):
+    """Permit complete date expressions, never bare digits that could be a fake count."""
+    calendar = (context or {}).get("calendar_day")
+    if not calendar:
+        return text
+    year, month, day = calendar["local_date"].split("-")
+    day, month = str(int(day)), str(int(month))
+    patterns = (
+        rf"(?i)ngày\s+0?{day}\s+tháng\s+0?{month}(?:\s+(?:năm\s+)?{year})?",
+        rf"(?<!\d)0?{day}/0?{month}(?:/{year})?(?!\d)",
+        rf"(?<!\d){year}-{int(month):02d}-{int(day):02d}(?!\d)",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "", text)
+    return text
+
+
+def validate_claims(output, result, evidence_context=None):
     """Conservative structural/value checks, NOT semantic proof of prose or SQL correctness."""
     claims = output.get("claims")
     if not isinstance(claims, list) or not claims:
@@ -832,7 +876,7 @@ def validate_claims(output, result):
                 )
             else:
                 remaining = remaining.replace(value, "")
-        if re.search(r"\d", remaining):
+        if re.search(r"\d", _strip_verified_date_mentions(remaining, evidence_context)):
             return "unsupported_numeric_claim"
     expected = {(i, c["name"]) for i in range(len(result["rows"])) for c in result["columns"]}
     if covered != expected:
@@ -863,3 +907,143 @@ def render_table(result):
     if result["truncated"]:
         lines.append("Kết quả bị giới hạn; đây không phải tổng số hàng khớp truy vấn.")
     return "\n".join(lines)
+
+
+DIMENSION_LABELS_VI = {
+    "root": "Connector",
+    "current_connector": "Connector instance",
+    "event_connector": "Connector instance",
+    "queue_status": "Trạng thái hàng đợi",
+    "latest_queue_status": "Trạng thái hàng đợi gần nhất",
+    "outcome": "Kết quả cuối",
+    "mode": "Chế độ healing",
+    "event_type": "Loại sự kiện",
+    "severity": "Mức độ",
+}
+
+
+def _plan_metric_ids(plan):
+    if not isinstance(plan, dict):
+        return []
+    if plan.get("kind") == "independent":
+        return [metric for child in plan.get("queries", []) for metric in child.get("metrics", [])]
+    return list(plan.get("metrics", []))
+
+
+def _metric_phrase(name, value, presentation):
+    label = presentation[name]["label_vi"]
+    if value is None:
+        if name == "avg_duration_minutes":
+            return "chưa thể tính thời gian phục hồi trung bình"
+        return f"chưa có giá trị cho {label}"
+    if name == "avg_duration_minutes":
+        return f"thời gian phục hồi trung bình là {value} phút"
+    if name == "recovery_rate_percent":
+        return f"tỷ lệ phục hồi là {value}%"
+    return f"{value} {label}"
+
+
+def _upper_first(text):
+    return text[:1].upper() + text[1:]
+
+
+def _date_prefix_and_note(result):
+    calendar = result.get("evidence_context", {}).get("calendar_day")
+    if not calendar:
+        return "", ""
+    year, month, day = calendar["local_date"].split("-")
+    prefix = f"Ngày {int(day)}/{int(month)}/{year}, "
+    note = ""
+    if calendar.get("year_defaulted"):
+        note = f" Câu hỏi không nêu năm nên hệ thống dùng năm {year} theo thời điểm truy vấn."
+    return prefix, note
+
+
+def _duration_fallback(row, prefix, note):
+    average = row.get("avg_duration_minutes")
+    matched = row.get("matched_count")
+    valid = row.get("valid_duration_count")
+    excluded = row.get("excluded_duration_count")
+    if average is None:
+        if matched == 0:
+            return _upper_first(prefix + "không có incident phục hồi phù hợp để tính thời gian trung bình.") + note
+        detail = ""
+        if matched is not None and excluded is not None:
+            detail = f" Có {matched} incident phù hợp nhưng {excluded} không có thời lượng hợp lệ."
+        return _upper_first(prefix + "chưa thể tính thời gian phục hồi trung bình.") + detail + note
+    text = _upper_first(prefix + f"thời gian phục hồi trung bình là {average} phút.")
+    if matched is not None and valid is not None and excluded is not None:
+        text += f" Phép tính dùng {valid}/{matched} incident; {excluded} incident bị loại do dữ liệu thời gian không hợp lệ."
+    return text + note
+
+
+def _null_aggregate_fallback(rows, prefix, note, diagnostics):
+    """Render verified NULL aggregates without relying on a SQL alias or question text."""
+    if len(rows) != 1 or not rows[0] or any(value is not None for value in rows[0].values()):
+        return None
+    counts = (diagnostics or {}).get("counts", {})
+    if counts.get("matched_count") == 0:
+        return _upper_first(
+            prefix + "không có hàng đầu vào khớp phạm vi truy vấn nên chưa có giá trị để tính."
+        ) + note
+    return _upper_first(prefix + "kết quả tổng hợp chưa có giá trị để hiển thị.") + note
+
+
+def render_friendly_fallback(result, semantic_plan=None):
+    """Evidence-only Vietnamese fallback driven by semantic metric IDs."""
+    from notebooks.shared.semantic_plan import METRIC_PRESENTATION
+
+    rows = result["rows"]
+    columns = [column["name"] for column in result["columns"]]
+    prefix, note = _date_prefix_and_note(result)
+    if not rows:
+        return _upper_first(prefix + "không có dữ liệu phù hợp trong snapshot.") + note
+
+    null_aggregate = _null_aggregate_fallback(
+        rows, prefix, note, result.get("diagnostics")
+    )
+    if null_aggregate:
+        return null_aggregate
+
+    planned_metrics = _plan_metric_ids(semantic_plan)
+    metric_ids = [name for name in planned_metrics if name in columns]
+    if not metric_ids:
+        metric_ids = [name for name in columns if name in METRIC_PRESENTATION]
+    dimensions = [name for name in columns if name not in metric_ids]
+
+    if len(rows) == 1 and "avg_duration_minutes" in metric_ids:
+        return _duration_fallback(rows[0], prefix, note)
+
+    if len(rows) == 1 and not dimensions and metric_ids and len(metric_ids) == len(columns):
+        phrases = [_metric_phrase(name, rows[0][name], METRIC_PRESENTATION) for name in metric_ids]
+        if len(phrases) == 1:
+            body = phrases[0]
+            if metric_ids[0] in {"avg_duration_minutes", "recovery_rate_percent"} or rows[0][metric_ids[0]] is None:
+                return prefix + body[0].upper() + body[1:] + " trong snapshot." + note
+        else:
+            body = ", ".join(phrases[:-1]) + " và " + phrases[-1]
+        return _upper_first(prefix + "có " + body + " được ghi nhận trong snapshot.") + note
+
+    if len(rows) == 1 and dimensions and metric_ids:
+        dimension_text = ", ".join(
+            f"{DIMENSION_LABELS_VI.get(name, name)} {rows[0][name]}" for name in dimensions
+        )
+        metric_text = ", ".join(
+            _metric_phrase(name, rows[0][name], METRIC_PRESENTATION) for name in metric_ids
+        )
+        return prefix + dimension_text + f" có {metric_text} trong snapshot." + note
+
+    # A ranked result benefits from a direct conclusion before its detail table.
+    order_by = semantic_plan.get("order_by", []) if isinstance(semantic_plan, dict) else []
+    if rows and dimensions and metric_ids and order_by:
+        ranked_metric = order_by[0].get("field")
+        if ranked_metric in metric_ids and order_by[0].get("direction") == "desc":
+            leader = rows[0]
+            label = ", ".join(str(leader[name]) for name in dimensions)
+            conclusion = (
+                prefix + f"{label} đứng đầu với "
+                + _metric_phrase(ranked_metric, leader[ranked_metric], METRIC_PRESENTATION)
+                + "."
+            )
+            return conclusion + note + "\n\n" + render_table(result)
+    return render_table(result)
