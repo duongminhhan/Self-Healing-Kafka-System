@@ -20,7 +20,6 @@ from self_healthy_kafka.config import (
 )
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 from self_healthy_kafka.webhook.chat_api import ChatReadApi
-from self_healthy_kafka.webhook.chat_ui import page as chat_ui_page
 from self_healthy_kafka.webhook.ollama_chat import OllamaChatService
 from self_healthy_kafka.webhook.security import (
     EventDeduplicator,
@@ -371,13 +370,6 @@ class GrafanaWebhookService:
                 request_url = urlsplit(self.path)
                 if request_url.path == "/health":
                     self._json_response(HTTPStatus.OK, {"status": "ok"})
-                    return
-                if request_url.path in {"/", "/chat"}:
-                    self._write_response(
-                        HTTPStatus.OK,
-                        "text/html; charset=utf-8",
-                        chat_ui_page(),
-                    )
                     return
                 if service._chat_api and service._chat_api.enabled:
                     if not service._chat_api.is_authorized(

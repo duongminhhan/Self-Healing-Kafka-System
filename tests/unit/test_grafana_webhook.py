@@ -249,42 +249,6 @@ def test_metrics_endpoint_is_not_exposed():
         service.close()
 
 
-def test_chat_ui_is_served_without_auth_and_chat_post_still_requires_token():
-    service = GrafanaWebhookService(
-        _config(),
-        lambda *_: None,
-        chat_api_config=_chat_config(),
-        ollama_chat_config=_ollama_config(),
-        queue_lookup=lambda _queue_id, _connector_name: [],
-        healing_logs=lambda **_kwargs: [],
-        failure_ranking=lambda **_kwargs: [],
-    )
-    service.start()
-    try:
-        port = service._server.server_port
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        connection.request("GET", "/")
-        response = connection.getresponse()
-        page = response.read().decode()
-
-        assert response.status == 200
-        assert response.getheader("Content-Type") == "text/html; charset=utf-8"
-        assert "Self-Healing Kafka Assistant" in page
-        assert "ConnectorHealingLogs" in page
-
-        connection.request(
-            "POST",
-            "/api/v1/chat",
-            body=json.dumps({"question": "ORA-01291"}),
-            headers={"Content-Type": "application/json"},
-        )
-        denied = connection.getresponse()
-        denied.read()
-        assert denied.status == 401
-    finally:
-        service.close()
-
-
 def test_chat_api_returns_read_only_incidents_with_its_own_token():
     service = GrafanaWebhookService(
         _config(),
