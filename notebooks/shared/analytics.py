@@ -921,6 +921,17 @@ DIMENSION_LABELS_VI = {
     "severity": "Mức độ",
 }
 
+DIMENSION_ALIASES = {
+    "rootconnectorname": "root",
+    "root_connector_name": "root",
+    "connectorname": "current_connector",
+    "connector_name": "current_connector",
+    "queuestatus": "queue_status",
+    "queue_status": "queue_status",
+    "finaloutcome": "outcome",
+    "final_outcome": "outcome",
+}
+
 
 def _plan_metric_ids(plan):
     if not isinstance(plan, dict):
@@ -945,6 +956,11 @@ def _metric_phrase(name, value, presentation):
 
 def _upper_first(text):
     return text[:1].upper() + text[1:]
+
+
+def _dimension_label(name):
+    normalized = DIMENSION_ALIASES.get(name.lower(), name)
+    return DIMENSION_LABELS_VI.get(normalized, name)
 
 
 def _date_prefix_and_note(result):
@@ -989,6 +1005,33 @@ def _null_aggregate_fallback(rows, prefix, note, diagnostics):
     return _upper_first(prefix + "kết quả tổng hợp chưa có giá trị để hiển thị.") + note
 
 
+def _grouped_friendly_fallback(rows, dimensions, metric_ids, presentation, prefix, note):
+    """Render every verified grouped value as Vietnamese prose, not a raw SQL table."""
+    constant_metrics = [
+        metric
+        for metric in metric_ids
+        if all(row[metric] == rows[0][metric] for row in rows)
+    ]
+    variable_metrics = [metric for metric in metric_ids if metric not in constant_metrics]
+    dimension_label = _dimension_label(dimensions[0]) if len(dimensions) == 1 else "Nhóm"
+    header = f"Có {len(rows)} {dimension_label.lower()} có dữ liệu trong snapshot."
+    if constant_metrics:
+        constant_text = " và ".join(
+            _metric_phrase(metric, rows[0][metric], presentation)
+            for metric in constant_metrics
+        )
+        header += f" Tất cả đều có {constant_text}."
+    entries = []
+    for row in rows:
+        label = ", ".join(str(row[dimension]) for dimension in dimensions)
+        metrics = variable_metrics or metric_ids
+        metric_text = " và ".join(
+            _metric_phrase(metric, row[metric], presentation) for metric in metrics
+        )
+        entries.append(f"- {label}: {metric_text}.")
+    return _upper_first(prefix + header) + note + "\n\n" + "\n".join(entries)
+
+
 def render_friendly_fallback(result, semantic_plan=None):
     """Evidence-only Vietnamese fallback driven by semantic metric IDs."""
     from notebooks.shared.semantic_plan import METRIC_PRESENTATION
@@ -1026,7 +1069,7 @@ def render_friendly_fallback(result, semantic_plan=None):
 
     if len(rows) == 1 and dimensions and metric_ids:
         dimension_text = ", ".join(
-            f"{DIMENSION_LABELS_VI.get(name, name)} {rows[0][name]}" for name in dimensions
+            f"{_dimension_label(name)} {rows[0][name]}" for name in dimensions
         )
         metric_text = ", ".join(
             _metric_phrase(name, rows[0][name], METRIC_PRESENTATION) for name in metric_ids
@@ -1046,4 +1089,8 @@ def render_friendly_fallback(result, semantic_plan=None):
                 + "."
             )
             return conclusion + note + "\n\n" + render_table(result)
+    if len(rows) > 1 and dimensions and metric_ids:
+        return _grouped_friendly_fallback(
+            rows, dimensions, metric_ids, METRIC_PRESENTATION, prefix, note
+        )
     return render_table(result)

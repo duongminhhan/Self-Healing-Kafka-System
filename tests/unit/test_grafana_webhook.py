@@ -8,9 +8,11 @@ import threading
 import time
 
 from self_healthy_kafka.config import (
+    AnalyticsChatConfig,
     ChatApiConfig,
     GrafanaWebhookConfig,
     OllamaChatConfig,
+    RagConfig,
 )
 from self_healthy_kafka.webhook.grafana import (
     GrafanaWebhookService,
@@ -326,6 +328,69 @@ def test_chat_endpoint_requires_chat_token_and_returns_ollama_answer():
         denied = connection.getresponse()
         denied.read()
         assert denied.status == 401
+    finally:
+        service.close()
+
+
+def test_existing_chat_endpoint_returns_rag_metadata_without_exposing_credentials():
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        analytics_chat_config=AnalyticsChatConfig(
+            enabled=False,
+            timezone="UTC",
+            hf_endpoint_url="https://hf.example",
+            hf_token="hf-private",
+            hf_model_id="qwen-test",
+        ),
+        incident_facts=lambda **_kwargs: [],
+        rag_config=RagConfig(
+            enabled=True,
+            qdrant_url="https://qdrant.example",
+            qdrant_api_key="qdrant-private",
+            embedding_model="configured-cluster-model",
+        ),
+    )
+    service._analytics_chat.ask = lambda question: {
+        "answer": "Hãy xác minh cấu hình theo runbook.",
+        "sources": [],
+        "query_plan": None,
+        "from_at": None,
+        "to_at": None,
+        "row_count": 0,
+        "evidence_ids": [],
+        "route": "runbook",
+        "source": "runbook",
+        "citations": [{
+            "runbook_id": "RB-TEST-001",
+            "version": 1,
+            "section": "diagnostic_steps",
+            "source": "runbooks/test.md",
+        }],
+        "fallback_reason": None,
+    }
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "POST",
+            "/api/v1/chat",
+            body=json.dumps({"question": "Cách xử lý lỗi này?"}),
+            headers={
+                "Authorization": "Bearer chat-test-token",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == 200
+        assert payload["route"] == "runbook"
+        assert payload["citations"][0]["runbook_id"] == "RB-TEST-001"
+        assert "hf-private" not in json.dumps(payload)
+        assert "qdrant-private" not in json.dumps(payload)
     finally:
         service.close()
 

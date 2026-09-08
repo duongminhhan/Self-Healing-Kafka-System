@@ -123,7 +123,7 @@ def test_notebook_cells_in_order_without_refresh(snapshot_file, monkeypatch, cap
     assert state["workflow"].mode == mode
     assert state["verified_result"]["returned_row_count"] > 0
     assert state["final_answer"]["source"] == "verified_table_fallback"
-    assert len(client.calls) == (3 if mode == "shadow" else 2)
+    assert len(client.calls) == {"legacy": 2, "strict": 1, "shadow": 2}[mode]
     assert hashlib.sha256(snapshot_file.read_bytes()).hexdigest() == before
     output = capsys.readouterr().out
     assert "Response source:" not in output and "Fallback reason:" not in output
@@ -187,7 +187,9 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
             content = {
                 "claims": [
                     {
-                        "text": f"Trạng thái hàng đợi {row['queue_status']} có {row['incident_count']} incident trong snapshot.",
+                        "text": "Kết quả: " + ", ".join(
+                            f"{column} {value}" for column, value in row.items()
+                        ) + ".",
                         "evidence": [{"row": i, "column": c} for c in row],
                     }
                     for i, row in enumerate(evidence["rows"])
@@ -225,9 +227,12 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
             exec(
                 compile("".join(nb["cells"][index]["source"]), f"qwen-cell-{index}", "exec"), state
             )
-    assert len(requests) == (3 if mode == "shadow" else 2)
+    assert len(requests) == {"legacy": 2, "strict": 1, "shadow": 2}[mode]
     assert all(r["response_format"]["type"] == "json_schema" for r in requests)
     assert state["final_answer"]["source"] == "huggingface"
-    assert state["workflow"].metrics["tokens"]["sql"] == {"input": 100, "output": 30}
+    if mode == "strict":
+        assert "sql" not in state["workflow"].metrics["tokens"]
+    else:
+        assert state["workflow"].metrics["tokens"]["sql"] == {"input": 100, "output": 30}
     assert state["workflow"].metrics["tokens"]["response"] == {"input": 100, "output": 30}
     assert "hf_offline_test_only" not in capsys.readouterr().out

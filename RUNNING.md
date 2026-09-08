@@ -62,14 +62,14 @@ APP_ENV=uat SELF_HEALTHY_KAFKA_ENV_FILE=env/uat.env \
 The webhook server exposes `GET /health` and the configured Grafana POST path.
 The application does not expose a custom metrics endpoint.
 
-## Local chatbot UI
+## Chat API
 
-When `CHAT_API_ENABLED=true` and `OLLAMA_ENABLED=true`, open the same-origin UI
-at [http://127.0.0.1:8080/](http://127.0.0.1:8080/) (or `/chat`). Enter the
-private `CHAT_API_TOKEN` in the browser field; it is retained only in that
-browser tab's session storage and is sent as a Bearer token to
-`POST /api/v1/chat`. The UI polls `GET /health`, displays request failures, and
-shows only the `ConnectorHealingLogs` rows supplied by the API as evidence.
+The backend exposes `POST /api/v1/chat` on the webhook port when chat analytics
+or runbook RAG is enabled. This repository does not bundle an HTML/JavaScript
+chat client. A separate UI should keep the private `CHAT_API_TOKEN` out of logs,
+send it as a Bearer token, and render `route`, `source`, `citations`, and
+`fallback_reason` as compact expandable diagnostics. Never render Qdrant scores
+or backend credentials.
 
 ## Optional Hugging Face analytics planner
 
@@ -82,6 +82,187 @@ To use a Hugging Face Dedicated Endpoint, set `HF_CHAT_ENDPOINT_URL`,
 are never returned to the browser. The planner can return only a validated JSON
 query plan; the app calls the fixed read-only procedure with bound parameters.
 UAT/Prod DBAs must apply both SQL scripts manually before enabling the flag.
+
+## Optional approved-runbook RAG with Qdrant Cloud
+
+Runbook RAG is opt-in and uses the existing Qwen/Hugging Face endpoint for
+answer composition. Qdrant Cloud Inference embeds approved Markdown runbooks;
+Qdrant is only a replaceable search index. The files under `runbooks/` remain
+the authoritative, version-controlled source.
+
+`RAG_SEARCH_MODE=dense` preserves the original `healing_runbooks_v1` contract:
+one unnamed cosine vector and the existing `RAG_SCORE_THRESHOLD`. True hybrid
+mode uses a separate collection (recommended: `healing_runbooks_v2`) with one
+named dense vector and one named BM25 sparse vector. Both Prefetch channels get
+the same tenant, approved-status, environment, connector-class and error-code
+filter; Qdrant then fuses their independent candidate rankings with server-side
+RRF. The fused RRF score is deliberately not compared with the legacy cosine
+threshold.
+
+1. In the Qdrant Cloud cluster's **Inference** tab, enable Cloud Inference and
+   select a supported multilingual embedding model. Set
+   `QDRANT_EMBEDDING_MODEL` to that exact model identifier and
+   `QDRANT_EMBEDDING_SIZE` to its documented vector dimension.
+2. Create a least-privilege Database API key and set `QDRANT_URL` and
+   `QDRANT_API_KEY` only in the selected private environment file or secret
+   store. Do not commit either value.
+3. Validate all Markdown and preview the number of chunks without contacting
+   Qdrant:
+
+   ```bash
+   SELF_HEALTHY_KAFKA_ENV_FILE=env/uat.env python -m scripts.index_runbooks
+   ```
+
+4. Explicitly index the approved corpus:
+
+   ```bash
+   RAG_ENABLED=true SELF_HEALTHY_KAFKA_ENV_FILE=env/uat.env \
+     python -m scripts.index_runbooks --apply
+   ```
+
+   Re-running this command is idempotent. It updates changed chunks and removes
+   stale points for the configured tenant. Draft and deprecated runbooks are
+   never indexed. To roll back, check out the desired runbook revision and run
+   the same command again.
+
+### Create and validate the hybrid v2 collection
+
+Keep v1 intact. Configure the following values in a private environment file:
+
+```dotenv
+RAG_SEARCH_MODE=hybrid
+QDRANT_COLLECTION=healing_runbooks_v2
+QDRANT_DENSE_VECTOR_NAME=dense
+QDRANT_SPARSE_VECTOR_NAME=sparse
+QDRANT_DENSE_EMBEDDING_MODEL=
+QDRANT_SPARSE_EMBEDDING_MODEL=qdrant/bm25
+RAG_DENSE_CANDIDATE_LIMIT=15
+RAG_SPARSE_CANDIDATE_LIMIT=15
+RAG_FUSION_METHOD=rrf
+RAG_FUSION_LIMIT=15
+RAG_DENSE_SCORE_THRESHOLD=
+RAG_SPARSE_SCORE_THRESHOLD=
+RAG_HYBRID_FALLBACK_TO_DENSE=false
+```
+
+An empty `QDRANT_DENSE_EMBEDDING_MODEL` inherits the legacy
+`QDRANT_EMBEDDING_MODEL`. Confirm in the Qdrant Cloud Inference UI that both
+configured model IDs are supported. `QDRANT_EMBEDDING_SIZE` must match the
+dense model. Candidate limits are bounded to 1-100. A blank channel threshold
+means no additional override; the dense channel inherits
+`RAG_SCORE_THRESHOLD`. No final threshold is applied to RRF.
+
+Preview the corpus without touching Qdrant, then explicitly create/index v2:
+
+```powershell
+$env:SELF_HEALTHY_KAFKA_ENV_FILE = "env/uat.env"
+python -m scripts.index_runbooks
+$env:RAG_ENABLED = "true"
+python -m scripts.index_runbooks --apply
+```
+
+The apply command creates only the configured collection, validates both named
+vector schemas, indexes both vectors on the same stable point ID and preserves
+incremental inserted/updated/unchanged/removed behavior. It never drops v1 and
+does not switch an alias. Search and upsert fail with a configuration error if
+hybrid mode points at a dense-only collection.
+
+Run the same Gold Retrieval questions against both collections without an LLM:
+
+```powershell
+$env:RUNBOOK_RAG_LIVE_TEST = "true"
+$env:RAG_ENABLED = "true"
+python -m scripts.evaluate_runbook_retrieval --live `
+  --dense-collection healing_runbooks_v1 `
+  --hybrid-collection healing_runbooks_v2
+```
+
+The report separates Recall@1/3/5, MRR, nDCG@5, exact/semantic/mixed results,
+filter violations, failures, fallback rate, candidate count and p50/p95
+latency. Running the evaluator without `--live` validates the dataset and marks
+both external evaluations `not_run`; it does not manufacture benchmark scores.
+Server-side fusion returns the fused list but not each Prefetch list, so runtime
+`dense_candidate_count` and `sparse_candidate_count` remain `null`; their
+configured limits and the actual fused count are reported instead. Qdrant also
+does not expose separate channel timing inside one fused API call, so the fused
+request and total latency are measured without inventing dense/sparse timings.
+
+To enable hybrid after the v2 schema and Gold report are accepted, deploy the
+v2 settings and restart the service. Roll back by restoring
+`RAG_SEARCH_MODE=dense` and `QDRANT_COLLECTION=healing_runbooks_v1`, then
+restart and smoke-test. `RAG_HYBRID_FALLBACK_TO_DENSE=false` is intentional: a
+hybrid failure is visible instead of silently changing retrieval behavior. If
+you explicitly enable fallback, it searches the named dense vector inside v2
+and records the reason in diagnostics.
+
+If a production alias is used, perform cutover outside the index command: note
+the current alias target, validate v2, atomically replace the alias in Qdrant,
+then restart/smoke-test. Rollback is the same atomic alias operation back to the
+recorded v1 target. The alias helper is dry-run by default:
+
+```powershell
+python -m scripts.manage_qdrant_alias --alias healing_runbooks `
+  --collection healing_runbooks_v2
+$env:QDRANT_ALIAS_CUTOVER = "true"
+python -m scripts.manage_qdrant_alias --alias healing_runbooks `
+  --collection healing_runbooks_v2 --apply
+```
+
+The apply output records `previous_collection`; rollback by running the same
+apply command with that exact collection. Automated tests and indexing never
+modify aliases, and the helper refuses apply unless `QDRANT_ALIAS_CUTOVER=true`.
+
+Temporary benchmark collections can be removed with a separately guarded
+helper. It refuses any collection name that does not contain `test` and is a
+dry-run unless both the flag and environment guard are supplied:
+
+```powershell
+python -m scripts.delete_qdrant_test_collection `
+  --collection healing_runbooks_hybrid_test_20260908
+$env:QDRANT_TEST_CLEANUP = "true"
+python -m scripts.delete_qdrant_test_collection `
+  --collection healing_runbooks_hybrid_test_20260908 --apply
+```
+
+Deletion is not reversible; re-run the v2 indexing command to recreate it.
+
+Hybrid search adds sparse inference and fusion work, so it can cost more and be
+slower than dense-only retrieval. Use the Gold report rather than model size or
+anecdotal examples to decide whether exact-token recall justifies that cost.
+Chat history remains a separate application concern: hybrid retrieval alone
+does not create semantic multi-turn conversations.
+
+5. Keep `CHAT_API_ENABLED=true`, configure the existing
+   `HF_CHAT_ENDPOINT_URL`, `HF_CHAT_TOKEN`, and `HF_CHAT_MODEL_ID`, then enable
+   `RAG_ENABLED=true` and restart the service. Pure analytics questions retain
+   the existing fixed-procedure path; runbook and combined questions retrieve
+   only approved, tenant/environment-filtered chunks.
+
+Run a live retrieval smoke test only when intentionally allowed:
+
+```bash
+RUNBOOK_RAG_LIVE_TEST=true RAG_ENABLED=true \
+  SELF_HEALTHY_KAFKA_ENV_FILE=env/uat.env \
+  python -m scripts.retrieve_runbooks "ORA-01017 cần xử lý thế nào?"
+```
+
+The offline evaluation reports routing accuracy while leaving retrieval and
+generation metrics as `null` instead of pretending an external service ran:
+
+```bash
+SELF_HEALTHY_KAFKA_ENV_FILE=env/dev.env.example \
+  python -m scripts.evaluate_runbook_rag
+```
+
+Use `--live` with `RUNBOOK_RAG_LIVE_TEST=true` only after indexing. Rotate a
+Qdrant key by creating a replacement key, updating the deployment secret,
+restarting and smoke-testing the service, then revoking the old key. Monitor
+the structured `runbook_rag_completed` log for route, source, fallback reason,
+retrieval hit count and latency; the question and retrieved text are not logged.
+Add `--with-generation` to the live evaluator to call the configured Qwen/HF
+endpoint and measure citation precision, forbidden-claim rate, required-claim
+recall, fallback rate, and end-to-end latency. A live run that cannot reach an
+external service is reported as a failure, never as a passed case.
 
 ## Local chatbot context test
 

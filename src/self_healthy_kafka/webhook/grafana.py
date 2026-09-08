@@ -17,6 +17,7 @@ from self_healthy_kafka.config import (
     ChatApiConfig,
     GrafanaWebhookConfig,
     OllamaChatConfig,
+    RagConfig,
 )
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 from self_healthy_kafka.webhook.chat_api import ChatReadApi
@@ -94,6 +95,7 @@ class GrafanaWebhookService:
         failure_ranking: Callable[..., list[dict[str, Any]]] | None = None,
         analytics_chat_config: AnalyticsChatConfig | None = None,
         incident_facts: Callable[..., list[dict[str, Any]]] | None = None,
+        rag_config: RagConfig | None = None,
     ):
         self._config = config
         self._process_connector = process_connector
@@ -124,6 +126,7 @@ class GrafanaWebhookService:
             AnalyticsChatService(
                 analytics_chat_config,
                 incident_facts=incident_facts or (lambda **_kwargs: []),
+                rag_config=rag_config,
             )
             if analytics_chat_config is not None
             else None

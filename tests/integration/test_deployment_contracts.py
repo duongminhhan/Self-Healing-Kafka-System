@@ -50,6 +50,15 @@ def test_environment_files_only_define_healing_runtime_endpoints():
         assert "KAFKA_CONNECT_URL=" in source
         assert "MSSQL_CONNECTION_STRING=" in source
         assert "OLLAMA_ENABLED=" in source
+        assert "RAG_ENABLED=false" in source
+        assert "QDRANT_URL=" in source
+        assert "QDRANT_API_KEY=" in source
+        assert "QDRANT_EMBEDDING_MODEL=" in source
+        assert "RAG_SEARCH_MODE=dense" in source
+        assert "QDRANT_DENSE_VECTOR_NAME=dense" in source
+        assert "QDRANT_SPARSE_VECTOR_NAME=sparse" in source
+        assert "QDRANT_SPARSE_EMBEDDING_MODEL=qdrant/bm25" in source
+        assert "RAG_HYBRID_FALLBACK_TO_DENSE=false" in source
         for key in removed_keys:
             assert key not in source
 

@@ -244,6 +244,26 @@ def test_friendly_fallback_leads_with_ranking_conclusion():
     assert "| root | confirmed_failure_count |" in text
 
 
+def test_friendly_fallback_renders_grouped_legacy_metrics_as_prose():
+    result = {
+        "rows": [
+            {"RootConnectorName": "connector-a", "recovery_count": 2, "recovery_rate_percent": 100.0},
+            {"RootConnectorName": "connector-b", "recovery_count": 1, "recovery_rate_percent": 100.0},
+        ],
+        "columns": [
+            {"name": "RootConnectorName"}, {"name": "recovery_count"},
+            {"name": "recovery_rate_percent"},
+        ],
+        "returned_row_count": 2,
+        "truncated": False,
+    }
+    text = notebook_analytics.render_friendly_fallback(result)
+    assert text.startswith("Có 2 connector có dữ liệu trong snapshot. Tất cả đều có tỷ lệ phục hồi là 100.0%.")
+    assert "- connector-a: 2 incident đã phục hồi." in text
+    assert "- connector-b: 1 incident đã phục hồi." in text
+    assert "|" not in text
+
+
 def test_friendly_fallback_explains_null_duration_and_empty_result():
     duration = {
         "rows": [{

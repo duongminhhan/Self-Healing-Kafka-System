@@ -9,7 +9,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from self_healthy_kafka.config import AnalyticsChatConfig
+from self_healthy_kafka.config import AnalyticsChatConfig, RagConfig
+from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJsonGenerator
+from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
+from self_healthy_kafka.rag.retriever import RunbookRetriever
+from self_healthy_kafka.rag.workflow import RunbookRagWorkflow
 from self_healthy_kafka.storage.common import json_safe
 from self_healthy_kafka.webhook.analytics import (
     MAX_LIMIT,
@@ -37,22 +41,34 @@ class AnalyticsChatService:
         incident_facts: Callable[..., list[dict[str, Any]]],
         client: httpx.Client | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        rag_config: RagConfig | None = None,
+        rag_workflow: RunbookRagWorkflow | None = None,
     ):
         self._config = config
         self._incident_facts = incident_facts
         self._client = client or httpx.Client()
         self._now = now
+        self._rag_config = rag_config
+        self._qwen = QwenJsonGenerator(config, self._client)
+        self._rag_workflow = rag_workflow
+        if self._rag_workflow is None and rag_config is not None and rag_config.enabled:
+            store = QdrantRunbookStore(rag_config)
+            self._rag_workflow = RunbookRagWorkflow(
+                rag_config,
+                retriever=RunbookRetriever(rag_config, store),
+                composer=GroundedAnswerComposer(self._qwen.generate),
+            )
 
     @property
     def enabled(self) -> bool:
-        return self._config.enabled
+        return self._config.enabled or bool(self._rag_config and self._rag_config.enabled)
 
     @property
     def path(self) -> str:
         return "/api/v1/chat"
 
     def validate(self) -> None:
-        if not self._config.enabled:
+        if not self.enabled:
             return
         try:
             ZoneInfo(self._config.timezone)
@@ -62,11 +78,31 @@ class AnalyticsChatService:
             raise ValueError("HF_CHAT_ENDPOINT_URL and HF_CHAT_TOKEN must be configured together")
         if self._config.hf_endpoint_url and not self._config.hf_model_id:
             raise ValueError("HF_CHAT_MODEL_ID is required with Hugging Face endpoint")
+        if self._rag_config is not None and self._rag_config.enabled:
+            self._rag_config.validate()
+            missing_hf = [
+                name
+                for name, value in (
+                    ("HF_CHAT_ENDPOINT_URL", self._config.hf_endpoint_url),
+                    ("HF_CHAT_TOKEN", self._config.hf_token),
+                    ("HF_CHAT_MODEL_ID", self._config.hf_model_id),
+                )
+                if not value.strip()
+            ]
+            if missing_hf:
+                raise ValueError(
+                    "RAG is enabled but Qwen configuration is missing: " + ", ".join(missing_hf)
+                )
 
     def ask(self, question: str) -> dict[str, Any]:
         question = question.strip()
         if not question:
             raise ValueError("question is required")
+        if self._rag_workflow is not None:
+            return self._rag_workflow.ask(question, analytics_ask=self._ask_analytics)
+        return self._ask_analytics(question)
+
+    def _ask_analytics(self, question: str) -> dict[str, Any]:
         plan = self._plan(question)
         from_at, to_at = resolve_time_range(
             plan.time_range, now=self._now(), timezone_name=self._config.timezone
@@ -131,6 +167,8 @@ class AnalyticsChatService:
                     {"role": "system", "content": _planner_prompt()},
                     {"role": "user", "content": question},
                 ],
+                "temperature": 0,
+                "max_tokens": 700,
             },
             timeout=self._config.hf_request_timeout_seconds,
         )
@@ -144,12 +182,69 @@ class AnalyticsChatService:
 
 
 def _planner_prompt() -> str:
+    contract = {
+        "dataset": "connector_incidents",
+        "metrics": [
+            {"name": "failure_count", "aggregation": "count_distinct_incident"}
+        ],
+        "group_by": ["job_name"],
+        "filters": {
+            "time_range": {"kind": "relative", "value": "last_7_days"},
+            "event_type": ["HEALTH_FAILED_CONFIRMED"],
+            "final_outcome": ["RECOVERED"],
+            "connector_name": "optional exact connector name",
+            "error_code": "optional exact error code",
+        },
+        "order_by": [{"field": "failure_count", "direction": "desc"}],
+        "limit": 5,
+        "comparison": "previous_period",
+    }
+    ranking_example = {
+        "dataset": "connector_incidents",
+        "metrics": [
+            {"name": "failure_count", "aggregation": "count_distinct_incident"}
+        ],
+        "group_by": ["job_name"],
+        "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
+        "order_by": [{"field": "failure_count", "direction": "desc"}],
+        "limit": 5,
+    }
+    incident_example = {
+        "dataset": "connector_incidents",
+        "metrics": [
+            {"name": "failure_count", "aggregation": "count_distinct_incident"}
+        ],
+        "group_by": ["connector_name", "error_code", "final_outcome"],
+        "filters": {
+            "event_type": ["HEALTH_FAILED_CONFIRMED"],
+            "connector_name": "sample-oracle-orders",
+            "error_code": "ORA-01017",
+        },
+        "order_by": [{"field": "failure_count", "direction": "desc"}],
+        "limit": 20,
+    }
     return (
-        "Return JSON only. Never return SQL, a table name, a procedure name, code, "
-        "or credentials. Select only from this semantic catalog: "
+        "You are a query planner, not an answer writer. Return exactly one JSON object "
+        "and no prose. Never return SQL, database object names, procedures, code, advice, "
+        "causes, actions, credentials, or keys outside this contract. The only top-level "
+        "keys are dataset, metrics, group_by, filters, order_by, limit, and optional "
+        "comparison. metrics must be an array of objects with name and aggregation; "
+        "filters must contain every filter. Omit optional filters and comparison when the "
+        "question does not request them. Select values only from this semantic catalog: "
         + json.dumps(CATALOG, ensure_ascii=False)
-        + ". Use relative time values only: today, yesterday, last_7_days, this_month, this_week, last_week. "
-        "Use failure_count for confirmed failures and group by job_name for connector ranking."
+        + ". Valid relative time values are today, yesterday, last_7_days, this_month, "
+        "this_week, and last_week. Valid metric-to-aggregation mappings are: failure_count, "
+        "recovered_count, and open_count use count_distinct_incident; "
+        "average_recovery_minutes uses average_recovery_minutes. Use failure_count and "
+        "group_by job_name for connector ranking. A question that also asks for causes or "
+        "actions still requires only an analytics query plan here. Contract shape example "
+        "(illustrative optional fields; do not copy filters not asked for): "
+        + json.dumps(contract, ensure_ascii=False)
+        + ". Example input: Connector nào thường xuyên gặp sự cố nhất? Example output: "
+        + json.dumps(ranking_example, ensure_ascii=False)
+        + ". Example input: Connector sample-oracle-orders đang báo ORA-01017, nguyên nhân "
+        "có thể là gì và cần xử lý thế nào? Example output: "
+        + json.dumps(incident_example, ensure_ascii=False)
     )
 
 

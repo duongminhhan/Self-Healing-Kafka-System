@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from self_healthy_kafka.config import AnalyticsChatConfig
+from self_healthy_kafka.config import AnalyticsChatConfig, RagConfig
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 
 
@@ -84,6 +84,11 @@ def test_hugging_face_planner_receives_only_catalog_and_returns_validated_json()
     assert client.request[0] == "https://hf.example/v1/chat/completions"
     assert client.request[1]["headers"] == {"Authorization": "Bearer hf-private"}
     assert "credential" in client.request[1]["json"]["messages"][0]["content"]
+    assert client.request[1]["json"]["temperature"] == 0
+    assert client.request[1]["json"]["max_tokens"] == 700
+    prompt = client.request[1]["json"]["messages"][0]["content"]
+    assert "metrics must be an array of objects" in prompt
+    assert "A question that also asks for causes or actions" in prompt
     assert result["query_plan"]["dataset"] == "connector_incidents"
 
 
@@ -122,3 +127,30 @@ def test_ranking_answer_states_when_connectors_are_tied():
 
     assert "Không có connector nào gặp lỗi nhiều hơn" in result["answer"]
     assert "A, B đồng hạng" in result["answer"]
+
+
+def test_rag_can_own_existing_chat_endpoint_without_enabling_legacy_analytics_flag():
+    class Workflow:
+        def ask(self, question, *, analytics_ask):
+            return {"answer": question, "route": "runbook", "citations": []}
+
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(
+            enabled=False,
+            timezone="UTC",
+            hf_endpoint_url="https://hf.example",
+            hf_token="hf-test",
+            hf_model_id="qwen-test",
+        ),
+        incident_facts=lambda **_kwargs: [],
+        rag_config=RagConfig(
+            enabled=True,
+            qdrant_url="https://qdrant.example",
+            qdrant_api_key="qdrant-test",
+            embedding_model="configured-cluster-model",
+        ),
+        rag_workflow=Workflow(),
+    )
+
+    assert service.enabled is True
+    assert service.ask("Hướng xử lý?")["route"] == "runbook"
