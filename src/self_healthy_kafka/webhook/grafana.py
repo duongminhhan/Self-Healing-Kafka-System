@@ -185,8 +185,6 @@ class GrafanaWebhookService:
         )
 
     def close(self) -> None:
-        if not self._config.enabled and not (self._chat_api and self._chat_api.enabled):
-            return
         self._stopping.set()
         with self._followup_lock:
             timers = list(self._followup_timers.values())
@@ -194,7 +192,8 @@ class GrafanaWebhookService:
         for timer in timers:
             timer.cancel()
         if self._server is not None:
-            self._server.shutdown()
+            if self._server_thread is not None and self._server_thread.is_alive():
+                self._server.shutdown()
             self._server.server_close()
         for _worker in self._worker_threads:
             try:
@@ -206,6 +205,8 @@ class GrafanaWebhookService:
         for worker in self._worker_threads:
             worker.join(timeout=5)
         self._worker_threads.clear()
+        if self._analytics_chat is not None:
+            self._analytics_chat.close()
 
     def submit(self, payload: dict[str, Any]) -> dict[str, int]:
         accepted = 0

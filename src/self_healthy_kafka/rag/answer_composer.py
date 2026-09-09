@@ -164,6 +164,10 @@ def _messages(
                 "version": chunk.version,
                 "section": chunk.section,
                 "source": chunk.source,
+                "error_codes": list(chunk.error_codes),
+                "exception_classes": list(chunk.exception_classes[:5]),
+                "config_keys": list(chunk.config_keys[:8]),
+                "symptoms": list(chunk.symptoms[:5]),
                 "text": chunk.text,
             }
             for chunk in chunks
@@ -233,6 +237,9 @@ def _validate_candidate(
                     "section": item.section,
                     "source": item.source,
                     "error_codes": item.error_codes,
+                    "exception_classes": item.exception_classes,
+                    "config_keys": item.config_keys,
+                    "symptoms": item.symptoms,
                     "text": item.text,
                 }
                 for item in chunks
@@ -338,7 +345,11 @@ def _deterministic_answer(facts: list[dict[str, Any]], chunks: list[RetrievedChu
             )
         )
     else:
-        paragraphs.append("Mình tìm thấy hướng dẫn đã được phê duyệt phù hợp với câu hỏi này.")
+        primary = chunks[0]
+        paragraphs.append(
+            f"Mình đề xuất runbook “{primary.title}” ({primary.runbook_id}) vì nội dung "
+            "và dấu hiệu kỹ thuật của runbook này phù hợp nhất với câu hỏi của bạn."
+        )
     by_section: dict[str, list[str]] = {}
     for chunk in chunks:
         lines = [line.strip(" -*\t") for line in chunk.text.splitlines()]

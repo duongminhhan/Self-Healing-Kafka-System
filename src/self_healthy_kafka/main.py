@@ -131,6 +131,7 @@ def main(argv: list[str] | None = None) -> None:
             exc,
             extra={"event": "grafana_webhook_start_failed"},
         )
+        webhook_service.close()
         kc_client.close()
         sys.exit(1)
 

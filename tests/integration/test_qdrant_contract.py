@@ -29,10 +29,16 @@ def test_configured_qdrant_collection_has_required_payload_indexes():
         "status",
         "environment",
         "connector_class",
+        "connector_type",
+        "connector_family",
+        "subsystem",
         "error_codes",
+        "exception_classes",
+        "config_keys",
         "runbook_id",
         "source",
         "version",
+        "schema_version",
     } <= set(info.payload_schema)
     vectors = info.config.params.vectors
     sparse_vectors = info.config.params.sparse_vectors

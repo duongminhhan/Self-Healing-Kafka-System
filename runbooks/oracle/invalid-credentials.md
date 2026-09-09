@@ -8,6 +8,32 @@ error_codes: [ORA-01017]
 environments: [all]
 owners: [data-platform]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: debezium-source
+connector_family: debezium-oracle
+subsystem: oracle-authentication
+symptoms:
+  - Oracle source cannot authenticate after credential rotation
+  - every connector restart repeats logon denied
+exception_classes:
+  - java.sql.SQLException
+  - oracle.jdbc.OracleDatabaseException
+config_keys:
+  - database.user
+  - database.password
+  - database.hostname
+error_signatures:
+  - invalid username/password; logon denied
+  - ORA-01017
+aliases:
+  - Oracle login failure
+  - invalid Oracle credentials
+user_phrases_vi:
+  - nguồn Oracle không đăng nhập được sau khi đổi mật khẩu
+  - tài khoản database của connector bị từ chối
+user_phrases_en:
+  - Oracle connector login is denied
+  - database credential rotation broke the source connector
 ---
 
 ## Symptoms

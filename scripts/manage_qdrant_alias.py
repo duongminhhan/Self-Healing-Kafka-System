@@ -18,6 +18,10 @@ def main() -> int:
     parser.add_argument("--alias", required=True)
     parser.add_argument("--collection", required=True)
     parser.add_argument(
+        "--expected-current-collection",
+        help="Optional compare-and-swap guard. Use 'none' when the alias must not exist.",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Validate the target and atomically replace the alias. Default is dry-run.",
@@ -30,6 +34,7 @@ def main() -> int:
                     "dry_run": True,
                     "alias": args.alias,
                     "target_collection": args.collection,
+                    "expected_current_collection": args.expected_current_collection,
                     "warning": "No Qdrant request was made.",
                 },
                 indent=2,
@@ -58,6 +63,17 @@ def main() -> int:
         (item.collection_name for item in aliases if item.alias_name == args.alias),
         None,
     )
+    expected = (
+        None
+        if args.expected_current_collection
+        and args.expected_current_collection.casefold() == "none"
+        else args.expected_current_collection
+    )
+    if expected is not None or args.expected_current_collection is not None:
+        if previous != args.collection and previous != expected:
+            parser.error(
+                f"alias compare-and-swap failed: expected {expected!r}, observed {previous!r}"
+            )
     if previous == args.collection:
         print(
             json.dumps(
@@ -72,7 +88,7 @@ def main() -> int:
             )
         )
         return 0
-    actions = []
+    actions: list[models.CreateAliasOperation | models.DeleteAliasOperation] = []
     if previous is not None:
         actions.append(
             models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=args.alias))

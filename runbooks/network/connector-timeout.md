@@ -8,6 +8,35 @@ error_codes: [CONNECT_TIMEOUT, SINK_WRITER_TIMEOUT]
 environments: [all]
 owners: [data-platform, network-operations]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: kafka-connect
+connector_family: source-sink
+subsystem: network-dependency
+symptoms:
+  - connector dependency call exceeds the configured timeout
+  - source or sink repeatedly waits too long for an external service
+exception_classes:
+  - java.net.SocketTimeoutException
+  - java.net.ConnectException
+  - org.apache.kafka.common.errors.TimeoutException
+config_keys:
+  - connection.timeout.ms
+  - request.timeout.ms
+  - socket.timeout.ms
+  - retry.backoff.ms
+error_signatures:
+  - Connection timed out
+  - Read timed out
+  - Timed out waiting for a node assignment
+aliases:
+  - connector dependency timeout
+  - network timeout
+user_phrases_vi:
+  - connector chờ hệ thống đích quá lâu
+  - source hoặc sink bị timeout khi gọi dependency
+user_phrases_en:
+  - connector dependency request timed out
+  - sink writer waits too long for the target
 ---
 
 ## Symptoms

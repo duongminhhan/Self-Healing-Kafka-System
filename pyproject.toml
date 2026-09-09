@@ -12,7 +12,7 @@ dependencies = [
     "python-dotenv==1.0.1",
     "python-json-logger==2.0.7",
     "PyYAML>=6.0.2,<7",
-    "qdrant-client>=1.15,<2",
+    "qdrant-client>=1.17,<2",
 ]
 
 [project.scripts]

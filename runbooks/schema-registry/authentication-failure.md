@@ -8,6 +8,32 @@ error_codes: [SCHEMA_REGISTRY_AUTHENTICATION_FAILED, HTTP-401]
 environments: [all]
 owners: [data-platform]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: kafka-connect
+connector_family: source-sink
+subsystem: schema-registry
+symptoms:
+  - converter cannot read a schema because Schema Registry rejects authentication
+  - record conversion fails repeatedly with an authorization response
+exception_classes:
+  - io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException
+config_keys:
+  - key.converter.schema.registry.url
+  - value.converter.schema.registry.url
+  - basic.auth.credentials.source
+  - basic.auth.user.info
+error_signatures:
+  - Unauthorized; error code 401
+  - Schema Registry request failed with HTTP 401
+aliases:
+  - Schema Registry unauthorized
+  - converter authentication failure
+user_phrases_vi:
+  - dịch vụ quản lý schema từ chối đăng nhập
+  - converter không đọc được schema sau khi rotate credential
+user_phrases_en:
+  - Schema Registry rejected the connector credentials
+  - converter receives unauthorized from the schema service
 ---
 
 ## Symptoms

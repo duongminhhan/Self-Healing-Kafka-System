@@ -15,6 +15,7 @@ from self_healthy_kafka.rag.models import (
     RunbookSection,
     RunbookValidationError,
 )
+from self_healthy_kafka.redaction import redact_text
 
 REQUIRED_FRONT_MATTER = {
     "runbook_id",
@@ -132,6 +133,7 @@ def _metadata(value: dict[str, Any], path: Path) -> RunbookMetadata:
         result = str(value.get(key) or "").strip()
         if not result:
             raise RunbookValidationError(f"{path}: {key} must be a non-empty string")
+        _reject_sensitive_metadata(result, path)
         return result
 
     status = required_text("status").lower()
@@ -148,17 +150,45 @@ def _metadata(value: dict[str, Any], path: Path) -> RunbookMetadata:
     updated_at = required_text("updated_at")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated_at):
         raise RunbookValidationError(f"{path}: updated_at must use YYYY-MM-DD")
+    connector_class = required_text("connector_class").lower()
+    try:
+        schema_version = int(value.get("schema_version", 1))
+    except (TypeError, ValueError) as exc:
+        raise RunbookValidationError(f"{path}: schema_version must be a positive integer") from exc
+    if schema_version < 1:
+        raise RunbookValidationError(f"{path}: schema_version must be a positive integer")
+    tenant_id = str(value.get("tenant_id") or "default").strip()
+    _reject_sensitive_metadata(tenant_id, path)
     return RunbookMetadata(
         runbook_id=required_text("runbook_id"),
         title=required_text("title"),
         version=version,
         status=status,
-        connector_class=required_text("connector_class").lower(),
+        connector_class=connector_class,
         error_codes=_string_list(value.get("error_codes"), "error_codes", path, uppercase=True),
         environments=_string_list(value.get("environments"), "environments", path),
         owners=_string_list(value.get("owners"), "owners", path),
         updated_at=updated_at,
-        tenant_id=str(value.get("tenant_id") or "default").strip(),
+        tenant_id=tenant_id,
+        connector_type=_optional_text(value.get("connector_type"), connector_class, path),
+        connector_family=_optional_text(value.get("connector_family"), connector_class, path),
+        subsystem=_optional_text(value.get("subsystem"), connector_class, path),
+        symptoms=_optional_string_list(value.get("symptoms"), "symptoms", path),
+        exception_classes=_optional_string_list(
+            value.get("exception_classes"), "exception_classes", path
+        ),
+        config_keys=_optional_string_list(value.get("config_keys"), "config_keys", path),
+        error_signatures=_optional_string_list(
+            value.get("error_signatures"), "error_signatures", path
+        ),
+        aliases=_optional_string_list(value.get("aliases"), "aliases", path),
+        user_phrases_vi=_optional_string_list(
+            value.get("user_phrases_vi"), "user_phrases_vi", path
+        ),
+        user_phrases_en=_optional_string_list(
+            value.get("user_phrases_en"), "user_phrases_en", path
+        ),
+        schema_version=schema_version,
     )
 
 
@@ -168,11 +198,44 @@ def _string_list(value: Any, name: str, path: Path, *, uppercase: bool = False) 
     result = tuple(str(item).strip() for item in value if str(item).strip())
     if not result:
         raise RunbookValidationError(f"{path}: {name} must contain non-empty strings")
+    for item in result:
+        _reject_sensitive_metadata(item, path)
     return (
         tuple(item.upper() for item in result)
         if uppercase
         else tuple(item.lower() for item in result)
     )
+
+
+def _optional_text(value: Any, fallback: str, path: Path) -> str:
+    result = str(value or fallback).strip().lower()
+    if not result:
+        return fallback
+    _reject_sensitive_metadata(result, path)
+    return result
+
+
+def _optional_string_list(value: Any, name: str, path: Path) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise RunbookValidationError(f"{path}: {name} must be a list when provided")
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        _reject_sensitive_metadata(text, path)
+        if text not in result:
+            result.append(text)
+    return tuple(result)
+
+
+def _reject_sensitive_metadata(value: str, path: Path) -> None:
+    if redact_text(value) != value:
+        raise RunbookValidationError(
+            f"{path}: retrieval metadata must not contain credentials or secrets"
+        )
 
 
 def _parse_sections(body: str, path: Path) -> list[RunbookSection]:

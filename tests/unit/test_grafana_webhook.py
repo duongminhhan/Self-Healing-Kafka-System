@@ -404,6 +404,23 @@ def test_bearer_mode_accepts_grafana_custom_token_header():
     ) is True
 
 
+def test_close_propagates_to_analytics_chat_even_before_start():
+    class AnalyticsChat:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    service = GrafanaWebhookService(_config(), lambda *_: None)
+    analytics_chat = AnalyticsChat()
+    service._analytics_chat = analytics_chat
+
+    service.close()
+
+    assert analytics_chat.close_calls == 1
+
+
 def test_bearer_mode_accepts_query_token():
     service = GrafanaWebhookService(_config(), lambda *_: None)
 

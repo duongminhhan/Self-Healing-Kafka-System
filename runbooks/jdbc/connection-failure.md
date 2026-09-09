@@ -8,6 +8,34 @@ error_codes: [SQLSTATE-08001, CONNECTION_REFUSED]
 environments: [all]
 owners: [data-platform, database-operations]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: jdbc
+connector_family: jdbc-source-sink
+subsystem: database-connectivity
+symptoms:
+  - database connection cannot be established
+  - JDBC task fails before records are read or written
+exception_classes:
+  - java.sql.SQLTransientConnectionException
+  - java.sql.SQLNonTransientConnectionException
+  - org.apache.kafka.connect.errors.ConnectException
+config_keys:
+  - connection.url
+  - connection.attempts
+  - connection.backoff.ms
+error_signatures:
+  - Connection refused
+  - SQLState 08001
+  - The connection attempt failed
+aliases:
+  - JDBC connection refused
+  - database listener unavailable
+user_phrases_vi:
+  - JDBC source không kết nối được database
+  - sink bị từ chối kết nối tới cơ sở dữ liệu
+user_phrases_en:
+  - JDBC connector cannot connect to the database
+  - database connection is refused
 ---
 
 ## Symptoms

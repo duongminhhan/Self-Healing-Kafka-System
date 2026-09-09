@@ -8,6 +8,31 @@ error_codes: [HEALING_ESCALATED, HEALING_LEVEL_LIMIT_REACHED, MAX_RETRIES_REACHE
 environments: [all]
 owners: [data-platform]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: kafka-connect
+connector_family: source-sink
+subsystem: healing-orchestration
+symptoms:
+  - automatic healing exhausted every permitted recovery level
+  - connector remains unstable after bounded restart attempts
+exception_classes:
+  - org.apache.kafka.connect.errors.ConnectException
+config_keys:
+  - errors.retry.timeout
+  - errors.retry.delay.max.ms
+error_signatures:
+  - Maximum retry attempts exhausted
+  - Healing level limit reached
+  - Manual escalation required
+aliases:
+  - retry exhausted
+  - automatic healing escalated
+user_phrases_vi:
+  - hệ thống tự sửa đã thử hết các cấp
+  - connector vẫn lỗi sau tất cả lần retry
+user_phrases_en:
+  - automatic healing retries are exhausted
+  - all recovery levels failed
 ---
 
 ## Symptoms

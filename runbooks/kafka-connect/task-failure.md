@@ -8,6 +8,33 @@ error_codes: [TASK_FAILED, HEALTH_FAILED_CONFIRMED]
 environments: [all]
 owners: [data-platform]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: kafka-connect
+connector_family: source-sink
+subsystem: task-runtime
+symptoms:
+  - one or more connector tasks are FAILED while the worker is reachable
+  - task restart returns to the same failure
+exception_classes:
+  - org.apache.kafka.connect.errors.ConnectException
+  - org.apache.kafka.connect.errors.RetriableException
+config_keys:
+  - errors.tolerance
+  - errors.retry.timeout
+  - errors.retry.delay.max.ms
+error_signatures:
+  - Task threw an uncaught and unrecoverable exception
+  - WorkerSinkTask is being killed
+  - WorkerSourceTask is being killed
+aliases:
+  - failed connector task
+  - Kafka Connect task crash
+user_phrases_vi:
+  - một task của connector bị chết nhưng worker vẫn chạy
+  - connector còn tồn tại nhưng task chuyển sang FAILED
+user_phrases_en:
+  - connector task failed while the worker is still running
+  - one task keeps crashing after restart
 ---
 
 ## Symptoms

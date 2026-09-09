@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from dataclasses import fields, replace
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -13,6 +14,7 @@ from self_healthy_kafka.config import AnalyticsChatConfig, RagConfig
 from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJsonGenerator
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
+from self_healthy_kafka.rag.shadow import ShadowRetrievalCoordinator
 from self_healthy_kafka.rag.workflow import RunbookRagWorkflow
 from self_healthy_kafka.storage.common import json_safe
 from self_healthy_kafka.webhook.analytics import (
@@ -46,16 +48,71 @@ class AnalyticsChatService:
     ):
         self._config = config
         self._incident_facts = incident_facts
+        self._owns_client = client is None
         self._client = client or httpx.Client()
         self._now = now
         self._rag_config = rag_config
         self._qwen = QwenJsonGenerator(config, self._client)
         self._rag_workflow = rag_workflow
+        self._closed = False
         if self._rag_workflow is None and rag_config is not None and rag_config.enabled:
-            store = QdrantRunbookStore(rag_config)
+            retrieval_mode = getattr(
+                rag_config,
+                "effective_retrieval_mode",
+                rag_config.search_mode,
+            )
+            primary_mode = "dense" if retrieval_mode == "shadow" else retrieval_mode
+            canonical_mode = bool(
+                getattr(rag_config, "retrieval_mode", "")
+                or getattr(rag_config, "hybrid_shadow_enabled", False)
+            )
+            if canonical_mode:
+                primary_collection = (
+                    getattr(rag_config, "dense_collection", rag_config.collection)
+                    if primary_mode == "dense"
+                    else getattr(rag_config, "hybrid_collection", rag_config.collection)
+                )
+            else:
+                # RAG_SEARCH_MODE/QDRANT_COLLECTION remain a backward-compatible pair.
+                primary_collection = rag_config.collection
+            primary_config = _retrieval_config(
+                rag_config,
+                mode=primary_mode,
+                collection=primary_collection,
+            )
+            retriever: RunbookRetriever | ShadowRetrievalCoordinator = RunbookRetriever(
+                primary_config,
+                QdrantRunbookStore(primary_config),
+            )
+            if retrieval_mode == "shadow":
+                shadow_config = _retrieval_config(
+                    rag_config,
+                    mode="hybrid",
+                    collection=getattr(rag_config, "hybrid_collection", rag_config.collection),
+                    timeout_seconds=float(
+                        getattr(
+                            rag_config,
+                            "shadow_timeout_seconds",
+                            rag_config.request_timeout_seconds,
+                        )
+                    ),
+                )
+                retriever = ShadowRetrievalCoordinator(
+                    retriever,
+                    RunbookRetriever(shadow_config, QdrantRunbookStore(shadow_config)),
+                    sample_rate=float(getattr(rag_config, "shadow_sample_rate", 0.0)),
+                    queue_size=int(getattr(rag_config, "shadow_queue_size", 100)),
+                    shutdown_timeout_seconds=float(
+                        getattr(
+                            rag_config,
+                            "shadow_timeout_seconds",
+                            rag_config.request_timeout_seconds,
+                        )
+                    ),
+                )
             self._rag_workflow = RunbookRagWorkflow(
                 rag_config,
-                retriever=RunbookRetriever(rag_config, store),
+                retriever=retriever,
                 composer=GroundedAnswerComposer(self._qwen.generate),
             )
 
@@ -101,6 +158,18 @@ class AnalyticsChatService:
         if self._rag_workflow is not None:
             return self._rag_workflow.ask(question, analytics_ask=self._ask_analytics)
         return self._ask_analytics(question)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            close = getattr(self._rag_workflow, "close", None)
+            if callable(close):
+                close()
+        finally:
+            if self._owns_client:
+                self._client.close()
 
     def _ask_analytics(self, question: str) -> dict[str, Any]:
         plan = self._plan(question)
@@ -179,6 +248,29 @@ class AnalyticsChatService:
             return parse_plan(json.loads(content))
         except (KeyError, IndexError, TypeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("Hugging Face planner did not return a valid query plan") from exc
+
+
+def _retrieval_config(
+    config: RagConfig,
+    *,
+    mode: str,
+    collection: str,
+    timeout_seconds: float | None = None,
+) -> RagConfig:
+    """Create one concrete store config while preserving legacy RagConfig callers."""
+
+    available = {item.name for item in fields(config)}
+    changes: dict[str, Any] = {
+        "search_mode": mode,
+        "collection": collection,
+    }
+    # Newer configuration exposes the orchestration mode separately. Replacing it
+    # prevents validation from treating a concrete shadow store as another shadow.
+    if "retrieval_mode" in available:
+        changes["retrieval_mode"] = mode
+    if timeout_seconds is not None:
+        changes["request_timeout_seconds"] = timeout_seconds
+    return replace(config, **changes)
 
 
 def _planner_prompt() -> str:

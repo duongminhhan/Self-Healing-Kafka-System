@@ -165,14 +165,29 @@ class RagConfig:
     qdrant_url: str = os.getenv("QDRANT_URL", "")
     qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
     collection: str = os.getenv("QDRANT_COLLECTION", "healing_runbooks_v1")
+    dense_collection: str = os.getenv(
+        "QDRANT_DENSE_COLLECTION",
+        os.getenv("QDRANT_COLLECTION", "healing_runbooks_v1"),
+    )
+    hybrid_collection: str = os.getenv(
+        "QDRANT_HYBRID_COLLECTION",
+        "healing_runbooks_v2",
+    )
     embedding_model: str = os.getenv("QDRANT_EMBEDDING_MODEL", "")
     embedding_size: int = int(os.getenv("QDRANT_EMBEDDING_SIZE", "384"))
     search_mode: str = os.getenv("RAG_SEARCH_MODE", "dense").strip().lower()
+    retrieval_mode: str = os.getenv("RAG_RETRIEVAL_MODE", "").strip().lower()
+    hybrid_shadow_enabled: bool = os.getenv(
+        "RAG_HYBRID_SHADOW_ENABLED",
+        "false",
+    ).lower() in {"1", "true", "yes", "on"}
     dense_vector_name: str = os.getenv("QDRANT_DENSE_VECTOR_NAME", "dense")
     sparse_vector_name: str = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
     dense_embedding_model: str = os.getenv("QDRANT_DENSE_EMBEDDING_MODEL", "")
     sparse_embedding_model: str = os.getenv("QDRANT_SPARSE_EMBEDDING_MODEL", "qdrant/bm25")
     top_k: int = int(os.getenv("RAG_TOP_K", "5"))
+    final_top_k: int = int(os.getenv("RAG_FINAL_TOP_K", "0"))
+    candidate_limit: int = int(os.getenv("RAG_CANDIDATE_LIMIT", "0"))
     request_timeout_seconds: float = float(os.getenv("RAG_REQUEST_TIMEOUT_SECONDS", "10"))
     max_retries: int = int(os.getenv("RAG_MAX_RETRIES", "1"))
     score_threshold: float = float(os.getenv("RAG_SCORE_THRESHOLD", "0.55"))
@@ -186,16 +201,69 @@ class RagConfig:
         if os.getenv("RAG_SPARSE_SCORE_THRESHOLD", "").strip()
         else None
     )
-    dense_candidate_limit: int = int(os.getenv("RAG_DENSE_CANDIDATE_LIMIT", "0"))
-    sparse_candidate_limit: int = int(os.getenv("RAG_SPARSE_CANDIDATE_LIMIT", "0"))
+    dense_candidate_limit: int = int(
+        os.getenv(
+            "RAG_HYBRID_DENSE_CANDIDATES",
+            os.getenv("RAG_DENSE_CANDIDATE_LIMIT", "0"),
+        )
+    )
+    sparse_candidate_limit: int = int(
+        os.getenv(
+            "RAG_HYBRID_SPARSE_CANDIDATES",
+            os.getenv("RAG_SPARSE_CANDIDATE_LIMIT", "0"),
+        )
+    )
     fusion_method: str = os.getenv("RAG_FUSION_METHOD", "rrf").strip().lower()
     fusion_limit: int = int(os.getenv("RAG_FUSION_LIMIT", "0"))
+    max_chunks_per_runbook: int = int(os.getenv("RAG_MAX_CHUNKS_PER_RUNBOOK", "2"))
+    diversification_enabled: bool | None = (
+        os.getenv("RAG_DIVERSIFICATION_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        if os.getenv("RAG_DIVERSIFICATION_ENABLED", "").strip()
+        else None
+    )
+    hybrid_dense_weight: float = float(os.getenv("RAG_HYBRID_DENSE_WEIGHT", "1"))
+    hybrid_sparse_weight: float = float(os.getenv("RAG_HYBRID_SPARSE_WEIGHT", "1"))
+    hybrid_weighted_rrf_fallback_to_equal: bool = os.getenv(
+        "RAG_HYBRID_WEIGHTED_RRF_FALLBACK_TO_EQUAL",
+        "false",
+    ).lower() in {"1", "true", "yes", "on"}
     hybrid_fallback_to_dense: bool = os.getenv("RAG_HYBRID_FALLBACK_TO_DENSE", "false").lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+    evidence_gate_enabled: bool | None = (
+        os.getenv("RAG_EVIDENCE_GATE_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        if os.getenv("RAG_EVIDENCE_GATE_ENABLED", "").strip()
+        else None
+    )
+    evidence_min_score: float = float(os.getenv("RAG_EVIDENCE_MIN_SCORE", "0"))
+    dense_evidence_score_threshold: float | None = (
+        float(os.environ["RAG_DENSE_EVIDENCE_SCORE_THRESHOLD"])
+        if os.getenv("RAG_DENSE_EVIDENCE_SCORE_THRESHOLD", "").strip()
+        else None
+    )
+    hybrid_evidence_score_threshold: float | None = (
+        float(os.environ["RAG_HYBRID_EVIDENCE_SCORE_THRESHOLD"])
+        if os.getenv("RAG_HYBRID_EVIDENCE_SCORE_THRESHOLD", "").strip()
+        else None
+    )
+    evidence_min_margin: float = float(os.getenv("RAG_EVIDENCE_MIN_MARGIN", "0"))
+    evidence_require_anchor_match: bool = os.getenv(
+        "RAG_EVIDENCE_REQUIRE_ANCHOR_MATCH",
+        "true",
+    ).lower() in {"1", "true", "yes", "on"}
+    shadow_sample_rate: float = float(os.getenv("RAG_HYBRID_SHADOW_SAMPLE_RATE", "0"))
+    shadow_timeout_seconds: float = float(
+        os.getenv(
+            "RAG_HYBRID_TIMEOUT_SECONDS",
+            os.getenv("RAG_REQUEST_TIMEOUT_SECONDS", "10"),
+        )
+    )
+    shadow_queue_size: int = int(os.getenv("RAG_HYBRID_SHADOW_QUEUE_SIZE", "32"))
     max_chunk_chars: int = int(os.getenv("RAG_MAX_CHUNK_CHARS", "2400"))
     max_context_chars: int = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "8000"))
     environment: str = os.getenv("RAG_ENVIRONMENT", "all")
@@ -213,6 +281,41 @@ class RagConfig:
         return self.dense_embedding_model.strip() or self.embedding_model.strip()
 
     @property
+    def effective_retrieval_mode(self) -> str:
+        """Prefer the new name while preserving RAG_SEARCH_MODE compatibility."""
+        if self.retrieval_mode:
+            return self.retrieval_mode
+        return "shadow" if self.hybrid_shadow_enabled else self.search_mode
+
+    @property
+    def effective_top_k(self) -> int:
+        """Prefer RAG_FINAL_TOP_K when explicitly configured."""
+        return self.final_top_k or self.top_k
+
+    @property
+    def effective_evidence_gate_enabled(self) -> bool:
+        """Dense stays backward compatible; hybrid and shadow fail closed by default."""
+        if self.evidence_gate_enabled is not None:
+            return self.evidence_gate_enabled
+        return self.effective_retrieval_mode in {"hybrid", "shadow"}
+
+    @property
+    def effective_diversification_enabled(self) -> bool:
+        if self.diversification_enabled is not None:
+            return self.diversification_enabled
+        return self.effective_retrieval_mode in {"hybrid", "shadow"}
+
+    @property
+    def effective_evidence_score_threshold(self) -> float:
+        if self.effective_retrieval_mode == "dense":
+            if self.dense_evidence_score_threshold is not None:
+                return self.dense_evidence_score_threshold
+            return self.evidence_min_score
+        if self.hybrid_evidence_score_threshold is not None:
+            return self.hybrid_evidence_score_threshold
+        return self.evidence_min_score
+
+    @property
     def effective_dense_score_threshold(self) -> float:
         return (
             self.dense_score_threshold
@@ -222,15 +325,17 @@ class RagConfig:
 
     @property
     def effective_dense_candidate_limit(self) -> int:
-        return self.dense_candidate_limit or min(self.top_k * 3, 50)
+        return self.dense_candidate_limit or self.candidate_limit or min(self.effective_top_k * 3, 50)
 
     @property
     def effective_sparse_candidate_limit(self) -> int:
-        return self.sparse_candidate_limit or min(self.top_k * 3, 50)
+        return self.sparse_candidate_limit or self.candidate_limit or min(
+            self.effective_top_k * 3, 50
+        )
 
     @property
     def effective_fusion_limit(self) -> int:
-        return self.fusion_limit or min(self.top_k * 3, 50)
+        return self.fusion_limit or self.candidate_limit or min(self.effective_top_k * 3, 50)
 
     def validate(self) -> None:
         if not self.enabled:
@@ -250,9 +355,9 @@ class RagConfig:
             raise ValueError("QDRANT_URL must use HTTPS when RAG is enabled")
         if not self.collection.strip():
             raise ValueError("QDRANT_COLLECTION must not be empty")
-        if self.search_mode not in {"dense", "hybrid"}:
-            raise ValueError("RAG_SEARCH_MODE must be dense or hybrid")
-        if self.search_mode == "hybrid":
+        if self.effective_retrieval_mode not in {"dense", "hybrid", "shadow"}:
+            raise ValueError("RAG_RETRIEVAL_MODE/RAG_SEARCH_MODE must be dense, hybrid or shadow")
+        if self.effective_retrieval_mode in {"hybrid", "shadow"}:
             hybrid_missing = [
                 name
                 for name, value in (
@@ -270,10 +375,25 @@ class RagConfig:
                 raise ValueError("Dense and sparse vector names must be different")
             if self.fusion_method != "rrf":
                 raise ValueError("RAG_FUSION_METHOD currently supports only rrf")
+            if self.hybrid_dense_weight <= 0 or self.hybrid_sparse_weight <= 0:
+                raise ValueError("RAG hybrid RRF weights must be positive")
+        if self.effective_retrieval_mode == "shadow":
+            if not self.dense_collection.strip() or not self.hybrid_collection.strip():
+                raise ValueError(
+                    "Shadow mode requires QDRANT_DENSE_COLLECTION and QDRANT_HYBRID_COLLECTION"
+                )
+            if self.dense_collection == self.hybrid_collection:
+                raise ValueError("Shadow mode requires different dense and hybrid collections")
+            if not 0 <= self.shadow_sample_rate <= 1:
+                raise ValueError("RAG_HYBRID_SHADOW_SAMPLE_RATE must be between 0 and 1")
+            if not 1 <= self.shadow_timeout_seconds <= 60:
+                raise ValueError("RAG_HYBRID_TIMEOUT_SECONDS must be between 1 and 60")
+            if not 1 <= self.shadow_queue_size <= 10_000:
+                raise ValueError("RAG_HYBRID_SHADOW_QUEUE_SIZE must be between 1 and 10000")
         if self.embedding_size < 1:
             raise ValueError("QDRANT_EMBEDDING_SIZE must be positive")
-        if not 1 <= self.top_k <= 20:
-            raise ValueError("RAG_TOP_K must be between 1 and 20")
+        if not 1 <= self.effective_top_k <= 20:
+            raise ValueError("RAG_FINAL_TOP_K/RAG_TOP_K must be between 1 and 20")
         if not 0 <= self.score_threshold <= 1:
             raise ValueError("RAG_SCORE_THRESHOLD must be between 0 and 1")
         if not 0 <= self.effective_dense_score_threshold <= 1:
@@ -287,6 +407,24 @@ class RagConfig:
         ):
             if not 1 <= value <= 100:
                 raise ValueError(f"{name} must be between 1 and 100")
+        if not 1 <= self.max_chunks_per_runbook <= 20:
+            raise ValueError("RAG_MAX_CHUNKS_PER_RUNBOOK must be between 1 and 20")
+        if self.evidence_min_score < 0:
+            raise ValueError("RAG_EVIDENCE_MIN_SCORE must not be negative")
+        if (
+            self.dense_evidence_score_threshold is not None
+            and not 0 <= self.dense_evidence_score_threshold <= 1
+        ):
+            raise ValueError(
+                "RAG_DENSE_EVIDENCE_SCORE_THRESHOLD must be between 0 and 1"
+            )
+        if (
+            self.hybrid_evidence_score_threshold is not None
+            and self.hybrid_evidence_score_threshold < 0
+        ):
+            raise ValueError("RAG_HYBRID_EVIDENCE_SCORE_THRESHOLD must not be negative")
+        if self.evidence_min_margin < 0:
+            raise ValueError("RAG_EVIDENCE_MIN_MARGIN must not be negative")
         if not 1 <= self.request_timeout_seconds <= 60:
             raise ValueError("RAG_REQUEST_TIMEOUT_SECONDS must be between 1 and 60")
         if not 0 <= self.max_retries <= 3:

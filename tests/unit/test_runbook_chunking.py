@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from self_healthy_kafka.rag.chunking import chunk_runbook
+from self_healthy_kafka.rag.chunking import chunk_runbook, retrieval_text
 from self_healthy_kafka.rag.ingestion import RunbookIndexer, parse_runbook
 from self_healthy_kafka.rag.models import IngestionReport, RunbookValidationError
 
@@ -25,6 +25,17 @@ error_codes: [ORA-01017]
 environments: [uat, prod]
 owners: [data-platform]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: debezium-source
+connector_family: debezium-oracle
+subsystem: oracle-authentication
+symptoms: [Oracle source cannot authenticate]
+exception_classes: [java.sql.SQLException]
+config_keys: [database.user]
+error_signatures: [invalid username/password]
+aliases: [Oracle login failure]
+user_phrases_vi: [nguồn Oracle không đăng nhập được]
+user_phrases_en: [Oracle connector login is denied]
 ---
 
 ## Symptoms
@@ -44,6 +55,10 @@ def test_parser_validates_front_matter_and_semantic_sections(tmp_path):
     document = parse_runbook(_write(tmp_path / "valid.md"), root=tmp_path)
 
     assert document.metadata.error_codes == ("ORA-01017",)
+    assert document.metadata.connector_type == "debezium-source"
+    assert document.metadata.subsystem == "oracle-authentication"
+    assert document.metadata.config_keys == ("database.user",)
+    assert document.metadata.schema_version == 2
     assert [section.name for section in document.sections] == ["symptoms", "diagnostic_steps"]
     assert document.source == "valid.md"
 
@@ -67,6 +82,50 @@ def test_section_chunking_has_stable_ids_and_preserves_error_code(tmp_path):
     assert len(first) > len(document.sections)
     assert all(len(item.text) <= 500 for item in first)
     assert any("ORA-01017" in item.text for item in first)
+    assert "java.sql.SQLException" in retrieval_text(first[0])
+    assert "database.user" in retrieval_text(first[0])
+    assert first[0].payload()["subsystem"] == "oracle-authentication"
+
+
+def test_optional_retrieval_metadata_changes_hash_but_not_stable_point_id(tmp_path):
+    path = _write(tmp_path / "runbook.md")
+    first = chunk_runbook(parse_runbook(path, root=tmp_path))[0]
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace("aliases: [Oracle login failure]", "aliases: [Oracle account rejected]"),
+        encoding="utf-8",
+    )
+    second = chunk_runbook(parse_runbook(path, root=tmp_path))[0]
+
+    assert first.point_id == second.point_id
+    assert first.content_hash != second.content_hash
+
+
+def test_retrieval_metadata_rejects_secret_values(tmp_path):
+    path = _write(tmp_path / "secret.md")
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace(
+            "aliases: [Oracle login failure]",
+            "aliases: [password=my-private-password]",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RunbookValidationError, match="must not contain credentials"):
+        parse_runbook(path, root=tmp_path)
+
+
+def test_required_metadata_rejects_secret_values(tmp_path):
+    path = _write(tmp_path / "secret-owner.md")
+    source = path.read_text(encoding="utf-8")
+    path.write_text(
+        source.replace("owners: [data-platform]", "owners: [password=my-private-password]"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RunbookValidationError, match="must not contain credentials"):
+        parse_runbook(path, root=tmp_path)
 
 
 def test_indexer_skips_non_approved_runbooks(tmp_path):

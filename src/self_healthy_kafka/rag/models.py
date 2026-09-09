@@ -39,6 +39,17 @@ class RunbookMetadata:
     owners: tuple[str, ...]
     updated_at: str
     tenant_id: str = "default"
+    connector_type: str = ""
+    connector_family: str = ""
+    subsystem: str = ""
+    symptoms: tuple[str, ...] = ()
+    exception_classes: tuple[str, ...] = ()
+    config_keys: tuple[str, ...] = ()
+    error_signatures: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    user_phrases_vi: tuple[str, ...] = ()
+    user_phrases_en: tuple[str, ...] = ()
+    schema_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -74,6 +85,17 @@ class RunbookChunk:
     source: str
     updated_at: str
     text: str
+    connector_type: str = ""
+    connector_family: str = ""
+    subsystem: str = ""
+    symptoms: tuple[str, ...] = ()
+    exception_classes: tuple[str, ...] = ()
+    config_keys: tuple[str, ...] = ()
+    error_signatures: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    user_phrases_vi: tuple[str, ...] = ()
+    user_phrases_en: tuple[str, ...] = ()
+    schema_version: int = 1
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -83,7 +105,18 @@ class RunbookChunk:
             "version": self.version,
             "status": self.status,
             "connector_class": self.connector_class,
+            "connector_type": self.connector_type,
+            "connector_family": self.connector_family,
+            "subsystem": self.subsystem,
             "error_codes": list(self.error_codes),
+            "symptoms": list(self.symptoms),
+            "exception_classes": list(self.exception_classes),
+            "config_keys": list(self.config_keys),
+            "error_signatures": list(self.error_signatures),
+            "aliases": list(self.aliases),
+            "user_phrases_vi": list(self.user_phrases_vi),
+            "user_phrases_en": list(self.user_phrases_en),
+            "schema_version": self.schema_version,
             "environment": list(self.environments),
             "owners": list(self.owners),
             "section": self.section,
@@ -121,6 +154,17 @@ class RetrievedChunk:
     tenant_id: str = ""
     status: str = ""
     environments: tuple[str, ...] = ()
+    connector_type: str = ""
+    connector_family: str = ""
+    subsystem: str = ""
+    symptoms: tuple[str, ...] = ()
+    exception_classes: tuple[str, ...] = ()
+    config_keys: tuple[str, ...] = ()
+    error_signatures: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    user_phrases_vi: tuple[str, ...] = ()
+    user_phrases_en: tuple[str, ...] = ()
+    schema_version: int = 1
 
     def citation(self) -> Citation:
         return Citation(
@@ -142,15 +186,25 @@ class SearchDiagnostics:
     dense_candidate_count: int | None = None
     sparse_candidate_count: int | None = None
     fused_candidate_count: int = 0
+    candidate_chunk_count: int = 0
+    unique_runbook_count: int = 0
+    duplicate_chunks_removed: int = 0
+    selected_runbook_ids: tuple[str, ...] = ()
+    payload_filter_fields: tuple[str, ...] = ()
+    diversification_applied: bool = False
     selected_chunk_count: int = 0
     dense_candidate_limit: int | None = None
     sparse_candidate_limit: int | None = None
     dense_latency_ms: float | None = None
     sparse_latency_ms: float | None = None
     fusion_latency_ms: float | None = None
+    fusion_fallback_reason: str | None = None
     total_retrieval_latency_ms: float = 0.0
     fallback_reason: str | None = None
     no_result_reason: str | None = None
+    evidence_gate_applied: bool = False
+    evidence_gate_passed: bool | None = None
+    evidence_gate_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,15 +215,25 @@ class SearchDiagnostics:
             "dense_candidate_count": self.dense_candidate_count,
             "sparse_candidate_count": self.sparse_candidate_count,
             "fused_candidate_count": self.fused_candidate_count,
+            "candidate_chunk_count": self.candidate_chunk_count,
+            "unique_runbook_count": self.unique_runbook_count,
+            "duplicate_chunks_removed": self.duplicate_chunks_removed,
+            "selected_runbook_ids": list(self.selected_runbook_ids),
+            "payload_filter_fields": list(self.payload_filter_fields),
+            "diversification_applied": self.diversification_applied,
             "selected_chunk_count": self.selected_chunk_count,
             "dense_candidate_limit": self.dense_candidate_limit,
             "sparse_candidate_limit": self.sparse_candidate_limit,
             "dense_latency_ms": self.dense_latency_ms,
             "sparse_latency_ms": self.sparse_latency_ms,
             "fusion_latency_ms": self.fusion_latency_ms,
+            "fusion_fallback_reason": self.fusion_fallback_reason,
             "total_retrieval_latency_ms": self.total_retrieval_latency_ms,
             "fallback_reason": self.fallback_reason,
             "no_result_reason": self.no_result_reason,
+            "evidence_gate_applied": self.evidence_gate_applied,
+            "evidence_gate_passed": self.evidence_gate_passed,
+            "evidence_gate_reason": self.evidence_gate_reason,
         }
 
 

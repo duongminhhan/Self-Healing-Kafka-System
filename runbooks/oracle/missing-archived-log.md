@@ -8,6 +8,33 @@ error_codes: [ORA-01291]
 environments: [all]
 owners: [data-platform, oracle-dba]
 updated_at: 2026-09-07
+schema_version: 2
+connector_type: debezium-source
+connector_family: debezium-oracle
+subsystem: oracle-logminer
+symptoms:
+  - LogMiner cannot find a required online or archived redo log
+  - CDC repeatedly stops at the same source log gap
+exception_classes:
+  - io.debezium.DebeziumException
+  - java.sql.SQLException
+config_keys:
+  - log.mining.strategy
+  - log.mining.archive.destination.name
+  - snapshot.mode
+error_signatures:
+  - missing logfile
+  - LogMiner session is missing a log file
+  - ORA-01291
+aliases:
+  - missing archived redo
+  - LogMiner redo gap
+user_phrases_vi:
+  - database đã dọn mất redo mà connector cần đọc
+  - CDC dừng vì thiếu archived log
+user_phrases_en:
+  - LogMiner cannot find the required archived redo log
+  - Oracle CDC stopped at a missing log file
 ---
 
 ## Symptoms

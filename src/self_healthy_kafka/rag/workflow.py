@@ -11,11 +11,12 @@ from self_healthy_kafka.rag.models import (
     RagConfigurationError,
     RagStoreError,
     RetrievalQuery,
+    RetrievedChunk,
     Route,
     SearchDiagnostics,
 )
-from self_healthy_kafka.rag.retriever import RunbookRetriever
 from self_healthy_kafka.rag.router import RunbookRouter
+from self_healthy_kafka.rag.shadow import Retriever
 from self_healthy_kafka.redaction import redact_text
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class RunbookRagWorkflow:
         self,
         config: RagConfig,
         *,
-        retriever: RunbookRetriever,
+        retriever: Retriever,
         composer: GroundedAnswerComposer,
         router: RunbookRouter | None = None,
     ):
@@ -63,6 +64,11 @@ class RunbookRagWorkflow:
                 "source": "deterministic_fallback",
                 "citations": [],
                 "fallback_reason": "material_ambiguity",
+                "status": "needs_clarification",
+                "reason": "material_ambiguity",
+                "evidence": [],
+                "recommended_runbooks": [],
+                "candidates": [],
             }
             self._log_result(decision.route, started, result, retrieval_hits=0)
             return result
@@ -74,6 +80,11 @@ class RunbookRagWorkflow:
                 "source": "analytics",
                 "citations": [],
                 "fallback_reason": None,
+                "status": "ok",
+                "reason": None,
+                "evidence": [],
+                "recommended_runbooks": [],
+                "candidates": [],
             }
             self._log_result(decision.route, started, result, retrieval_hits=0)
             return result
@@ -101,6 +112,7 @@ class RunbookRagWorkflow:
         )
         try:
             chunks = self._retriever.retrieve(retrieval_query)
+            search_diagnostics = self._retriever.last_diagnostics
         except (RagStoreError, RagConfigurationError) as exc:
             fallback_reason = (
                 "qdrant_configuration_error"
@@ -114,6 +126,11 @@ class RunbookRagWorkflow:
                     "source": "analytics",
                     "citations": [],
                     "fallback_reason": fallback_reason,
+                    "status": "degraded",
+                    "reason": fallback_reason,
+                    "evidence": [],
+                    "recommended_runbooks": [],
+                    "candidates": [],
                 }
             else:
                 result = {
@@ -123,6 +140,11 @@ class RunbookRagWorkflow:
                     "source": "deterministic_fallback",
                     "citations": [],
                     "fallback_reason": fallback_reason,
+                    "status": "degraded",
+                    "reason": fallback_reason,
+                    "evidence": [],
+                    "recommended_runbooks": [],
+                    "candidates": [],
                 }
             self._log_result(
                 decision.route,
@@ -138,14 +160,28 @@ class RunbookRagWorkflow:
             analytics_facts=facts,
             chunks=chunks,
         )
+        no_answer_reason = _no_answer_reason(search_diagnostics, composed.fallback_reason)
+        recommended = _recommended_runbooks(chunks)
+        answer = composed.answer
+        if not chunks and composed.source != "analytics":
+            answer = _no_answer_message(no_answer_reason)
         result = {
             **_empty_analytics_fields(),
             **analytics_result,
-            "answer": composed.answer,
+            "answer": answer,
             "route": decision.route.value,
             "source": composed.source,
             "citations": [item.to_dict() for item in composed.citations],
             "fallback_reason": composed.fallback_reason,
+            "status": "ok" if chunks else "no_answer",
+            "reason": (
+                None
+                if chunks
+                else no_answer_reason
+            ),
+            "evidence": _response_evidence(chunks, retrieval_query),
+            "recommended_runbooks": recommended,
+            "candidates": recommended,
         }
         if self._config.diagnostics_enabled:
             result["diagnostics"] = {
@@ -160,8 +196,8 @@ class RunbookRagWorkflow:
                     for item in chunks
                 ],
                 "search": (
-                    self._retriever.last_diagnostics.to_dict()
-                    if self._retriever.last_diagnostics is not None
+                    search_diagnostics.to_dict()
+                    if search_diagnostics is not None
                     else None
                 ),
             }
@@ -170,9 +206,14 @@ class RunbookRagWorkflow:
             started,
             result,
             retrieval_hits=len(chunks),
-            search_diagnostics=self._retriever.last_diagnostics,
+            search_diagnostics=search_diagnostics,
         )
         return result
+
+    def close(self) -> None:
+        close = getattr(self._retriever, "close", None)
+        if callable(close):
+            close()
 
     @staticmethod
     def _log_result(
@@ -221,3 +262,115 @@ def _retrieval_text(question: str, facts: list[dict[str, Any]]) -> str:
     suffix = " ".join(identifiers)
     text = f"{question.strip()}\nVerified identifiers: {suffix}" if suffix else question.strip()
     return redact_text(text)
+
+
+def _no_answer_reason(
+    diagnostics: SearchDiagnostics | None,
+    fallback_reason: str | None,
+) -> str:
+    if diagnostics is not None and diagnostics.no_result_reason:
+        return diagnostics.no_result_reason
+    if fallback_reason is None or fallback_reason == "no_applicable_runbook":
+        return "insufficient_retrieval_evidence"
+    return fallback_reason
+
+
+def _response_evidence(
+    chunks: list[RetrievedChunk],
+    query: RetrievalQuery,
+) -> list[dict[str, Any]]:
+    """Expose bounded evidence labels to clients, never raw scores or chunk text."""
+
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    requested_codes = {value.upper() for value in query.error_codes}
+    normalized_query = _canonical_evidence(query.text)
+    for chunk in chunks:
+        identity = (chunk.runbook_id, chunk.version, chunk.section)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        matched_codes = sorted(
+            requested_codes & {str(value).upper() for value in chunk.error_codes}
+        )
+        matched_config_keys = [
+            value
+            for value in chunk.config_keys
+            if _canonical_evidence(value) in normalized_query
+        ]
+        matched_exceptions = [
+            value
+            for value in chunk.exception_classes
+            if _canonical_evidence(value) in normalized_query
+        ]
+        matched_signatures = [
+            value
+            for value in chunk.error_signatures
+            if _canonical_evidence(value) in normalized_query
+        ]
+        if matched_codes:
+            match_basis = "error_code"
+        elif matched_config_keys:
+            match_basis = "config_key"
+        elif matched_exceptions:
+            match_basis = "exception_class"
+        elif matched_signatures:
+            match_basis = "error_signature"
+        else:
+            match_basis = "semantic_or_lexical"
+        result.append(
+            {
+                "runbook_id": chunk.runbook_id,
+                "version": chunk.version,
+                "section": chunk.section,
+                "source": chunk.source,
+                "match_basis": match_basis,
+                "matched_error_codes": matched_codes,
+                "matched_config_keys": matched_config_keys[:5],
+                "matched_exception_classes": matched_exceptions[:5],
+                "matched_error_signatures": matched_signatures[:5],
+            }
+        )
+        if len(result) >= 10:
+            break
+    return result
+
+
+def _recommended_runbooks(chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for chunk in chunks:
+        identity = (chunk.runbook_id, chunk.version)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(
+            {
+                "runbook_id": chunk.runbook_id,
+                "title": chunk.title,
+                "version": chunk.version,
+            }
+        )
+        if len(result) >= 5:
+            break
+    return result
+
+
+def _canonical_evidence(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _no_answer_message(reason: str) -> str:
+    if reason in {"strong_anchor_not_found", "explicit_issue_guard_filtered_all"}:
+        return (
+            "Mình chưa tìm thấy runbook đã được phê duyệt khớp với mã lỗi hoặc dấu hiệu "
+            "kỹ thuật bạn cung cấp."
+        )
+    if reason in {"explicit_domain_exclusion", "insufficient_domain_evidence"}:
+        return "Câu hỏi này chưa có đủ bằng chứng liên quan đến sự cố Kafka Connect trong kho runbook."
+    if reason == "rank_margin_below_evidence_threshold":
+        return (
+            "Mình thấy nhiều runbook có mức phù hợp gần nhau nên chưa thể đề xuất an toàn. "
+            "Bạn vui lòng bổ sung tên loại connector hoặc một mã lỗi ngắn trong log."
+        )
+    return "Mình chưa tìm thấy runbook đủ phù hợp với lỗi được cung cấp."

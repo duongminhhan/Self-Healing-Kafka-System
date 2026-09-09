@@ -9,6 +9,19 @@ from self_healthy_kafka.rag.models import RunbookChunk, RunbookDocument, Runbook
 from self_healthy_kafka.redaction import redact_text
 
 DEFAULT_MAX_CHUNK_CHARS = 2_400
+RETRIEVAL_METADATA_LABELS = (
+    ("Connector type", "connector_type"),
+    ("Connector family", "connector_family"),
+    ("Subsystem", "subsystem"),
+    ("Error codes", "error_codes"),
+    ("Exception classes", "exception_classes"),
+    ("Configuration keys", "config_keys"),
+    ("Error signatures", "error_signatures"),
+    ("Aliases", "aliases"),
+    ("Symptoms", "symptoms"),
+    ("Vietnamese user phrases", "user_phrases_vi"),
+    ("English user phrases", "user_phrases_en"),
+)
 _POINT_NAMESPACE = uuid.UUID("1696fed1-9505-49a0-9371-a88e6532fb25")
 _SECTION_ALIASES = {
     "symptoms": "symptoms",
@@ -64,6 +77,17 @@ def chunk_runbook(
                         "error_codes": document.metadata.error_codes,
                         "environments": document.metadata.environments,
                         "owners": document.metadata.owners,
+                        "connector_type": document.metadata.connector_type,
+                        "connector_family": document.metadata.connector_family,
+                        "subsystem": document.metadata.subsystem,
+                        "symptoms": document.metadata.symptoms,
+                        "exception_classes": document.metadata.exception_classes,
+                        "config_keys": document.metadata.config_keys,
+                        "error_signatures": document.metadata.error_signatures,
+                        "aliases": document.metadata.aliases,
+                        "user_phrases_vi": document.metadata.user_phrases_vi,
+                        "user_phrases_en": document.metadata.user_phrases_en,
+                        "schema_version": document.metadata.schema_version,
                         "updated_at": document.metadata.updated_at,
                         "section": section.name,
                         "section_title": section.title,
@@ -100,9 +124,36 @@ def chunk_runbook(
                     source=document.source,
                     updated_at=document.metadata.updated_at,
                     text=text,
+                    connector_type=document.metadata.connector_type,
+                    connector_family=document.metadata.connector_family,
+                    subsystem=document.metadata.subsystem,
+                    symptoms=document.metadata.symptoms,
+                    exception_classes=document.metadata.exception_classes,
+                    config_keys=document.metadata.config_keys,
+                    error_signatures=document.metadata.error_signatures,
+                    aliases=document.metadata.aliases,
+                    user_phrases_vi=document.metadata.user_phrases_vi,
+                    user_phrases_en=document.metadata.user_phrases_en,
+                    schema_version=document.metadata.schema_version,
                 )
             )
     return chunks
+
+
+def retrieval_text(chunk: RunbookChunk) -> str:
+    """Build deterministic, redacted embedding text without changing answer-facing text."""
+    lines = [
+        f"Runbook: {chunk.runbook_id} - {chunk.title}",
+        f"Section: {chunk.section_title}",
+    ]
+    for label, field_name in RETRIEVAL_METADATA_LABELS:
+        value = getattr(chunk, field_name)
+        values = value if isinstance(value, tuple) else (value,)
+        present = [str(item).strip() for item in values if str(item).strip()]
+        if present:
+            lines.append(f"{label}: {', '.join(present)}")
+    lines.append(chunk.text)
+    return redact_text("\n".join(lines))
 
 
 def _section_chunks(section: RunbookSection, *, max_chars: int) -> list[str]:

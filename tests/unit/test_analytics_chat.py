@@ -154,3 +154,46 @@ def test_rag_can_own_existing_chat_endpoint_without_enabling_legacy_analytics_fl
 
     assert service.enabled is True
     assert service.ask("Hướng xử lý?")["route"] == "runbook"
+
+
+def test_close_stops_rag_workflow_but_does_not_close_injected_client():
+    class Workflow:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    workflow = Workflow()
+    client = Client()
+    service = AnalyticsChatService(
+        _fallback_config(),
+        incident_facts=lambda **_kwargs: [],
+        client=client,
+        rag_workflow=workflow,
+    )
+
+    service.close()
+    service.close()
+
+    assert workflow.close_calls == 1
+    assert client.close_calls == 0
+
+
+def test_close_releases_internally_owned_http_client_without_rag():
+    service = AnalyticsChatService(
+        _fallback_config(),
+        incident_facts=lambda **_kwargs: [],
+    )
+    client = service._client
+
+    service.close()
+
+    assert client.is_closed is True

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, TypeVar
 
 from self_healthy_kafka.config import RagConfig
+from self_healthy_kafka.rag.chunking import retrieval_text
 from self_healthy_kafka.rag.models import (
     IngestionReport,
     RagConfigurationError,
@@ -21,7 +23,12 @@ _KEYWORD_INDEXES = (
     "status",
     "environment",
     "connector_class",
+    "connector_type",
+    "connector_family",
+    "subsystem",
     "error_codes",
+    "exception_classes",
+    "config_keys",
     "runbook_id",
     "source",
 )
@@ -34,7 +41,18 @@ class QdrantRunbookStore:
     def __init__(self, config: RagConfig, *, client: Any | None = None):
         self._config = config
         self._client = client
-        self.last_search_diagnostics: SearchDiagnostics | None = None
+        self._local = threading.local()
+
+    @property
+    def last_search_diagnostics(self) -> SearchDiagnostics | None:
+        """Return diagnostics for the current request thread only."""
+
+        value = getattr(self._local, "last_search_diagnostics", None)
+        return value if isinstance(value, SearchDiagnostics) else None
+
+    @last_search_diagnostics.setter
+    def last_search_diagnostics(self, value: SearchDiagnostics | None) -> None:
+        self._local.last_search_diagnostics = value
 
     def _get_client(self):
         if self._client is not None:
@@ -182,14 +200,18 @@ class QdrantRunbookStore:
         try:
             self.validate_collection_schema()
             query_filter = _payload_filter(query)
+            diagnostics.payload_filter_fields = _payload_filter_fields(query)
             if self._config.search_mode == "hybrid":
                 try:
-                    points, latency_ms = self._hybrid_search(
+                    points, latency_ms, fusion_fallback = self._hybrid_search(
                         query,
                         query_filter=query_filter,
                         limit=limit,
                     )
                     diagnostics.fusion_latency_ms = latency_ms
+                    diagnostics.fusion_fallback_reason = fusion_fallback
+                except RagConfigurationError:
+                    raise
                 except Exception as exc:
                     if not self._config.hybrid_fallback_to_dense:
                         raise
@@ -265,7 +287,7 @@ class QdrantRunbookStore:
         *,
         query_filter: Any,
         limit: int,
-    ) -> tuple[list[Any], float]:
+    ) -> tuple[list[Any], float, str | None]:
         from qdrant_client import models
 
         dense_prefetch = models.Prefetch(
@@ -288,20 +310,60 @@ class QdrantRunbookStore:
             score_threshold=self._config.sparse_score_threshold,
             limit=self._config.effective_sparse_candidate_limit,
         )
-        started = time.perf_counter()
-        response = self._call_with_retry(
-            lambda: self._get_client().query_points(
-                collection_name=self._config.collection,
-                prefetch=[dense_prefetch, sparse_prefetch],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                query_filter=query_filter,
-                limit=min(limit, self._config.effective_fusion_limit),
-                with_payload=True,
-                with_vectors=False,
-                timeout=int(self._config.request_timeout_seconds),
+        query_model, weighted, fusion_fallback = self._rrf_query(models)
+
+        def execute(fusion_query: Any) -> Any:
+            return self._call_with_retry(
+                lambda: self._get_client().query_points(
+                    collection_name=self._config.collection,
+                    prefetch=[dense_prefetch, sparse_prefetch],
+                    query=fusion_query,
+                    query_filter=query_filter,
+                    limit=min(limit, self._config.effective_fusion_limit),
+                    with_payload=True,
+                    with_vectors=False,
+                    timeout=int(self._config.request_timeout_seconds),
+                )
             )
+
+        started = time.perf_counter()
+        try:
+            response = execute(query_model)
+        except Exception as exc:
+            if not weighted or not _weighted_rrf_unsupported(exc):
+                raise
+            if not self._config.hybrid_weighted_rrf_fallback_to_equal:
+                raise RagConfigurationError(
+                    "Configured Qdrant server does not support weighted RRF; "
+                    "upgrade it to 1.17+ or explicitly enable equal-RRF fallback"
+                ) from exc
+            fusion_fallback = "weighted_rrf_unsupported:equal_rrf"
+            response = execute(models.FusionQuery(fusion=models.Fusion.RRF))
+        return (
+            list(response.points),
+            round((time.perf_counter() - started) * 1000, 3),
+            fusion_fallback,
         )
-        return list(response.points), round((time.perf_counter() - started) * 1000, 3)
+
+    def _rrf_query(self, models: Any) -> tuple[Any, bool, str | None]:
+        weights = [
+            float(self._config.hybrid_dense_weight),
+            float(self._config.hybrid_sparse_weight),
+        ]
+        if weights == [1.0, 1.0]:
+            return models.FusionQuery(fusion=models.Fusion.RRF), False, None
+        try:
+            return models.RrfQuery(rrf=models.Rrf(weights=weights)), True, None
+        except (AttributeError, TypeError) as exc:
+            if self._config.hybrid_weighted_rrf_fallback_to_equal:
+                return (
+                    models.FusionQuery(fusion=models.Fusion.RRF),
+                    False,
+                    "weighted_rrf_client_unsupported:equal_rrf",
+                )
+            raise RagConfigurationError(
+                "qdrant-client does not support weighted RRF; install qdrant-client>=1.17"
+            ) from exc
 
     def _existing_payloads(self, tenant_id: str) -> dict[str, dict[str, Any]]:
         from qdrant_client import models
@@ -332,8 +394,9 @@ class QdrantRunbookStore:
 
         points = []
         for chunk in chunks:
+            indexed_text = retrieval_text(chunk)
             dense_document = models.Document(
-                text=chunk.text,
+                text=indexed_text,
                 model=self._config.effective_dense_embedding_model,
             )
             vector: Any = dense_document
@@ -341,7 +404,7 @@ class QdrantRunbookStore:
                 vector = {
                     self._config.dense_vector_name: dense_document,
                     self._config.sparse_vector_name: models.Document(
-                        text=chunk.text,
+                        text=indexed_text,
                         model=self._config.sparse_embedding_model,
                     ),
                 }
@@ -372,13 +435,14 @@ class QdrantRunbookStore:
                     field_schema=models.PayloadSchemaType.KEYWORD,
                     wait=True,
                 )
-        if "version" not in payload_schema:
-            self._get_client().create_payload_index(
-                collection_name=self._config.collection,
-                field_name="version",
-                field_schema=models.PayloadSchemaType.INTEGER,
-                wait=True,
-            )
+        for field in ("version", "schema_version"):
+            if field not in payload_schema:
+                self._get_client().create_payload_index(
+                    collection_name=self._config.collection,
+                    field_name=field,
+                    field_schema=models.PayloadSchemaType.INTEGER,
+                    wait=True,
+                )
 
     def _validate_collection_info(self, info: Any) -> None:
         vectors, sparse_vectors = _collection_vectors(info)
@@ -440,9 +504,19 @@ def _payload_filter(query: RetrievalQuery) -> Any:
     ]
     if query.connector_class:
         must.append(
-            models.FieldCondition(
-                key="connector_class",
-                match=models.MatchValue(value=query.connector_class.lower()),
+            models.Filter(
+                should=[
+                    models.FieldCondition(
+                        key=field,
+                        match=models.MatchValue(value=query.connector_class.lower()),
+                    )
+                    for field in (
+                        "connector_class",
+                        "connector_type",
+                        "connector_family",
+                        "subsystem",
+                    )
+                ],
             )
         )
     if query.error_codes:
@@ -453,6 +527,17 @@ def _payload_filter(query: RetrievalQuery) -> Any:
             )
         )
     return models.Filter(must=must)
+
+
+def _payload_filter_fields(query: RetrievalQuery) -> tuple[str, ...]:
+    """Report filter categories without exposing tenant/environment/error values."""
+
+    fields = ["tenant_id", "status", "environment"]
+    if query.connector_class:
+        fields.append("connector_taxonomy")
+    if query.error_codes:
+        fields.append("error_codes")
+    return tuple(fields)
 
 
 def _batches(items: list[RunbookChunk], *, size: int) -> Iterable[list[RunbookChunk]]:
@@ -472,7 +557,22 @@ def _retrieved(point: Any) -> RetrievedChunk:
         section_title=str(payload.get("section_title") or ""),
         source=str(payload.get("source") or ""),
         connector_class=str(payload.get("connector_class") or ""),
+        connector_type=str(payload.get("connector_type") or ""),
+        connector_family=str(payload.get("connector_family") or ""),
+        subsystem=str(payload.get("subsystem") or ""),
         error_codes=tuple(str(item) for item in payload.get("error_codes") or []),
+        symptoms=tuple(str(item) for item in payload.get("symptoms") or []),
+        exception_classes=tuple(
+            str(item) for item in payload.get("exception_classes") or []
+        ),
+        config_keys=tuple(str(item) for item in payload.get("config_keys") or []),
+        error_signatures=tuple(
+            str(item) for item in payload.get("error_signatures") or []
+        ),
+        aliases=tuple(str(item) for item in payload.get("aliases") or []),
+        user_phrases_vi=tuple(str(item) for item in payload.get("user_phrases_vi") or []),
+        user_phrases_en=tuple(str(item) for item in payload.get("user_phrases_en") or []),
+        schema_version=int(payload.get("schema_version") or 1),
         text=str(payload.get("text") or ""),
         tenant_id=str(payload.get("tenant_id") or ""),
         status=str(payload.get("status") or ""),
@@ -515,3 +615,9 @@ def _error_label(exc: Exception) -> str:
     if "unauthorized" in text or "forbidden" in text or "status code 401" in text:
         return "AuthenticationError"
     return type(exc).__name__
+
+
+def _weighted_rrf_unsupported(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    capability_terms = ("unsupported", "unknown field", "extra_forbidden", "validation")
+    return ("rrf" in text or "weight" in text) and any(term in text for term in capability_terms)
