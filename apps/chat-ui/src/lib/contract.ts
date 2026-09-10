@@ -50,6 +50,14 @@ export function statusMessage(status?: string | null) {
   if(status==="degraded") return "Một phần dịch vụ đang gián đoạn. Kết quả hiện tại có thể chưa đầy đủ.";
   return null;
 }
+const routeLabels: Record<string,string> = {
+  analytics: "Phân tích dữ liệu", runbook: "Hướng dẫn xử lý", combined: "Phân tích + hướng dẫn",
+  clarification: "Cần làm rõ", fallback: "Dữ liệu kiểm chứng", no_answer: "Không có kết quả",
+};
+export function routeLabel(value?: string | null) {
+  if (!value) return undefined;
+  return routeLabels[value] ?? value;
+}
 export function safeLink(value?: string) {
   if (!value) return undefined;
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; }
