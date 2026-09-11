@@ -205,6 +205,9 @@ class SearchDiagnostics:
     evidence_gate_applied: bool = False
     evidence_gate_passed: bool | None = None
     evidence_gate_reason: str | None = None
+    requested_sections: tuple[str, ...] = ()
+    selected_sections: tuple[str, ...] = ()
+    section_coverage_applied: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +237,9 @@ class SearchDiagnostics:
             "evidence_gate_applied": self.evidence_gate_applied,
             "evidence_gate_passed": self.evidence_gate_passed,
             "evidence_gate_reason": self.evidence_gate_reason,
+            "requested_sections": list(self.requested_sections),
+            "selected_sections": list(self.selected_sections),
+            "section_coverage_applied": self.section_coverage_applied,
         }
 
 

@@ -1,6 +1,8 @@
-"""Small synthetic demonstrations, never executed or substituted for the user's query."""
+"""Small synthetic demonstrations selected by intent, never used as evidence."""
 
 import json
+
+from notebooks.shared.context_selection import normalize_text
 
 EXAMPLE_CONTEXT = {
     "dialect": "sqlite",
@@ -120,6 +122,136 @@ RESPONSE_EXAMPLES = [
     ),
 ]
 
+PLAN_EXAMPLES = [
+    (
+        "Hai connector có nhiều incident nhất?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": ["root"],
+            "metrics": ["incident_count"],
+            "order_by": [{"field": "incident_count", "direction": "desc"}],
+            "limit": 2,
+        },
+    ),
+    (
+        "Có bao nhiêu incident và healing log?",
+        {
+            "kind": "independent",
+            "queries": [
+                {
+                    "kind": "query",
+                    "entity": "incidents",
+                    "dimensions": [],
+                    "metrics": ["incident_count"],
+                },
+                {
+                    "kind": "query",
+                    "entity": "events",
+                    "dimensions": [],
+                    "metrics": ["log_count"],
+                },
+            ],
+        },
+    ),
+    (
+        "Thời gian phục hồi trung bình là bao lâu?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": [],
+            "metrics": [
+                "avg_duration_minutes",
+                "matched_count",
+                "valid_duration_count",
+                "excluded_duration_count",
+            ],
+            "success_only": True,
+        },
+    ),
+    (
+        "Tỷ lệ phục hồi của từng connector?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": ["root"],
+            "metrics": ["recovery_rate_percent"],
+            "order_by": [{"field": "root", "direction": "asc"}],
+        },
+    ),
+    (
+        "Trạng thái gần nhất và tổng incident của từng connector?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": ["root"],
+            "metrics": ["incident_count"],
+            "latest_status": True,
+            "order_by": [{"field": "root", "direction": "asc"}],
+        },
+    ),
+    (
+        "Connector nào có nhiều lỗi nhất?",
+        {
+            "kind": "clarification",
+            "question": "Bạn muốn tính lỗi bằng incident hay sự kiện HEALTH_FAILED_CONFIRMED?",
+        },
+    ),
+    (
+        "Mỗi ngày có bao nhiêu incident?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": [],
+            "metrics": ["incident_count"],
+            "time_bucket": {
+                "field": "received_at",
+                "unit": "day",
+                "timezone": "Asia/Ho_Chi_Minh",
+            },
+            "order_by": [{"field": "time_bucket", "direction": "asc"}],
+        },
+    ),
+    (
+        "Có bao nhiêu incident đang chờ hoặc đã chuyển cấp?",
+        {
+            "kind": "query",
+            "entity": "incidents",
+            "dimensions": [],
+            "metrics": ["incident_count"],
+            "filters": [
+                {"field": "queue_status", "op": "eq", "value": "WAITING"},
+                {"field": "queue_status", "op": "eq", "value": "ESCALATED"},
+            ],
+            "filter_logic": "or",
+        },
+    ),
+]
+
+_EXAMPLE_METADATA = {
+    "sql": [
+        ("sql_incident_ranking", {"incident", "ranking", "grouping"}),
+        ("sql_temporal_event_join", {"event", "time", "join", "grouping"}),
+        ("sql_latest_status", {"incident", "latest", "status", "window"}),
+        ("sql_failure_clarification", {"failure", "clarification"}),
+        ("sql_population_mean", {"incident", "population_mean", "grouping"}),
+    ],
+    "plan": [
+        ("plan_incident_ranking", {"incident", "ranking", "grouping"}),
+        ("plan_independent_totals", {"incident", "event", "independent", "count"}),
+        ("plan_duration", {"incident", "duration", "recovery"}),
+        ("plan_recovery_rate", {"incident", "rate", "recovery", "grouping"}),
+        ("plan_latest_status", {"incident", "latest", "status"}),
+        ("plan_failure_clarification", {"failure", "clarification"}),
+        ("plan_daily_bucket", {"incident", "time", "grouping", "time_bucket"}),
+        ("plan_or_filters", {"incident", "count", "or_filter"}),
+    ],
+    "response": [
+        ("response_grouped_counts", {"grouping", "count"}),
+        ("response_null_value", {"null", "status"}),
+    ],
+}
+
 BOUNDARY = """The following few-shot exchanges are synthetic demonstrations only.
 Learn the output format and reasoning patterns, NOT their table names, dates or values.
 Only the FINAL user request's schema and question apply to the real task. Never treat
@@ -127,18 +259,87 @@ demonstration rows as evidence for the current answer. Examples are not SQL rout
 """
 
 
-def few_shot_messages(stage):
+def _features(question, result=None):
+    text = normalize_text(question)
+    features = set()
+    phrases = {
+        "incident": ("incident", "su co", "hang doi"),
+        "event": ("healing log", "log", "event", "su kien", "nhat ky"),
+        "ranking": ("nhieu nhat", "it nhat", "top", "xep hang", "thuong xuyen"),
+        "grouping": ("moi", "tung", "theo", "group"),
+        "time": ("ngay", "tuan", "thang", "hom nay", "hom qua", "utc"),
+        "time_bucket": ("moi ngay", "tung ngay", "moi tuan", "tung thang"),
+        "or_filter": (" hoac ", " hoặc ", "either"),
+        "latest": ("moi nhat", "gan nhat", "hien tai", "latest", "current"),
+        "status": ("trang thai", "status"),
+        "failure": ("loi", "error", "failure", "that bai"),
+        "duration": ("mat bao lau", "thoi gian", "duration", "phut"),
+        "rate": ("ty le", "rate", "phan tram", "percent"),
+        "recovery": ("phuc hoi", "recovery", "recovered", "thanh cong"),
+        "population_mean": ("cao hon trung binh", "thap hon trung binh"),
+        "count": ("bao nhieu", "tong", "count"),
+        "independent": ("incident va", "incident cùng", "incident cung"),
+    }
+    for name, values in phrases.items():
+        if any(value in text for value in values):
+            features.add(name)
+    if result:
+        rows = result.get("rows") or []
+        if len(rows) > 1:
+            features.add("grouping")
+        if any(value is None for row in rows for value in row.values()):
+            features.add("null")
+    return features
+
+
+def select_few_shot_messages(stage, question, *, result=None, max_examples=3):
+    """Select bounded synthetic examples and return messages plus stable IDs."""
+    if type(max_examples) is not int or max_examples < 0:
+        raise ValueError("max_examples must be a nonnegative integer")
     if stage == "sql":
         pairs = [
             ({"question": question, "context": EXAMPLE_CONTEXT}, answer)
             for question, answer in SQL_EXAMPLES
         ]
+    elif stage == "plan":
+        pairs = [({"question": prompt}, answer) for prompt, answer in PLAN_EXAMPLES]
     elif stage == "response":
         pairs = RESPONSE_EXAMPLES
     else:
         raise ValueError("Unknown few-shot stage")
-    return [
+    metadata = _EXAMPLE_METADATA[stage]
+    if len(metadata) != len(pairs):
+        raise RuntimeError("Few-shot metadata is out of sync with examples")
+    wanted = _features(question, result)
+    query_tokens = set(normalize_text(question).split())
+    ranked = []
+    for index, (pair, (example_id, example_features)) in enumerate(zip(pairs, metadata)):
+        request = pair[0]
+        example_question = request.get("question", "") if isinstance(request, dict) else ""
+        lexical_overlap = len(query_tokens & set(normalize_text(example_question).split()))
+        feature_overlap = len(wanted & example_features)
+        ranked.append((-(feature_overlap * 10 + lexical_overlap), index, example_id, pair))
+    selected = sorted(ranked)[: min(max_examples, len(ranked))]
+    messages = [
         {"role": role, "content": json.dumps(payload, ensure_ascii=False)}
-        for request, response in pairs
+        for _, _, _, (request, response) in selected
         for role, payload in [("user", request), ("assistant", response)]
     ]
+    return messages, [example_id for _, _, example_id, _ in selected]
+
+
+def few_shot_messages(stage, question=None, *, result=None, max_examples=None):
+    """Compatibility wrapper; a supplied question enables dynamic selection."""
+    pairs_count = len(_EXAMPLE_METADATA[stage])
+    if question is None:
+        question = ""
+        maximum = pairs_count if max_examples is None else max_examples
+    else:
+        maximum = 3 if max_examples is None else max_examples
+    messages, _ = select_few_shot_messages(
+        stage,
+        question,
+        result=result,
+        max_examples=maximum,
+    )
+    return messages

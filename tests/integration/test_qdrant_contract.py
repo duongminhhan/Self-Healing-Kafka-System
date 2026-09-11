@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import pytest
 
 from self_healthy_kafka.config import RagConfig
+from self_healthy_kafka.rag.payload_indexes import PAYLOAD_INDEX_TYPES, inspect_payload_indexes
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUNBOOK_RAG_LIVE_TEST", "false").lower() not in {"1", "true", "yes", "on"},
@@ -24,22 +25,9 @@ def test_configured_qdrant_collection_has_required_payload_indexes():
     )
     info = client.get_collection(config.collection)
 
-    assert {
-        "tenant_id",
-        "status",
-        "environment",
-        "connector_class",
-        "connector_type",
-        "connector_family",
-        "subsystem",
-        "error_codes",
-        "exception_classes",
-        "config_keys",
-        "runbook_id",
-        "source",
-        "version",
-        "schema_version",
-    } <= set(info.payload_schema)
+    payload_plan = inspect_payload_indexes(info.payload_schema)
+    assert payload_plan.valid, payload_plan.to_dict()
+    assert set(PAYLOAD_INDEX_TYPES) <= set(info.payload_schema)
     vectors = info.config.params.vectors
     sparse_vectors = info.config.params.sparse_vectors
     if config.search_mode == "hybrid":

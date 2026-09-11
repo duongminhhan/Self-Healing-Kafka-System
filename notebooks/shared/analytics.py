@@ -14,6 +14,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
 
+from notebooks.shared.context_selection import select_context_for_question
 from notebooks.shared.diagnostics import (
     diagnose,
     diagnostic_count_errors,
@@ -22,7 +23,7 @@ from notebooks.shared.diagnostics import (
     suspicious_result,
     temporal_aggregate,
 )
-from notebooks.shared.few_shot import BOUNDARY, few_shot_messages
+from notebooks.shared.few_shot import BOUNDARY, select_few_shot_messages
 from notebooks.shared.semantics import PROFILE_COLUMNS, catalog_for
 
 BUSINESS_DEFINITIONS = {
@@ -53,6 +54,17 @@ class QueryError(ValueError):
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def safe_normalized_question(value):
+    """Bounded telemetry text with common inline credentials removed."""
+
+    text = re.sub(
+        r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        str(value),
+    )
+    return " ".join(text.split())[:1000]
 
 
 def quote_identifier(name):
@@ -427,12 +439,20 @@ class Workflow:
         sql_max_tokens=1024,
         response_max_tokens=1500,
         few_shot=True,
+        few_shot_max_examples=3,
+        context_max_tables=4,
+        context_max_columns_per_table=24,
     ):
         self.snapshot, self.client = snapshot, client
         self.model_id, self.provider = model_id, provider
         self.max_attempts = max(1, min(int(max_attempts), 3))
         self.sql_max_tokens, self.response_max_tokens = sql_max_tokens, response_max_tokens
         self.few_shot = bool(few_shot)
+        self.few_shot_max_examples = max(1, min(int(few_shot_max_examples), 8))
+        self.context_max_tables = max(1, min(int(context_max_tables), 32))
+        self.context_max_columns_per_table = max(
+            4, min(int(context_max_columns_per_table), 128)
+        )
         self.reset()
 
     def reset(self):
@@ -453,7 +473,33 @@ class Workflow:
             "correction_count": 0,
             "tokens": {},
             "few_shot_enabled": self.few_shot,
+            "few_shot_example_ids": {},
+            "schema_context": {},
+            "review_queue": [],
         }
+
+    def begin_question(self, question):
+        self.reset()
+        self.question = question
+        self.metrics["normalized_question"] = safe_normalized_question(question)
+
+    def record_result_summary(self, result):
+        self.metrics["execution_result"] = {
+            "columns": list(result.get("columns", []))[:64],
+            "returned_row_count": len(result.get("rows", [])),
+            "truncated": bool(result.get("truncated")),
+        }
+
+    def queue_review(self, reason):
+        item = {
+            "normalized_question": self.metrics.get("normalized_question", ""),
+            "reason": safe_normalized_question(reason or "unspecified")[:200],
+            "semantic_plan": getattr(self, "semantic_plan", None),
+        }
+        queue = self.metrics.setdefault("review_queue", [])
+        if item not in queue:
+            queue.append(item)
+            del queue[10:]
 
     def call(self, messages, stage, max_tokens, *, contract=None):
         self.metrics[stage + "_api_calls"] += 1
@@ -494,16 +540,30 @@ class Workflow:
         return parse_json_output(completion.choices[0].message.content)
 
     def query(self, question):
-        self.reset()
-        self.question = question
+        self.begin_question(question)
         start = time.perf_counter()
+        prompt_context = select_context_for_question(
+            self.snapshot.context(),
+            question,
+            max_tables=self.context_max_tables,
+            max_columns_per_table=self.context_max_columns_per_table,
+        )
+        selection = prompt_context["context_selection"]
+        self.metrics["schema_context"] = selection
+        sql_examples, sql_example_ids = select_few_shot_messages(
+            "sql",
+            question,
+            max_examples=self.few_shot_max_examples,
+        )
+        if self.few_shot:
+            self.metrics["few_shot_example_ids"]["sql"] = sql_example_ids
         messages = [
             {"role": "system", "content": SQL_INSTRUCTIONS + (BOUNDARY if self.few_shot else "")},
-            *(few_shot_messages("sql") if self.few_shot else []),
+            *(sql_examples if self.few_shot else []),
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"question": question, "context": self.snapshot.context()}, ensure_ascii=False
+                    {"question": question, "context": prompt_context}, ensure_ascii=False
                 ),
             },
         ]
@@ -527,6 +587,7 @@ class Workflow:
                     )
                     if decision.get("kind") == "accept_result" and pending_result is not None:
                         self.result = pending_result
+                        self.record_result_summary(pending_result)
                         self.interpretation = pending_interpretation
                         self.trace.append({"attempt": attempt + 1, "status": "result_confirmed"})
                         return self.result
@@ -625,6 +686,7 @@ class Workflow:
                             "reviewed_or_budget_exhausted; semantic correctness is not guaranteed"
                         )
                     self.result = candidate
+                    self.record_result_summary(candidate)
                     return self.result
                 except QueryError as exc:
                     self.trace.append(
@@ -670,6 +732,13 @@ class Workflow:
             )
         finally:
             self.metrics["sql_stage_seconds"] = time.perf_counter() - start
+            if self.result is None:
+                reason = "clarification" if self.clarification else (
+                    self.trace[-1].get("error") or self.trace[-1].get("status")
+                    if self.trace
+                    else "no_verified_result"
+                )
+                self.queue_review(reason)
 
     def respond(self):
         self.answer = None
@@ -683,6 +752,7 @@ class Workflow:
         if self.result is None:
             if self.clarification:
                 self.answer = {"source": "clarification", "text": self.clarification}
+                self.queue_review("clarification")
                 return self.answer
             raise QueryError("Run the SQL stage successfully first; no current evidence.")
         start = time.perf_counter()
@@ -696,12 +766,20 @@ class Workflow:
                 # Missing aggregates must not become unsupported causal prose.
                 reason = "null_aggregate_requires_factual_diagnostics"
             else:
+                response_examples, response_example_ids = select_few_shot_messages(
+                    "response",
+                    self.question,
+                    result=self.result,
+                    max_examples=min(self.few_shot_max_examples, 2),
+                )
+                if self.few_shot:
+                    self.metrics["few_shot_example_ids"]["response"] = response_example_ids
                 messages = [
                     {
                         "role": "system",
                         "content": RESPONSE_INSTRUCTIONS + (BOUNDARY if self.few_shot else ""),
                     },
-                    *(few_shot_messages("response") if self.few_shot else []),
+                    *(response_examples if self.few_shot else []),
                     {
                         "role": "user",
                         "content": json.dumps(
@@ -721,15 +799,62 @@ class Workflow:
                 ]
                 try:
                     output = self.call(messages, "response", self.response_max_tokens)
-                    reason = validate_claims(
+                    claim_review = inspect_claims(
                         output, self.result, self.result.get("evidence_context")
                     )
+                    total_cells = sum(len(row) for row in self.result["rows"])
+                    self.metrics["claim_grounding"] = {
+                        "accepted_claim_count": len(claim_review["accepted_claims"]),
+                        "rejected_claim_count": len(claim_review["rejected_claims"]),
+                        "rejection_reasons": [
+                            item["reason"] for item in claim_review["rejected_claims"]
+                        ],
+                        "covered_cell_count": len(claim_review["covered_evidence"]),
+                        "total_cell_count": total_cells,
+                        "coverage_rate": (
+                            len(claim_review["covered_evidence"]) / total_cells
+                            if total_cells
+                            else 1.0
+                        ),
+                    }
+                    self.metrics["response_claims"] = [
+                        {
+                            "status": "accepted",
+                            "evidence": claim.get("evidence", []),
+                        }
+                        for claim in claim_review["accepted_claims"]
+                    ] + [
+                        {
+                            "status": "rejected",
+                            "reason": claim["reason"],
+                        }
+                        for claim in claim_review["rejected_claims"]
+                    ]
+                    reason = claim_review["reason"]
                     if reason is None:
                         self.answer = {
                             "source": getattr(self.client, "response_source", "huggingface"),
                             "text": "\n".join(c["text"] for c in output["claims"]),
                             "claims": output["claims"],
                         }
+                    elif claim_review["accepted_claims"]:
+                        supplement = render_missing_facts(
+                            self.result,
+                            claim_review["missing_evidence"],
+                            getattr(self, "semantic_plan", None),
+                        )
+                        text_parts = [
+                            *(claim["text"] for claim in claim_review["accepted_claims"]),
+                            *([supplement] if supplement else []),
+                        ]
+                        self.answer = {
+                            "source": "huggingface_with_verified_supplement",
+                            "reason": reason,
+                            "text": "\n".join(text_parts),
+                            "claims": claim_review["accepted_claims"],
+                            "rejected_claims": claim_review["rejected_claims"],
+                        }
+                        reason = None
                 except QueryError as exc:
                     reason = str(exc)
                 except Exception as exc:
@@ -743,6 +868,7 @@ class Workflow:
                         + (getattr(exc, "category", None) or type(exc).__name__)
                     )
             if reason:
+                self.queue_review("response_fallback:" + str(reason))
                 self.answer = {
                     # Keep the stable telemetry source name; the renderer is now
                     # prose-first for scalar evidence and table-first otherwise.
@@ -816,72 +942,124 @@ def _strip_verified_date_mentions(text, context):
     return text
 
 
-def validate_claims(output, result, evidence_context=None):
-    """Conservative structural/value checks, NOT semantic proof of prose or SQL correctness."""
-    claims = output.get("claims")
-    if not isinstance(claims, list) or not claims:
-        return "missing_claims"
+def _validate_one_claim(claim, result, evidence_context=None):
+    """Return one bounded failure reason and verified cells for one model claim."""
     covered = set()
-    for claim in claims:
+    if (
+        not isinstance(claim, dict)
+        or not isinstance(claim.get("text"), str)
+        or not claim["text"].strip()
+    ):
+        return "malformed_claim", covered
+    refs = claim.get("evidence")
+    if not isinstance(refs, list) or not refs:
+        return "missing_evidence", covered
+    remaining = claim["text"]
+    values = []
+    numeric_literals = set()
+    referenced_text = set()
+    for ref in refs:
         if (
-            not isinstance(claim, dict)
-            or not isinstance(claim.get("text"), str)
-            or not claim["text"].strip()
+            not isinstance(ref, dict)
+            or type(ref.get("row")) is not int
+            or not isinstance(ref.get("column"), str)
         ):
-            return "malformed_claim"
-        refs = claim.get("evidence")
-        if not isinstance(refs, list) or not refs:
-            return "missing_evidence"
-        remaining = claim["text"]
-        values = []
-        numeric_literals = set()
-        for ref in refs:
-            if (
-                not isinstance(ref, dict)
-                or type(ref.get("row")) is not int
-                or not isinstance(ref.get("column"), str)
-            ):
-                return "malformed_reference"
-            index, column = ref["row"], ref["column"]
-            if not 0 <= index < len(result["rows"]) or column not in result["rows"][index]:
-                return "unknown_reference"
-            value = result["rows"][index][column]
-            if value is not None:
-                literal = str(value)
-                if isinstance(value, (int, float)):
-                    from decimal import Decimal, InvalidOperation
+            return "malformed_reference", set()
+        index, column = ref["row"], ref["column"]
+        if not 0 <= index < len(result["rows"]) or column not in result["rows"][index]:
+            return "unknown_reference", set()
+        value = result["rows"][index][column]
+        if value is not None:
+            literal = str(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                from decimal import Decimal, InvalidOperation
 
-                    candidates = re.findall(
-                        r"(?<![\w.,])-?\d+(?:[.,]\d+)?(?!\w|[.,]\d)", claim["text"]
-                    )
-                    try:
-                        literal = next(
-                            n
-                            for n in candidates
-                            if Decimal(n.replace(",", ".")) == Decimal(str(value))
-                        )
-                    except (StopIteration, InvalidOperation):
-                        return "referenced_value_missing"
-                    numeric_literals.add(literal)
-                elif literal not in claim["text"]:
-                    return "referenced_value_missing"
-                values.append(literal)
-            elif not re.search(r"NULL|không có giá trị|chưa có dữ liệu", claim["text"], re.I):
-                return "null_misrepresented"
-            covered.add((index, column))
-        for value in sorted(values, key=len, reverse=True):
-            if value in numeric_literals:
-                remaining = re.sub(
-                    r"(?<![\w.,])" + re.escape(value) + r"(?!\w|[.,]\d)", "", remaining
+                candidates = re.findall(
+                    r"(?<![\w.,])-?\d+(?:[.,]\d+)?(?!\w|[.,]\d)", claim["text"]
                 )
+                try:
+                    literal = next(
+                        number
+                        for number in candidates
+                        if Decimal(number.replace(",", ".")) == Decimal(str(value))
+                    )
+                except (StopIteration, InvalidOperation):
+                    return "referenced_value_missing", set()
+                numeric_literals.add(literal)
+            elif literal not in claim["text"]:
+                return "referenced_value_missing", set()
             else:
-                remaining = remaining.replace(value, "")
-        if re.search(r"\d", _strip_verified_date_mentions(remaining, evidence_context)):
-            return "unsupported_numeric_claim"
-    expected = {(i, c["name"]) for i in range(len(result["rows"])) for c in result["columns"]}
-    if covered != expected:
-        return "incomplete_result_coverage"
-    return None
+                referenced_text.add(literal.casefold())
+            values.append(literal)
+        elif not re.search(r"NULL|không có giá trị|chưa có dữ liệu", claim["text"], re.I):
+            return "null_misrepresented", set()
+        covered.add((index, column))
+    for value in sorted(values, key=len, reverse=True):
+        if value in numeric_literals:
+            remaining = re.sub(
+                r"(?<![\w.,])" + re.escape(value) + r"(?!\w|[.,]\d)", "", remaining
+            )
+        else:
+            remaining = remaining.replace(value, "")
+    if re.search(r"\d", _strip_verified_date_mentions(remaining, evidence_context)):
+        return "unsupported_numeric_claim", set()
+    identifier_literals = re.findall(
+        r"\b(?:sample|conn|connector)[-_][\w.-]+\b|\b[A-Z]{2,}[A-Z0-9_]*-\d{3,}\b",
+        claim["text"],
+        re.I,
+    )
+    if any(value.casefold() not in referenced_text for value in identifier_literals):
+        return "unsupported_categorical_claim", set()
+    return None, covered
+
+
+def inspect_claims(output, result, evidence_context=None):
+    """Validate claims independently so one bad sentence cannot discard good prose."""
+    claims = output.get("claims") if isinstance(output, dict) else None
+    expected = {
+        (index, column["name"])
+        for index in range(len(result["rows"]))
+        for column in result["columns"]
+    }
+    if not isinstance(claims, list) or not claims:
+        return {
+            "reason": "missing_claims",
+            "accepted_claims": [],
+            "rejected_claims": [],
+            "covered_evidence": set(),
+            "missing_evidence": expected,
+        }
+    accepted = []
+    rejected = []
+    covered = set()
+    for index, claim in enumerate(claims):
+        error, claim_coverage = _validate_one_claim(claim, result, evidence_context)
+        if error:
+            rejected.append({"index": index, "reason": error})
+        else:
+            accepted.append(claim)
+            covered.update(claim_coverage)
+    missing = expected - covered
+    if rejected and accepted:
+        reason = "partial_claim_rejection"
+    elif rejected:
+        reason = rejected[0]["reason"]
+    elif missing:
+        reason = "incomplete_result_coverage"
+    else:
+        reason = None
+    return {
+        "reason": reason,
+        "accepted_claims": accepted,
+        "rejected_claims": rejected,
+        "covered_evidence": covered,
+        "missing_evidence": missing,
+    }
+
+
+def validate_claims(output, result, evidence_context=None):
+    """Backward-compatible aggregate claim check for callers and tests."""
+    return inspect_claims(output, result, evidence_context)["reason"]
 
 
 def render_table(result):
@@ -910,6 +1088,7 @@ def render_table(result):
 
 
 DIMENSION_LABELS_VI = {
+    "time_bucket": "Khoảng thời gian",
     "root": "Connector",
     "current_connector": "Connector instance",
     "event_connector": "Connector instance",
@@ -1032,6 +1211,43 @@ def _grouped_friendly_fallback(rows, dimensions, metric_ids, presentation, prefi
     return _upper_first(prefix + header) + note + "\n\n" + "\n".join(entries)
 
 
+def render_missing_facts(result, missing_evidence, semantic_plan=None):
+    """Render only result cells not covered by accepted model claims."""
+    if not missing_evidence:
+        return ""
+    from notebooks.shared.semantic_plan import METRIC_PRESENTATION
+
+    columns = [column["name"] for column in result["columns"]]
+    planned_metrics = _plan_metric_ids(semantic_plan)
+    metric_ids = [name for name in planned_metrics if name in columns]
+    if not metric_ids:
+        metric_ids = [name for name in columns if name in METRIC_PRESENTATION]
+    dimensions = [name for name in columns if name not in metric_ids]
+    lines = []
+    for row_index, row in enumerate(result["rows"]):
+        missing_columns = [
+            name for name in columns if (row_index, name) in missing_evidence
+        ]
+        if not missing_columns:
+            continue
+        missing_metrics = [name for name in metric_ids if name in missing_columns]
+        missing_dimensions = [name for name in dimensions if name in missing_columns]
+        label = ", ".join(str(row[name]) for name in dimensions)
+        if missing_metrics:
+            facts = " và ".join(
+                _metric_phrase(name, row[name], METRIC_PRESENTATION)
+                for name in missing_metrics
+            )
+            line = f"{label} có {facts}." if label else _upper_first(f"có {facts}.")
+        else:
+            facts = ", ".join(
+                f"{_dimension_label(name)} {row[name]}" for name in missing_dimensions
+            )
+            line = facts + "."
+        lines.append(("- " if len(result["rows"]) > 1 else "") + line)
+    return "\n".join(lines)
+
+
 def render_friendly_fallback(result, semantic_plan=None):
     """Evidence-only Vietnamese fallback driven by semantic metric IDs."""
     from notebooks.shared.semantic_plan import METRIC_PRESENTATION
@@ -1088,7 +1304,10 @@ def render_friendly_fallback(result, semantic_plan=None):
                 + _metric_phrase(ranked_metric, leader[ranked_metric], METRIC_PRESENTATION)
                 + "."
             )
-            return conclusion + note + "\n\n" + render_table(result)
+            details = _grouped_friendly_fallback(
+                rows, dimensions, metric_ids, METRIC_PRESENTATION, "", ""
+            ).split("\n\n", 1)[-1]
+            return conclusion + note + "\n\n" + details
     if len(rows) > 1 and dimensions and metric_ids:
         return _grouped_friendly_fallback(
             rows, dimensions, metric_ids, METRIC_PRESENTATION, prefix, note

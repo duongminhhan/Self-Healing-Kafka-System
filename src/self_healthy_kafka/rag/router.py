@@ -45,6 +45,15 @@ _INCIDENT_TERMS = {
     "sự cố",
     "timeout",
 }
+_ERROR_DETAIL_TERMS = {
+    "nội dung lỗi",
+    "thông báo lỗi",
+    "message lỗi",
+    "error message",
+    "lỗi đầy đủ",
+    "lỗi gì",
+    "ý nghĩa",
+}
 _KNOWN_CLASSES = {
     "oracle": "oracle",
     "jdbc": "jdbc",
@@ -61,9 +70,13 @@ class RunbookRouter:
         clean = question.strip()
         text = clean.casefold()
         error_codes = tuple(dict.fromkeys(_technical_codes(clean)))
-        connector_class = next(
-            (value for term, value in _KNOWN_CLASSES.items() if term in text), None
+        matched_classes = tuple(
+            dict.fromkeys(value for term, value in _KNOWN_CLASSES.items() if term in text)
         )
+        # A multi-domain question is intentionally ambiguous. Applying the first
+        # matching class as a server-side payload filter would silently hide valid
+        # runbooks from every other class named by the user.
+        connector_class = matched_classes[0] if len(matched_classes) == 1 else None
         connector_name = _connector_name(clean)
         analytics = any(term in text for term in _ANALYTICS_TERMS)
         procedural = any(term in text for term in _RUNBOOK_TERMS)
@@ -73,8 +86,25 @@ class RunbookRouter:
         incident = bool(
             error_codes
             or connector_name
-            or connector_class
+            or matched_classes
             or any(term in text for term in _INCIDENT_TERMS)
+        )
+        error_detail = bool(error_codes) and any(term in text for term in _ERROR_DETAIL_TERMS)
+        current_incident = bool(
+            connector_name
+            or analytics
+            or any(
+                term in text
+                for term in (
+                    "đang",
+                    "bị",
+                    "báo",
+                    "trả về",
+                    "hiện tại",
+                    "incident id",
+                    "sự cố này",
+                )
+            )
         )
 
         if (
@@ -84,8 +114,17 @@ class RunbookRouter:
             and not any(term in text for term in ("đang", "bị", "báo"))
         ):
             route = Route.RUNBOOK
+        elif procedural and error_codes and not current_incident:
+            # A known error-code remediation question is a knowledge lookup. Do not
+            # make it depend on a separate Text-to-SQL planning call unless the user
+            # also asks about a current connector/incident or an aggregate.
+            route = Route.RUNBOOK
         elif procedural and incident:
             route = Route.COMBINED
+        elif error_detail:
+            # A message lookup must keep the verified incident result instead of
+            # replacing it with generic runbook advice.
+            route = Route.ANALYTICS
         elif procedural:
             route = Route.RUNBOOK
         elif analytics:

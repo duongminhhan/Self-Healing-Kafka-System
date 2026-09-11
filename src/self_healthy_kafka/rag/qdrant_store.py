@@ -17,21 +17,13 @@ from self_healthy_kafka.rag.models import (
     RunbookChunk,
     SearchDiagnostics,
 )
-
-_KEYWORD_INDEXES = (
-    "tenant_id",
-    "status",
-    "environment",
-    "connector_class",
-    "connector_type",
-    "connector_family",
-    "subsystem",
-    "error_codes",
-    "exception_classes",
-    "config_keys",
-    "runbook_id",
-    "source",
+from self_healthy_kafka.rag.payload_indexes import (
+    PayloadIndexPlan,
+    create_missing_payload_indexes,
+    inspect_payload_indexes,
+    require_payload_indexes,
 )
+
 T = TypeVar("T")
 
 
@@ -71,7 +63,10 @@ class QdrantRunbookStore:
         return self._client
 
     def ensure_collection(self) -> None:
-        """Create only the configured collection and reject incompatible schemas."""
+        """Create only the collection and reject incompatible vector schemas.
+
+        Payload-index migration is intentionally separate and must be invoked explicitly.
+        """
         self._config.validate()
         client = self._get_client()
         try:
@@ -104,23 +99,66 @@ class QdrantRunbookStore:
                 client.create_collection(**create_args)
             info = client.get_collection(self._config.collection)
             self._validate_collection_info(info)
-            self._ensure_payload_indexes(info)
         except RagConfigurationError:
             raise
         except Exception as exc:
             raise RagStoreError(f"Qdrant collection setup failed: {_error_label(exc)}") from exc
 
     def validate_collection_schema(self) -> None:
-        """Perform a read-only validation before retrieval."""
+        """Read-only validation of vector and payload-index contracts."""
         self._config.validate()
         try:
             info = self._get_client().get_collection(self._config.collection)
             self._validate_collection_info(info)
+            require_payload_indexes(
+                inspect_payload_indexes(getattr(info, "payload_schema", {}) or {})
+            )
         except RagConfigurationError:
             raise
         except Exception as exc:
             raise RagStoreError(
                 f"Qdrant collection validation failed: {_error_label(exc)}"
+            ) from exc
+
+    def inspect_payload_indexes(self) -> PayloadIndexPlan:
+        """Return a read-only payload-index plan for the configured collection."""
+
+        self._config.validate()
+        try:
+            client = self._get_client()
+            if not client.collection_exists(self._config.collection):
+                raise RagConfigurationError(
+                    f"Qdrant collection {self._config.collection!r} does not exist"
+                )
+            info = client.get_collection(self._config.collection)
+            self._validate_collection_info(info)
+            return inspect_payload_indexes(getattr(info, "payload_schema", {}) or {})
+        except RagConfigurationError:
+            raise
+        except Exception as exc:
+            raise RagStoreError(
+                f"Qdrant payload-index inspection failed: {_error_label(exc)}"
+            ) from exc
+
+    def apply_missing_payload_indexes(self) -> tuple[PayloadIndexPlan, tuple[str, ...]]:
+        """Explicitly create missing indexes; never create collections or alter points."""
+
+        plan = self.inspect_payload_indexes()
+        try:
+            client = self._get_client()
+            created = create_missing_payload_indexes(
+                client,
+                collection=self._config.collection,
+                plan=plan,
+            )
+            refreshed = self.inspect_payload_indexes()
+            require_payload_indexes(refreshed)
+            return refreshed, created
+        except RagConfigurationError:
+            raise
+        except Exception as exc:
+            raise RagStoreError(
+                f"Qdrant payload-index migration failed: {_error_label(exc)}"
             ) from exc
 
     def sync(
@@ -422,27 +460,6 @@ class QdrantRunbookStore:
                 wait=True,
             )
         )
-
-    def _ensure_payload_indexes(self, info: Any) -> None:
-        from qdrant_client import models
-
-        payload_schema = getattr(info, "payload_schema", {}) or {}
-        for field in _KEYWORD_INDEXES:
-            if field not in payload_schema:
-                self._get_client().create_payload_index(
-                    collection_name=self._config.collection,
-                    field_name=field,
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                    wait=True,
-                )
-        for field in ("version", "schema_version"):
-            if field not in payload_schema:
-                self._get_client().create_payload_index(
-                    collection_name=self._config.collection,
-                    field_name=field,
-                    field_schema=models.PayloadSchemaType.INTEGER,
-                    wait=True,
-                )
 
     def _validate_collection_info(self, info: Any) -> None:
         vectors, sparse_vectors = _collection_vectors(info)

@@ -5,9 +5,10 @@ test("send, loading, answer, citations, details, retry and cancellation", async 
   await page.goto("/");
   const input = page.getByRole("textbox", { name: "Câu hỏi" });
   await input.fill("Connector nào lỗi?"); await input.press("Enter");
-  await expect(page.getByRole("status")).toContainText("Đang tìm");
+  await expect(page.getByRole("status")).toContainText(/Đang tìm.*(?:ms|giây)/);
   await page.screenshot({path:"test-results/desktop-loading.png"});
   await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Thông tin phản hồi")).toContainText(/Phản hồi trong (?:\d+ ms|\d+(?:,\d)? giây)/);
   await expect(page.locator(".badges")).toContainText("Phân tích dữ liệu");
   await expect(page.locator("details[open]")).toHaveCount(0);
   await page.getByText("Nguồn tham khảo (1)").click();
@@ -22,7 +23,7 @@ test("send, loading, answer, citations, details, retry and cancellation", async 
   await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.", { exact: true })).toHaveCount(2);
   await input.fill("Cancel test"); await input.press("Enter");
   await page.getByRole("button", { name: "Hủy yêu cầu" }).click();
-  await expect(page.getByText("Đã hủy chờ câu trả lời. Bạn có thể thử lại khi sẵn sàng.")).toBeVisible();
+  await expect(page.getByText(/Đã hủy chờ câu trả lời(?: sau .+)?\. Bạn có thể thử lại khi sẵn sàng\./)).toBeVisible();
   await expect(input).toBeEnabled();
   await page.screenshot({path:"test-results/desktop-cancel.png"});
 });
@@ -52,7 +53,7 @@ test("empty state, multiline, local visual history and mobile long content",asyn
   await expect(page.locator("html")).toHaveClass(/dark/);
   await page.screenshot({path:"test-results/mobile-dark.png"});
   await page.getByRole("button",{name:"Ẩn hoặc mở lịch sử"}).click();
-  await page.getByRole("button",{name:"Cuộc trò chuyện 1",exact:true}).click();
+  await page.getByRole("button",{name:"Fallback test",exact:true}).click();
   await expect(page.locator(".session:not([hidden]) .table-scroll")).toContainText("75");
 });
 
@@ -80,11 +81,14 @@ test("desktop sidebar toggle and session deletion",async({page})=>{
 
   await page.getByRole("button",{name:"Xóa Cuộc trò chuyện 1"}).click();
   await page.getByRole("button",{name:"Xóa",exact:true}).click();
+  await expect(page.locator(".no-sessions")).toBeVisible();
+  await page.locator(".no-sessions button").click();
   await expect(page.getByRole("button",{name:"Cuộc trò chuyện 3",exact:true})).toBeVisible();
-  await expect(page.getByRole("heading",{name:"Cùng bạn giữ dữ liệu thông suốt.",exact:false})).toBeVisible();
 });
 
 test("theme choice survives reload and applies before paint",async({page})=>{
+  const hydrationErrors:string[]=[];
+  page.on("console",message=>{if(message.type()==="error"&&message.text().toLowerCase().includes("hydration"))hydrationErrors.push(message.text());});
   await page.goto("/");
   await expect(page.locator("html")).not.toHaveClass(/dark/);
   await page.getByRole("button",{name:"Giao diện tối"}).click();
@@ -95,6 +99,7 @@ test("theme choice survives reload and applies before paint",async({page})=>{
   await page.getByRole("button",{name:"Giao diện sáng"}).click();
   await page.reload();
   await expect(page.locator("html")).not.toHaveClass(/dark/);
+  expect(hydrationErrors).toEqual([]);
 });
 
 test("empty and invalid responses remain distinct and preserve user question",async({page})=>{
@@ -106,6 +111,78 @@ test("empty and invalid responses remain distinct and preserve user question",as
   await input.fill("Invalid JSON test");await input.press("Enter");
   await expect(page.getByText("Dịch vụ trả về dữ liệu không hợp lệ. Vui lòng thử lại.",{exact:true})).toBeVisible();
   await page.screenshot({path:"test-results/desktop-errors.png"});
+});
+
+test("conversation search is accent-insensitive, keyboard accessible and session-local",async({page})=>{
+  await page.goto("/");
+  const input=page.getByRole("textbox",{name:"Câu hỏi"});
+  await input.fill("Sự cố Đà Nẵng lần một");await input.press("Enter");
+  await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.",{exact:true})).toBeVisible();
+  await input.fill("Sự cố Đà Nẵng lần hai");await input.press("Enter");
+  await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.",{exact:true})).toHaveCount(2);
+  await page.keyboard.press("Control+K");
+  const search=page.getByRole("search").getByRole("textbox",{name:"Tìm trong cuộc trò chuyện"});
+  await expect(search).toBeFocused();
+  await search.fill("su co da nang");
+  await expect(page.locator(".search-count")).toHaveText("1 / 2");
+  await expect(page.locator(".search-selected")).toContainText("Sự cố Đà Nẵng lần một");
+  await search.press("Enter");
+  await expect(page.locator(".search-count")).toHaveText("2 / 2");
+  await expect(page.locator(".search-selected")).toContainText("Sự cố Đà Nẵng lần hai");
+  await search.press("Shift+Enter");
+  await expect(page.locator(".search-count")).toHaveText("1 / 2");
+  await search.fill("không tồn tại");
+  await expect(page.locator(".search-count")).toHaveText("Không có kết quả");
+  await search.press("Escape");
+  await expect(page.getByRole("search")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Tìm trong cuộc trò chuyện"})).toBeFocused();
+  await page.getByRole("button",{name:"Cuộc trò chuyện mới",exact:true}).click();
+  await page.keyboard.press("Control+K");
+  await page.getByRole("search").getByRole("textbox").fill("da nang");
+  await expect(page.locator(".search-count")).toHaveText("Không có kết quả");
+});
+
+test("auto-title, in-memory rename and quick actions keep the active conversation",async({page})=>{
+  await page.goto("/");
+  const input=page.getByRole("textbox",{name:"Câu hỏi"});
+  await input.fill("Connector nào đang gặp sự cố cần xử lý ngay bây giờ?");await input.press("Enter");
+  await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.",{exact:true})).toBeVisible();
+  const activeTitle=page.locator(".history.active");
+  await expect(activeTitle).not.toHaveText("Cuộc trò chuyện 1");
+  const generatedTitle=(await activeTitle.innerText()).trim();
+  expect(generatedTitle.length).toBeLessThanOrEqual(42);
+  await page.getByRole("button",{name:`Đổi tên ${generatedTitle}`}).click();
+  const rename=page.getByRole("textbox",{name:new RegExp("Tên mới cho")});
+  await rename.fill("Theo dõi connector khẩn cấp");await rename.press("Enter");
+  await expect(page.getByRole("button",{name:"Theo dõi connector khẩn cấp",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Giải thích ngắn hơn"}).click();
+  await expect(page.getByText(/Follow-up dùng đúng phiên session-1\./)).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button",{name:"Cuộc trò chuyện 1",exact:true})).toBeVisible();
+});
+
+test("verified table can filter, stably sort, reset and open fullscreen",async({page})=>{
+  await page.goto("/");
+  const input=page.getByRole("textbox",{name:"Câu hỏi"});
+  await input.fill("Table tools test");await input.press("Enter");
+  const table=page.getByRole("region",{name:"Kết quả đã xác minh"});
+  await expect(table.locator("tbody tr")).toHaveCount(3);
+  await page.getByRole("button",{name:"incident_count"}).click();
+  await expect(table.locator("tbody tr").first()).toContainText("oracle-cdc");
+  await page.getByRole("button",{name:"incident_count"}).click();
+  await expect(table.locator("tbody tr").first()).toContainText("jdbc-orders");
+  await page.getByRole("textbox",{name:"Tìm trong bảng"}).fill("ORACLE");
+  await expect(table.locator("tbody tr")).toHaveCount(1);
+  await expect(page.locator(".table-count")).toHaveText("1 / 3 dòng");
+  await page.getByRole("button",{name:"Đặt lại bộ lọc và sắp xếp"}).click();
+  await expect(table.locator("tbody tr")).toHaveCount(3);
+  const fullscreenButton=page.getByRole("button",{name:"Mở bảng toàn màn hình"});
+  await fullscreenButton.click();
+  await expect(page.getByRole("dialog",{name:"Bảng kết quả đã xác minh toàn màn hình"})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Đóng bảng toàn màn hình"})).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(fullscreenButton).toBeFocused();
 });
 
 test("HTML and all client assets contain no server credential",async({request})=>{

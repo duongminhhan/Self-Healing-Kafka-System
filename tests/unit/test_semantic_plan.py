@@ -7,13 +7,104 @@ import pytest
 
 from notebooks.evaluation.fixtures import EXPECTED, VARIANTS, create_duration_fixture
 from notebooks.shared.analytics import Snapshot
-from notebooks.shared.semantic_plan import PlanError, catalog, compile_plan
+from notebooks.shared.semantic_plan import (
+    PlanError,
+    catalog,
+    compile_plan,
+    semantic_representation,
+    validate_result_invariants,
+)
 from notebooks.shared.semantic_workflow import default_business_plan
 
 
 def run(snapshot, plan):
     compiled = compile_plan(plan, snapshot)
     return snapshot.execute(compiled.sql, compiled.parameters)
+
+
+def test_metric_catalog_and_representation_expose_complete_semantics(snapshot):
+    semantic_catalog = catalog(snapshot)
+    required = {
+        "source_fields",
+        "grain",
+        "aggregation",
+        "denominator",
+        "valid_statuses",
+        "timestamp_field",
+        "null_handling",
+        "allowed_joins",
+        "duplicate_policy",
+        "default_timezone",
+    }
+    assert semantic_catalog["metrics"]
+    assert all(required <= set(metric) for metric in semantic_catalog["metrics"].values())
+
+    plan = query(
+        dimensions=[],
+        metrics=["recovery_rate_percent"],
+        filters=[{"field": "received_at", "op": "gte", "value": "2026-09-01T00:00:00Z"}],
+        order_by=[],
+    )
+    audit = semantic_representation(plan, snapshot)["populations"][0]
+    assert audit["intent"] == "analytics_query"
+    assert audit["grain"] == {"entity": "incident_id", "dimensions": []}
+    assert audit["denominator"] == ["terminal incidents"]
+    assert audit["time_column"] == "received_at"
+    assert audit["time_range"] == plan["filters"]
+    assert audit["ambiguity_flags"] == []
+
+
+def test_result_invariants_reject_shape_and_duration_arithmetic(snapshot):
+    plan = query(
+        dimensions=[],
+        metrics=[
+            "avg_duration_minutes",
+            "matched_count",
+            "valid_duration_count",
+            "excluded_duration_count",
+        ],
+        order_by=[],
+    )
+    result = run(snapshot, plan)
+    assert validate_result_invariants(plan, result)["status"] == "passed"
+
+    broken = copy.deepcopy(result)
+    broken["rows"][0]["excluded_duration_count"] += 1
+    with pytest.raises(PlanError, match="matched = valid \\+ excluded"):
+        validate_result_invariants(plan, broken)
+
+    broken = copy.deepcopy(result)
+    broken["columns"][0]["name"] = "invented_metric"
+    with pytest.raises(PlanError, match="compiled semantic plan"):
+        validate_result_invariants(plan, broken)
+
+
+def test_plain_vietnamese_ranking_resolves_incident_grain(snapshot):
+    plan = default_business_plan("Connector nào thường xuyên gặp sự cố nhất?")
+
+    assert plan["entity"] == "incidents"
+    assert plan["metrics"] == ["incident_count"]
+    assert plan["limit"] == 1
+    assert run(snapshot, plan)["rows"][0]["root"] == "alpha"
+
+
+def test_per_root_log_count_preserves_zero_log_incidents_without_gold_lookup(snapshot):
+    plan = default_business_plan(
+        "Cho mỗi connector, tổng số healing log của mọi incident, kể cả connector không có log."
+    )
+
+    assert plan == {
+        "kind": "query",
+        "entity": "incidents",
+        "dimensions": ["root"],
+        "metrics": ["log_count"],
+        "order_by": [{"field": "root", "direction": "asc"}],
+    }
+    assert run(snapshot, plan)["rows"] == [
+        {"root": "alpha", "log_count": 2},
+        {"root": "beta", "log_count": 1},
+        {"root": "gamma", "log_count": 0},
+    ]
 
 
 @pytest.fixture
@@ -55,6 +146,89 @@ def test_join_grain_and_zero_logs(snapshot):
         {"root": "alpha", "incident_count": 1, "log_count": 2},
         {"root": "beta", "incident_count": 1, "log_count": 1},
         {"root": "gamma", "incident_count": 1, "log_count": 0},
+    ]
+
+
+def test_or_filters_are_allowlisted_without_weakening_success_constraints(snapshot):
+    result = run(
+        snapshot,
+        query(
+            dimensions=[],
+            metrics=["incident_count"],
+            order_by=[],
+            filters=[
+                {"field": "queue_status", "op": "eq", "value": "COMPLETED"},
+                {"field": "queue_status", "op": "eq", "value": "ESCALATED"},
+            ],
+            filter_logic="or",
+        ),
+    )
+    assert result["rows"] == [{"incident_count": 3}]
+    with pytest.raises(PlanError, match="conflicts with success_only"):
+        run(
+            snapshot,
+            query(
+                dimensions=[],
+                metrics=["incident_count"],
+                order_by=[],
+                filters=[
+                    {"field": "queue_status", "op": "eq", "value": "COMPLETED"},
+                    {"field": "queue_status", "op": "eq", "value": "ESCALATED"},
+                ],
+                filter_logic="or",
+                success_only=True,
+            ),
+        )
+
+
+def test_time_bucket_uses_entity_clock_and_explicit_timezone(snapshot):
+    with sqlite3.connect(snapshot.path) as connection:
+        connection.execute(
+            "UPDATE ConnectorHealingQueue SET ReceivedAt='2025-12-31T18:00:00Z' WHERE QueueId=3"
+        )
+    fresh = Snapshot(snapshot.path)
+    local = run(
+        fresh,
+        query(
+            dimensions=[],
+            metrics=["incident_count"],
+            order_by=[{"field": "time_bucket", "direction": "asc"}],
+            time_bucket={
+                "field": "received_at",
+                "unit": "day",
+                "timezone": "Asia/Ho_Chi_Minh",
+            },
+        ),
+    )
+    assert local["rows"] == [{"time_bucket": "2026-01-01", "incident_count": 3}]
+    with pytest.raises(PlanError, match="entity time field"):
+        run(
+            fresh,
+            query(
+                dimensions=[],
+                metrics=["incident_count"],
+                order_by=[],
+                time_bucket={
+                    "field": "event_at",
+                    "unit": "day",
+                    "timezone": "UTC",
+                },
+            ),
+        )
+
+
+def test_limited_ranking_adds_deterministic_dimension_tie_break(snapshot):
+    compiled = compile_plan(
+        query(
+            order_by=[{"field": "incident_count", "direction": "desc"}],
+            limit=2,
+        ),
+        snapshot,
+    )
+    assert 'ORDER BY "incident_count" DESC, "root" ASC' in compiled.sql
+    assert snapshot.execute(compiled.sql, compiled.parameters)["rows"] == [
+        {"root": "alpha", "incident_count": 1},
+        {"root": "beta", "incident_count": 1},
     ]
 
 
@@ -324,7 +498,7 @@ def test_strict_repairs_plan_without_executing_raw_sql(snapshot):
 
     client = PlansClient({"kind": "sql", "sql": "DELETE FROM ConnectorHealingQueue"}, query())
     flow = SemanticWorkflow(snapshot, client, model_id="test", mode="strict")
-    assert len(flow.query("Count incidents per root")["rows"]) == 3
+    assert len(flow.query("Compare queue volume across root connectors")["rows"]) == 3
     assert flow.metrics["sql_attempts"] == 1
     assert flow.metrics["sql_api_calls"] == 2
     assert flow.metrics["policy_rejections"] == 1
@@ -337,8 +511,10 @@ def test_strict_prompt_contains_only_approved_profiles(snapshot):
     from notebooks.shared.semantic_workflow import SemanticWorkflow
 
     client = PlansClient(query())
-    SemanticWorkflow(snapshot, client, model_id="test", mode="strict").query("Count incidents")
-    payload = json.loads(client.calls[0]["messages"][1]["content"])
+    SemanticWorkflow(snapshot, client, model_id="test", mode="strict").query(
+        "Summarize queue workload"
+    )
+    payload = json.loads(client.calls[0]["messages"][-1]["content"])
     profiles = payload["categorical_profiles"]
     assert "ConnectorHealingLogs.Severity" in profiles
     assert not profiles["ConnectorHealingLogs.Severity"]["is_allowed_value_constraint"]
@@ -360,10 +536,10 @@ def test_strict_budget_and_stale_state(snapshot):
     client = PlansClient(query(), {}, {}, {})
     flow = SemanticWorkflow(snapshot, client, model_id="test", mode="strict")
     flow.query("First")
-    with pytest.raises(QueryError, match="exhausted"):
+    with pytest.raises(QueryError, match="correction stopped early"):
         flow.query("New question")
     assert flow.result is None and flow.compiled is None
-    assert flow.metrics["sql_api_calls"] == 3
+    assert flow.metrics["sql_api_calls"] == 2
 
 
 def test_shadow_budget_separate_metrics(snapshot):
@@ -378,7 +554,7 @@ def test_shadow_budget_separate_metrics(snapshot):
         query(),
     )
     flow = SemanticWorkflow(snapshot, client, model_id="test", mode="shadow")
-    result = flow.query("Count incidents")
+    result = flow.query("Summarize queue workload")
     assert result["rows"] == [{"n": 3}]
     assert flow.shadow["status"] == "completed"
     assert flow.metrics["sql_api_calls"] == 1
@@ -413,7 +589,7 @@ def test_service_block_stops_correction_and_response(snapshot, status, mode):
     )
     flow = SemanticWorkflow(snapshot, client, model_id="test", mode=mode)
     with pytest.raises(QueryError):
-        flow.query("Count incidents")
+        flow.query("Summarize queue workload")
     calls = len(client.calls)
     assert calls == (2 if mode == "shadow" else 1)
     assert flow.service_block["http_status"] == status

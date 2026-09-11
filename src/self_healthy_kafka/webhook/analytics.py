@@ -14,7 +14,13 @@ from zoneinfo import ZoneInfo
 DATASET = "connector_incidents"
 MAX_LIMIT = 100
 MAX_RANGE_DAYS = 366
-ALLOWED_GROUP_BY = {"job_name", "connector_name", "error_code", "final_outcome"}
+ALLOWED_GROUP_BY = {
+    "job_name",
+    "connector_name",
+    "error_code",
+    "failure_code",
+    "final_outcome",
+}
 ALLOWED_METRICS = {
     "failure_count",
     "recovered_count",
@@ -111,7 +117,8 @@ def parse_plan(value: object) -> QueryPlan:
             raise ValueError("only one order_by is allowed")
         order_field = str(raw_order[0].get("field"))
         direction = str(raw_order[0].get("direction", "desc")).lower()
-    if order_field not in ALLOWED_METRICS or direction not in {"asc", "desc"}:
+    selected_metrics = {metric.name for metric in metrics}
+    if order_field not in selected_metrics or direction not in {"asc", "desc"}:
         raise ValueError("order_by is not allowed")
     try:
         limit = int(value.get("limit", 20))

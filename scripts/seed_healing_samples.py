@@ -12,15 +12,17 @@ import hashlib
 import json
 import logging
 import subprocess
-import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+if __package__:
+    from ._repo_bootstrap import bootstrap_repo_src
+else:
+    from _repo_bootstrap import bootstrap_repo_src
+
+ROOT = bootstrap_repo_src()
 
 from self_healthy_kafka.domain.models import HealthResult, HealthStatus  # noqa: E402
 from self_healthy_kafka.healing.db_state_machine import ConnectorStateMachine  # noqa: E402

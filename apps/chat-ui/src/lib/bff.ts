@@ -36,10 +36,10 @@ export async function handleChat(request:Request, settings:Settings, fetcher:typ
     catch { return fail("unauthorized",403); }
   }
   if (!request.headers.get("content-type")?.includes("application/json")) return fail("invalid_input",400);
-  let question:string;
+  let payload:{question:string;conversation_id?:string};
   try {
     const raw=await boundedText(new Response(request.body),20000);
-    question=questionSchema.parse(JSON.parse(raw)).question;
+    payload=questionSchema.parse(JSON.parse(raw));
   } catch { return fail("invalid_input",400); }
   if (!settings.url || !settings.token) return fail("configuration",503);
   let url:URL;
@@ -51,11 +51,11 @@ export async function handleChat(request:Request, settings:Settings, fetcher:typ
   if(request.signal.aborted) controller.abort();
   const timer=setTimeout(()=>{timedOut=true;controller.abort();},settings.timeoutMs);
   try {
-    const upstream=await fetcher(url,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${settings.token}`,"X-Request-ID":id},body:JSON.stringify({question}),signal:controller.signal,cache:"no-store",redirect:"error"});
+    const upstream=await fetcher(url,{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${settings.token}`,"X-Request-ID":id},body:JSON.stringify(payload),signal:controller.signal,cache:"no-store",redirect:"error"});
     const forwarded=upstream.headers.get("x-request-id");
     if(forwarded && /^[\w.:-]{1,128}$/.test(forwarded) && !forwarded.includes(settings.token)) id=forwarded;
     if(!upstream.ok) { await upstream.body?.cancel(); const status=upstream.status;
-      return fail(status===400?"invalid_input":status===401||status===403?"unauthorized":status===402||status===429?"rate_limit":"unavailable",[400,401,429,503].includes(status)?status:status===402?429:503);
+      return fail(status===400||status===422?"invalid_input":status===401||status===403?"unauthorized":status===402||status===429?"rate_limit":status===502?"invalid_response":"unavailable",[400,401,422,429,502,503].includes(status)?status:status===402?429:503);
     }
     let data;
     try { data=backendSchema.parse(scrub(JSON.parse(await boundedText(upstream,1000000)),settings.token)); }

@@ -4,7 +4,14 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from notebooks.shared.analytics import QueryError, Snapshot, Workflow, render_table, validate_claims
+from notebooks.shared.analytics import (
+    QueryError,
+    Snapshot,
+    Workflow,
+    render_table,
+    safe_normalized_question,
+    validate_claims,
+)
 
 
 @pytest.fixture
@@ -235,6 +242,7 @@ def test_response_fallback(snapshot, output):
     answer = flow.respond()
     assert answer["source"] == "verified_table_fallback"
     assert "alpha" in answer["text"] and "gamma" in answer["text"]
+    assert flow.metrics["review_queue"][0]["reason"].startswith("response_fallback:")
 
 
 def test_empty_and_truncated_skip_response_api(snapshot):
@@ -282,6 +290,25 @@ def test_successful_response_and_rerun_metrics(snapshot):
         assert flow.respond()["source"] == "huggingface"
         assert flow.metrics["response_api_calls"] == 1
         assert flow.metrics["tokens"]["response"] == {"input": 10, "output": 20}
+        assert flow.metrics["execution_result"]["returned_row_count"] == 1
+        assert flow.metrics["response_claims"] == [
+            {"status": "accepted", "evidence": [{"row": 0, "column": "root"}]}
+        ]
+
+
+def test_normalized_question_telemetry_redacts_inline_credentials(snapshot):
+    question = "Count incidents token=private-value password:also-private"
+    flow = Workflow(
+        snapshot,
+        FakeClient(sql_decision("SELECT count(*) AS n FROM queue")),
+        model_id="test",
+    )
+    flow.query(question)
+
+    normalized = flow.metrics["normalized_question"]
+    assert normalized == safe_normalized_question(question)
+    assert "private-value" not in normalized
+    assert "also-private" not in normalized
 
 
 def test_response_token_truncation(snapshot):

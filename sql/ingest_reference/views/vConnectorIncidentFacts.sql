@@ -15,6 +15,7 @@ SELECT
     END AS [FinalOutcome],
     failure.[EventType] AS [EventType],
     failure.[Severity] AS [Severity],
+    failure.[Message] AS [ErrorMessage],
     CASE WHEN failure.[Message] LIKE '%ORA-[0-9][0-9][0-9][0-9][0-9]%'
         THEN SUBSTRING(failure.[Message], CHARINDEX('ORA-', failure.[Message]), 9)
     END AS [ErrorCode]

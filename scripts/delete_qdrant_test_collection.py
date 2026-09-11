@@ -1,10 +1,19 @@
 """Preview or delete one explicitly named Qdrant test collection."""
 
+# ruff: noqa: E402 -- direct script execution must prefer this checkout's src tree.
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
+
+if __package__:
+    from ._repo_bootstrap import bootstrap_repo_src
+else:
+    from _repo_bootstrap import bootstrap_repo_src
+
+bootstrap_repo_src()
 
 from qdrant_client import QdrantClient
 

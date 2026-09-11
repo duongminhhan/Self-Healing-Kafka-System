@@ -23,12 +23,16 @@ def test_notebook_format_and_no_fixed_contract():
     source = "\n".join(c.source for c in nb.cells)
     assert "canonicalize_top_connector_facts" not in source
     assert "ollama" not in source.lower()
-    question = next(
-        n
-        for n in ast.parse(nb.cells[18].source).body
-        if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "question" for t in n.targets)
-    )
+    question_assignments = [
+        node
+        for cell in nb.cells[1:]
+        if cell.cell_type == "code"
+        for node in ast.parse(cell.source).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "question" for target in node.targets)
+    ]
+    assert len(question_assignments) == 1
+    question = question_assignments[0]
     # The user is expected to edit this question without breaking the test suite.
     assert isinstance(ast.literal_eval(question.value), str)
     assert ast.literal_eval(question.value).strip()

@@ -1,5 +1,7 @@
 """Evaluate routing offline and retrieval only during an explicit live Qdrant run."""
 
+# ruff: noqa: E402 -- direct script execution must prefer this checkout's src tree.
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+if __package__:
+    from ._repo_bootstrap import bootstrap_repo_src
+else:
+    from _repo_bootstrap import bootstrap_repo_src
+
+bootstrap_repo_src()
 
 from self_healthy_kafka.config import AnalyticsChatConfig, RagConfig
 from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJsonGenerator

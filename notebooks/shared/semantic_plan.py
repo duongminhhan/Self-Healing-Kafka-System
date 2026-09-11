@@ -206,6 +206,101 @@ METRIC_PRESENTATION = {
         "label_vi": "incident bị loại khỏi phép tính thời lượng", "unit": "incident", "provenance": "deterministic_calculation",
     },
 }
+
+# Closed, auditable metric semantics.  These rules are prompt/catalog metadata;
+# SQL generation still goes through the compiler below.  Keeping them separate
+# from presentation labels prevents a wording change from changing a measure.
+METRIC_RULES = {
+    "incident_count": {
+        "source_fields": ["incident_id"], "grain": "unique incident_id",
+        "aggregation": "count_distinct", "denominator": None,
+        "valid_statuses": None, "timestamp_field": "received_at",
+        "null_handling": "Do not count NULL incident identities",
+        "allowed_joins": ["incidents_to_events_many_to_one"],
+        "duplicate_policy": "COUNT DISTINCT incident_id",
+    },
+    "log_count": {
+        "source_fields": ["event_id"], "grain": "unique event_id",
+        "aggregation": "count", "denominator": None, "valid_statuses": None,
+        "timestamp_field": "event_at", "null_handling": "Do not count NULL event identities",
+        "allowed_joins": ["events_to_incidents_many_to_one"],
+        "duplicate_policy": "Count each event_id once at event grain",
+    },
+    "confirmed_failure_count": {
+        "source_fields": ["event_id", "event_type"], "grain": "unique event_id",
+        "aggregation": "conditional_count", "denominator": None,
+        "valid_statuses": ["HEALTH_FAILED_CONFIRMED"], "timestamp_field": "event_at",
+        "null_handling": "Ignore events without the required event type",
+        "allowed_joins": ["events_to_incidents_many_to_one"],
+        "duplicate_policy": "Count each matching event_id once",
+    },
+    "task_restart_count": {
+        "source_fields": ["event_id", "event_type"], "grain": "unique event_id",
+        "aggregation": "conditional_count", "denominator": None,
+        "valid_statuses": ["TASK_RESTART"], "timestamp_field": "event_at",
+        "null_handling": "Ignore events without the required event type",
+        "allowed_joins": ["events_to_incidents_many_to_one"],
+        "duplicate_policy": "Count each matching event_id once",
+    },
+    "connector_restart_count": {
+        "source_fields": ["event_id", "event_type"], "grain": "unique event_id",
+        "aggregation": "conditional_count", "denominator": None,
+        "valid_statuses": ["CONNECTOR_RESTART"], "timestamp_field": "event_at",
+        "null_handling": "Ignore events without the required event type",
+        "allowed_joins": ["events_to_incidents_many_to_one"],
+        "duplicate_policy": "Count each matching event_id once",
+    },
+    "recovery_count": {
+        "source_fields": ["incident_id", "outcome"], "grain": "unique incident_id",
+        "aggregation": "conditional_count_distinct", "denominator": None,
+        "valid_statuses": ["RECOVERED"], "timestamp_field": "received_at",
+        "null_handling": "Ignore NULL outcomes",
+        "allowed_joins": ["incidents_to_events_many_to_one"],
+        "duplicate_policy": "COUNT DISTINCT incident_id",
+    },
+    "recovery_rate_percent": {
+        "source_fields": ["incident_id", "outcome"], "grain": "unique incident_id",
+        "aggregation": "ratio_percent", "denominator": "terminal incidents",
+        "valid_statuses": ["RECOVERED", "FAILED", "ESCALATED"],
+        "timestamp_field": "received_at",
+        "null_handling": "Return NULL when the denominator is zero",
+        "allowed_joins": [], "duplicate_policy": "One outcome per incident_id",
+    },
+    "escalation_count": {
+        "source_fields": ["incident_id", "outcome"], "grain": "unique incident_id",
+        "aggregation": "conditional_count_distinct", "denominator": None,
+        "valid_statuses": ["ESCALATED"], "timestamp_field": "received_at",
+        "null_handling": "Ignore NULL outcomes", "allowed_joins": [],
+        "duplicate_policy": "COUNT DISTINCT incident_id",
+    },
+    "avg_duration_minutes": {
+        "source_fields": ["received_at", "completed_at"], "grain": "unique incident_id",
+        "aggregation": "mean_duration_minutes", "denominator": "valid_duration_count",
+        "valid_statuses": ["COMPLETED", "RECOVERED"], "timestamp_field": "received_at",
+        "null_handling": "Exclude missing, unparseable and negative durations; retain zero",
+        "allowed_joins": [], "duplicate_policy": "One duration per incident_id",
+    },
+    "matched_count": {
+        "source_fields": ["incident_id"], "grain": "unique incident_id",
+        "aggregation": "count_distinct", "denominator": None, "valid_statuses": None,
+        "timestamp_field": "received_at", "null_handling": "Do not count NULL identities",
+        "allowed_joins": [], "duplicate_policy": "COUNT DISTINCT incident_id",
+    },
+    "valid_duration_count": {
+        "source_fields": ["received_at", "completed_at"], "grain": "unique incident_id",
+        "aggregation": "conditional_count_distinct", "denominator": None,
+        "valid_statuses": None, "timestamp_field": "received_at",
+        "null_handling": "Count only parseable nonnegative durations",
+        "allowed_joins": [], "duplicate_policy": "Count each incident_id once",
+    },
+    "excluded_duration_count": {
+        "source_fields": ["received_at", "completed_at"], "grain": "unique incident_id",
+        "aggregation": "matched_minus_valid", "denominator": None,
+        "valid_statuses": None, "timestamp_field": "received_at",
+        "null_handling": "Missing, unparseable and negative durations are excluded",
+        "allowed_joins": [], "duplicate_policy": "Count each incident_id once",
+    },
+}
 DURATION = {
     "avg_duration_minutes",
     "matched_count",
@@ -244,7 +339,12 @@ def catalog(snapshot):
         "version": 1,
         "fields": {k: asdict(v) for k, v in fields.items()},
         "metrics": {
-            k: {**asdict(v), "presentation": METRIC_PRESENTATION[k]}
+            k: {
+                **asdict(v),
+                **METRIC_RULES[k],
+                "default_timezone": "Asia/Ho_Chi_Minh",
+                "presentation": METRIC_PRESENTATION[k],
+            }
             for k, v in metrics.items()
         },
         "success": {"queue_status": "COMPLETED", "outcome": "RECOVERED", "source": BUSINESS_SOURCE},
@@ -262,6 +362,12 @@ def catalog(snapshot):
             "ingestion": "Unavailable: the snapshot does not record database insert time.",
         },
         "timezone": "UTC; timestamp filter values must include an explicit offset",
+        "filter_logic": "All explicit filters use one allowlisted AND or OR connective; success semantics remain mandatory AND constraints.",
+        "time_bucket": {
+            "units": ["day", "week", "month"],
+            "timezones": ["UTC", "Asia/Ho_Chi_Minh"],
+            "week_definition": "Monday-start local calendar week, returned as its start date",
+        },
         "limits": {
             "plan_bytes": 16000,
             "dimensions": 8,
@@ -270,6 +376,54 @@ def catalog(snapshot):
             "rows": snapshot.row_limit,
         },
     }
+
+
+def semantic_representation(plan, snapshot):
+    """Return a complete, source-backed audit view of an accepted plan.
+
+    This representation is never compiled as SQL and contains no physical SQL
+    fragments.  It makes implicit catalog decisions visible to validation,
+    telemetry and review tooling without asking the user for column names.
+    """
+
+    semantic_catalog = catalog(snapshot)
+    children = plan.get("queries", []) if plan.get("kind") == "independent" else [plan]
+    populations = []
+    for child in children:
+        metrics = child.get("metrics", [])
+        rules = [semantic_catalog["metrics"][name] for name in metrics]
+        temporal_filters = [
+            item for item in child.get("filters", [])
+            if item.get("field") in {"received_at", "event_at", "started_at", "completed_at"}
+        ]
+        time_bucket = child.get("time_bucket") or {}
+        populations.append(
+            {
+                "intent": "analytics_query",
+                "entity": child.get("entity"),
+                "metrics": metrics,
+                "aggregation": [rule["aggregation"] for rule in rules],
+                "grain": {
+                    "entity": "incident_id" if child.get("entity") == "incidents" else "event_id",
+                    "dimensions": child.get("dimensions", []),
+                },
+                "dimensions": child.get("dimensions", []),
+                "filters": child.get("filters", []),
+                "time_range": temporal_filters,
+                "time_column": time_bucket.get("field") or (
+                    "received_at" if child.get("entity") == "incidents" else "event_at"
+                ),
+                "timezone": time_bucket.get("timezone", "Asia/Ho_Chi_Minh"),
+                "status_semantics": [rule["valid_statuses"] for rule in rules],
+                "ordering": child.get("order_by", []),
+                "limit": child.get("limit"),
+                "denominator": [rule["denominator"] for rule in rules],
+                "comparison_period": None,
+                "ambiguity_flags": [],
+                "assumptions": child.get("assumptions", []),
+            }
+        )
+    return {"kind": plan.get("kind"), "populations": populations}
 
 
 @dataclass(frozen=True)
@@ -309,11 +463,13 @@ def compile_plan(plan, snapshot):
             "dimensions",
             "metrics",
             "filters",
+            "filter_logic",
             "success_only",
             "having",
             "order_by",
             "limit",
             "latest_status",
+            "time_bucket",
             "assumptions",
         },
         {"kind", "entity", "dimensions", "metrics"},
@@ -343,8 +499,24 @@ def compile_plan(plan, snapshot):
     for flag in ("success_only", "latest_status"):
         if flag in plan and type(plan[flag]) is not bool:
             raise PlanError("Plan flags must be booleans")
+    filter_logic = plan.get("filter_logic", "and")
+    if filter_logic not in {"and", "or"}:
+        raise PlanError("filter_logic must be and or or")
+    time_bucket = plan.get("time_bucket")
+    if time_bucket is not None:
+        _keys(time_bucket, {"field", "unit", "timezone"}, {"field", "unit", "timezone"})
+        expected_time_field = "received_at" if entity == "incidents" else "event_at"
+        if (
+            time_bucket.get("field") != expected_time_field
+            or time_bucket.get("unit") not in {"day", "week", "month"}
+            or time_bucket.get("timezone") not in {"UTC", "Asia/Ho_Chi_Minh"}
+            or not metrics
+        ):
+            raise PlanError(
+                "time_bucket requires the entity time field, day/week/month, a supported timezone and a metric"
+            )
     if plan.get("latest_status") and (
-        dimensions != ["root"] or not metrics or entity != "incidents"
+        dimensions != ["root"] or not metrics or entity != "incidents" or time_bucket
     ):
         raise PlanError("Latest status requires incident aggregation by root only")
     if (
@@ -373,7 +545,8 @@ def compile_plan(plan, snapshot):
         return f'{"q" if f.table == QUEUE else "l"}."{f.column}"'
 
     filters = _list(plan.get("filters", []), 20)
-    where = []
+    user_conditions = []
+    system_conditions = []
     ops = {"eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
     for f in filters:
         _keys(f, {"field", "op", "value"}, {"field", "op"})
@@ -384,7 +557,7 @@ def compile_plan(plan, snapshot):
         if op in {"is_null", "not_null"}:
             if "value" in f:
                 raise PlanError("NULL predicates do not take values")
-            where.append(f"{col} IS {'NOT ' if op == 'not_null' else ''}NULL")
+            user_conditions.append(f"{col} IS {'NOT ' if op == 'not_null' else ''}NULL")
             continue
         if op not in ops or "value" not in f:
             raise PlanError("Unsupported filter operator or missing value")
@@ -405,9 +578,11 @@ def compile_plan(plan, snapshot):
                 value = parsed.astimezone(timezone.utc).isoformat()
             except (ValueError, OverflowError):
                 raise PlanError("Timestamp filter must be valid ISO-8601 with timezone") from None
-            where.append(f"julianday({col}) {ops[op]} julianday({bind(value)})")
+            user_conditions.append(
+                f"julianday({col}) {ops[op]} julianday({bind(value)})"
+            )
         else:
-            where.append(f"{col} {ops[op]} {bind(value)}")
+            user_conditions.append(f"{col} {ops[op]} {bind(value)}")
     if plan.get("success_only"):
         for name, value in (("queue_status", "COMPLETED"), ("outcome", "RECOVERED")):
             if any(
@@ -415,7 +590,7 @@ def compile_plan(plan, snapshot):
                 for f in filters
             ):
                 raise PlanError("Explicit status/outcome filter conflicts with success_only")
-            where.append(f"{field(name)} = {bind(value)}")
+            system_conditions.append(f"{field(name)} = {bind(value)}")
     if QUEUE not in snapshot.allowed_tables or "incident_id" not in available["fields"]:
         raise PlanError("Incident identity unavailable")
     queue_pk = [c["name"] for c in snapshot.schema[QUEUE] if c["primary_key_position"]]
@@ -444,7 +619,23 @@ def compile_plan(plan, snapshot):
         source = f'"{LOGS}" l LEFT JOIN "{QUEUE}" q ON l."QueueId"=q."QueueId"'
     else:
         source = f'"{QUEUE}" q'
-    expressions = {k: field(k) for k in dimensions}
+    expressions = {}
+    group_expressions = []
+    if time_bucket:
+        time_column = field(time_bucket["field"])
+        modifiers = ", '+7 hours'" if time_bucket["timezone"] == "Asia/Ho_Chi_Minh" else ""
+        if time_bucket["unit"] == "day":
+            bucket_expression = f"strftime('%Y-%m-%d', {time_column}{modifiers})"
+        elif time_bucket["unit"] == "week":
+            bucket_expression = (
+                f"date({time_column}{modifiers}, '-6 days', 'weekday 1')"
+            )
+        else:
+            bucket_expression = f"strftime('%Y-%m', {time_column}{modifiers})"
+        expressions["time_bucket"] = bucket_expression
+        group_expressions.append(bucket_expression)
+    expressions.update({k: field(k) for k in dimensions})
+    group_expressions.extend(field(k) for k in dimensions)
     duration = '(julianday(q."CompletedAt")-julianday(q."ReceivedAt"))*1440.0'
     valid = f"({duration}) >= 0"
     metric_sql = {
@@ -479,12 +670,18 @@ def compile_plan(plan, snapshot):
     expressions.update({k: metric_sql[k] for k in metrics})
     selected = ", ".join(f'{v} AS "{k}"' for k, v in expressions.items())
     sql = f"SELECT {selected} FROM {source}"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    if metrics and dimensions:
-        sql += " GROUP BY " + ", ".join(field(k) for k in dimensions)
+    where_groups = []
+    if user_conditions:
+        where_groups.append(
+            "(" + (" OR " if filter_logic == "or" else " AND ").join(user_conditions) + ")"
+        )
+    where_groups.extend(system_conditions)
+    if where_groups:
+        sql += " WHERE " + " AND ".join(where_groups)
+    if metrics and group_expressions:
+        sql += " GROUP BY " + ", ".join(group_expressions)
     ctes = [f"base AS ({sql})"]
-    outputs = dimensions + metrics
+    outputs = (["time_bucket"] if time_bucket else []) + dimensions + metrics
     having = _list(plan.get("having", []), 8)
     conditions = []
     for h in having:
@@ -497,7 +694,11 @@ def compile_plan(plan, snapshot):
         ):
             raise PlanError("Having requires selected metric and supported comparison")
         if "compare_to" in h:
-            if h["compare_to"] != "population_mean" or "value" in h or not dimensions:
+            if (
+                h["compare_to"] != "population_mean"
+                or "value" in h
+                or not group_expressions
+            ):
                 raise PlanError("Population mean compares grouped metric before having/limit")
             rhs = f'(SELECT AVG("{h["metric"]}") FROM base)'
         else:
@@ -534,6 +735,11 @@ def compile_plan(plan, snapshot):
             expr = f"julianday({expr})"
         ordering.append(expr + " " + order["direction"].upper())
     if ordering:
+        ordered_names = {item.split('"', 2)[1] for item in ordering}
+        if plan.get("limit") is not None and metrics:
+            for name in (["time_bucket"] if time_bucket else []) + dimensions:
+                if name not in ordered_names:
+                    ordering.append(f'"{name}" ASC')
         sql += " ORDER BY " + ", ".join(ordering)
     sql += " LIMIT " + bind(limit)
     assumptions = _list(plan.get("assumptions", []), 8)
@@ -551,7 +757,7 @@ def _compile_independent(plan, snapshot, encoded):
         raise PlanError("Independent aggregation requires two to four populations")
     columns, sources, parameters, seen = [], [], {}, set()
     for index, child in enumerate(queries):
-        _keys(child, {"kind", "entity", "dimensions", "metrics", "filters", "success_only"},
+        _keys(child, {"kind", "entity", "dimensions", "metrics", "filters", "filter_logic", "success_only"},
               {"kind", "entity", "dimensions", "metrics"})
         if child["kind"] != "query" or child["dimensions"] != [] or not child["metrics"]:
             raise PlanError("Independent populations must be ungrouped aggregate queries")
@@ -568,3 +774,106 @@ def _compile_independent(plan, snapshot, encoded):
     sql = "SELECT " + ", ".join(columns) + " FROM " + " CROSS JOIN ".join(sources)
     snapshot.validate(sql)
     return CompiledQuery(sql, parameters, json.loads(encoded), ())
+
+
+_NONNEGATIVE_INTEGER_METRICS = {
+    "incident_count",
+    "log_count",
+    "confirmed_failure_count",
+    "task_restart_count",
+    "connector_restart_count",
+    "recovery_count",
+    "escalation_count",
+    "matched_count",
+    "valid_duration_count",
+    "excluded_duration_count",
+}
+
+
+def validate_result_invariants(plan, result):
+    """Validate compiler-owned result shape and arithmetic after execution.
+
+    These checks prove internal invariants of a validated plan. They do not
+    claim that the plan perfectly captured the user's natural-language intent.
+    """
+    if not isinstance(result, dict):
+        raise PlanError("Executed result must be an object")
+    rows = result.get("rows")
+    columns = result.get("columns")
+    if not isinstance(rows, list) or not isinstance(columns, list):
+        raise PlanError("Executed result is missing rows or columns")
+    names = [column.get("name") for column in columns if isinstance(column, dict)]
+    if len(names) != len(columns) or any(not isinstance(name, str) for name in names):
+        raise PlanError("Executed result has malformed column metadata")
+    if len(names) != len(set(names)):
+        raise PlanError("Executed result contains duplicate output aliases")
+    if result.get("returned_row_count") != len(rows):
+        raise PlanError("Returned-row metadata contradicts the result rows")
+    if result.get("truncated"):
+        raise PlanError("Strict compiled result exceeded its declared row limit")
+
+    children = plan.get("queries", []) if plan.get("kind") == "independent" else [plan]
+    dimensions = [] if plan.get("kind") == "independent" else list(plan.get("dimensions", []))
+    if plan.get("time_bucket"):
+        dimensions.insert(0, "time_bucket")
+    metrics = [metric for child in children for metric in child.get("metrics", [])]
+    expected = dimensions + metrics
+    if plan.get("latest_status"):
+        expected.append("latest_queue_status")
+    if names != expected:
+        raise PlanError(
+            "Executed result columns do not match the compiled semantic plan: "
+            + ", ".join(names)
+        )
+
+    seen_groups = set()
+    integer_metrics = _NONNEGATIVE_INTEGER_METRICS & set(metrics)
+    for row in rows:
+        if not isinstance(row, dict) or list(row) != names:
+            raise PlanError("Executed result row shape contradicts column metadata")
+        group = tuple(row[name] for name in dimensions)
+        if dimensions and group in seen_groups:
+            raise PlanError("Grouped result contains duplicate dimension grain")
+        seen_groups.add(group)
+        for metric in integer_metrics:
+            value = row[metric]
+            if type(value) is not int or value < 0:
+                raise PlanError(f"{metric} must be a nonnegative integer")
+        if "recovery_rate_percent" in metrics:
+            value = row["recovery_rate_percent"]
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0 <= value <= 100
+            ):
+                raise PlanError("recovery_rate_percent must be NULL or between 0 and 100")
+        if "avg_duration_minutes" in metrics:
+            average = row["avg_duration_minutes"]
+            matched = row["matched_count"]
+            valid = row["valid_duration_count"]
+            excluded = row["excluded_duration_count"]
+            if matched != valid + excluded:
+                raise PlanError("Duration counts must satisfy matched = valid + excluded")
+            if average is None and valid != 0:
+                raise PlanError("Duration average is NULL despite valid duration rows")
+            if average is not None and (
+                not isinstance(average, (int, float))
+                or isinstance(average, bool)
+                or average < 0
+                or valid == 0
+            ):
+                raise PlanError("Duration average contradicts valid-duration evidence")
+
+    if len(rows) > int(plan.get("limit", 1000)):
+        raise PlanError("Executed result exceeds the semantic plan limit")
+    return {
+        "status": "passed",
+        "checks": [
+            "shape",
+            "row_count",
+            "declared_limit",
+            "dimension_grain",
+            "metric_domains",
+            "duration_arithmetic",
+        ],
+    }

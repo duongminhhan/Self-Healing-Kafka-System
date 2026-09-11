@@ -33,6 +33,14 @@ FILTER = obj(
     },
     ["field", "op"],
 )
+TIME_BUCKET = obj(
+    {
+        "field": {"type": "string", "enum": ["received_at", "event_at"]},
+        "unit": {"type": "string", "enum": ["day", "week", "month"]},
+        "timezone": {"type": "string", "enum": ["UTC", "Asia/Ho_Chi_Minh"]},
+    },
+    ["field", "unit", "timezone"],
+)
 HAVING = obj(
     {
         "metric": ID,
@@ -52,6 +60,8 @@ PLAN = obj(
         "dimensions": array(ID, 8),
         "metrics": array(ID, 6),
         "filters": array(FILTER, 20),
+        "filter_logic": {"type": "string", "enum": ["and", "or"]},
+        "time_bucket": TIME_BUCKET,
         "having": array(HAVING, 8),
         "order_by": array(ORDER, 12),
         "success_only": {"type": "boolean"},
@@ -116,7 +126,7 @@ def alternatives(*branches):
 
 SCALAR_PLAN = obj(
     {key: value for key, value in PLAN["properties"].items()
-     if key in {"kind", "entity", "dimensions", "metrics", "filters", "success_only"}},
+     if key in {"kind", "entity", "dimensions", "metrics", "filters", "filter_logic", "success_only"}},
     ["kind", "entity", "dimensions", "metrics"],
 )
 SCALAR_PLAN["properties"]["dimensions"] = array(ID, 0)

@@ -189,6 +189,57 @@ def test_numeric_response_equivalence_is_exact(snapshot):
     assert notebook_analytics.validate_claims(claim("Trung bình 35 phút trên 9 queue."), result)
 
 
+def test_claim_review_keeps_valid_sentence_and_rejects_only_bad_claim(snapshot):
+    result = snapshot.execute(
+        "SELECT QueueStatus AS queue_status, COUNT(*) AS incident_count "
+        "FROM ConnectorHealingQueue GROUP BY QueueStatus"
+    )
+    output = {
+        "claims": [
+            {
+                "text": "Hàng đợi COMPLETED có 2 incident.",
+                "evidence": [
+                    {"row": 0, "column": "queue_status"},
+                    {"row": 0, "column": "incident_count"},
+                ],
+            },
+            {
+                "text": "connector-fake có 99 incident.",
+                "evidence": [{"row": 0, "column": "incident_count"}],
+            },
+        ]
+    }
+    review = notebook_analytics.inspect_claims(output, result)
+    assert review["reason"] == "partial_claim_rejection"
+    assert [claim["text"] for claim in review["accepted_claims"]] == [
+        "Hàng đợi COMPLETED có 2 incident."
+    ]
+    assert review["rejected_claims"] == [
+        {"index": 1, "reason": "referenced_value_missing"}
+    ]
+    assert review["missing_evidence"] == set()
+
+
+def test_unreferenced_connector_identifier_is_rejected():
+    result = {
+        "rows": [{"root": "connector-a", "incident_count": 2}],
+        "columns": [{"name": "root"}, {"name": "incident_count"}],
+    }
+    output = {
+        "claims": [{
+            "text": "connector-a có 2 incident, còn connector-fake cũng đang lỗi.",
+            "evidence": [
+                {"row": 0, "column": "root"},
+                {"row": 0, "column": "incident_count"},
+            ],
+        }]
+    }
+    assert (
+        notebook_analytics.validate_claims(output, result)
+        == "unsupported_categorical_claim"
+    )
+
+
 def test_verified_calendar_date_is_allowed_but_extra_count_is_rejected(snapshot):
     result = snapshot.execute("SELECT COUNT(*) AS incident_count FROM ConnectorHealingQueue")
     context = {"calendar_day": {"local_date": "2026-09-05"}}
@@ -241,7 +292,9 @@ def test_friendly_fallback_leads_with_ranking_conclusion():
     }
     text = notebook_analytics.render_friendly_fallback(result, plan)
     assert text.startswith("connector-a đứng đầu với 7 lần lỗi được xác nhận.")
-    assert "| root | confirmed_failure_count |" in text
+    assert "- connector-a: 7 lần lỗi được xác nhận." in text
+    assert "- connector-b: 3 lần lỗi được xác nhận." in text
+    assert "|" not in text
 
 
 def test_friendly_fallback_renders_grouped_legacy_metrics_as_prose():

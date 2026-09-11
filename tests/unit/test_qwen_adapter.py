@@ -186,8 +186,8 @@ def test_wire_schema_never_authorizes_raw_sql_in_strict(tmp_path):
         )
     )
     flow = SemanticWorkflow(Snapshot(path), client(fake), model_id="Qwen/test", mode="strict")
-    with pytest.raises(QueryError, match="exhausted"):
-        flow.query("Count incidents")
+    with pytest.raises(QueryError, match="correction stopped early"):
+        flow.query("Summarize queue workload")
     assert flow.result is None
     assert flow.metrics["sql_attempts"] == 0
-    assert len(fake.calls) == 3
+    assert len(fake.calls) == 2

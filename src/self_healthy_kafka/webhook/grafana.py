@@ -19,7 +19,11 @@ from self_healthy_kafka.config import (
     OllamaChatConfig,
     RagConfig,
 )
-from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
+from self_healthy_kafka.webhook.analytics_chat import (
+    AnalyticsChatService,
+    ChatInputError,
+    ChatPlanningError,
+)
 from self_healthy_kafka.webhook.chat_api import ChatReadApi
 from self_healthy_kafka.webhook.ollama_chat import OllamaChatService
 from self_healthy_kafka.webhook.security import (
@@ -412,10 +416,34 @@ class GrafanaWebhookService:
                     if not isinstance(question, str):
                         self._json_response(HTTPStatus.BAD_REQUEST, {"error": "question must be a string"})
                         return
+                    conversation_id = payload.get("conversation_id")
+                    if conversation_id is not None and not isinstance(conversation_id, str):
+                        self._json_response(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "conversation_id must be a string"},
+                        )
+                        return
                     try:
-                        result = service._analytics_chat.ask(question)
-                    except ValueError as exc:
+                        result = (
+                            service._analytics_chat.ask(
+                                question,
+                                conversation_id=conversation_id,
+                            )
+                            if conversation_id is not None
+                            else service._analytics_chat.ask(question)
+                        )
+                    except ChatInputError as exc:
                         self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    except ChatPlanningError:
+                        logger.exception(
+                            "Analytics chat planner returned an invalid response",
+                            extra={"event": "analytics_chat_planning_failed"},
+                        )
+                        self._json_response(
+                            HTTPStatus.BAD_GATEWAY,
+                            {"error": "analytics planner returned an invalid response"},
+                        )
                         return
                     except Exception:
                         logger.exception("Analytics chat request failed", extra={"event": "analytics_chat_failed"})

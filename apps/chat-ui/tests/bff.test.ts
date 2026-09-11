@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { handleChat } from "../src/lib/bff";
 
 const settings = { url: "http://127.0.0.1:8080/api/v1/chat", token: "test-server-secret", timeoutMs: 1000 };
-function request(question: unknown = "  Connector nào lỗi?  ", signal?: AbortSignal) {
-  return new Request("http://localhost:3000/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }), signal });
+function request(question: unknown = "  Connector nào lỗi?  ", signal?: AbortSignal, conversationId?: unknown) {
+  return new Request("http://localhost:3000/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, ...(conversationId===undefined?{}:{conversation_id:conversationId}) }), signal });
 }
 const pending = vi.fn<typeof fetch>((_, init) => new Promise((_, reject) => {
   const signal = init?.signal;
@@ -27,15 +27,27 @@ describe("chat BFF", () => {
     expect(JSON.stringify(audit.mock.calls)).not.toContain(settings.token);
     expect(JSON.stringify(audit.mock.calls)).not.toContain("Connector nào");
   });
+  it("forwards a validated conversation id and accepts structured context metadata", async () => {
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có dữ liệu.",conversation:{id:"conversation-1",context_used:true,action:"continue"}}));
+    const response=await handleChat(request("Tiếp theo thì sao?",undefined,"conversation-1"),settings,fetcher);
+    expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toEqual({question:"Tiếp theo thì sao?",conversation_id:"conversation-1"});
+    expect(await response.json()).toMatchObject({conversation:{id:"conversation-1",context_used:true,action:"continue"}});
+  });
+  it.each(["contains space","/unsafe","x".repeat(129),10])("rejects invalid conversation id %# before calling backend",async conversationId=>{
+    const fetcher=vi.fn<typeof fetch>();
+    expect((await handleChat(request("Câu hỏi",undefined,conversationId),settings,fetcher)).status).toBe(400);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it.each(["", "   ", "x".repeat(4001), null, 10])("rejects invalid question %# before calling backend", async question => {
     const fetcher = vi.fn<typeof fetch>();
     expect((await handleChat(request(question), settings, fetcher)).status).toBe(400);
     expect(fetcher).not.toHaveBeenCalled();
   });
-  it.each([400, 401, 429, 500, 503])("sanitizes upstream HTTP %i without retries", async status => {
+  it.each([400, 401, 429, 500, 502, 503])("sanitizes upstream HTTP %i without retries", async status => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("Traceback password=secret", { status }));
     const response = await handleChat(request(), settings, fetcher);
     expect(response.status).toBe(status === 500 ? 503 : status);
+    if(status===502) expect((await response.clone().json()).error.code).toBe("invalid_response");
     expect(await response.text()).not.toMatch(/Traceback|password/);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });

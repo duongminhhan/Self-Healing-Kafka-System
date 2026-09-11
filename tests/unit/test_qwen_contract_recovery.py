@@ -74,7 +74,7 @@ def flow_for(tmp_path, values, **kwargs):
 def test_reject_then_repair(tmp_path, mode, value, detail):
     valid = PLAN if mode == "strict" else SQL
     flow, transport = flow_for(tmp_path, [value, valid], mode=mode)
-    assert flow.query("Count all incidents")["rows"]
+    assert flow.query("Summarize queue workload")["rows"]
     assert flow.metrics["sql_attempts"] == 1
     assert flow.metrics["sql_api_calls"] == 2
     assert detail in str(flow.trace)
@@ -168,7 +168,7 @@ def test_review_accept_restores_interpretation_of_pending_result(tmp_path):
 def test_truncated_complete_json_not_used_and_budget_grows(tmp_path, mode):
     value = PLAN if mode == "strict" else SQL
     flow, transport = flow_for(tmp_path, [("length", value), value], mode=mode)
-    assert flow.query("Count incidents")["rows"]
+    assert flow.query("Summarize queue workload")["rows"]
     assert [c["max_tokens"] for c in transport.calls] == [2048, 4096]
     assert flow.metrics["sql_attempts"] == 1
     assert flow.sql_max_tokens == 2048
@@ -185,7 +185,7 @@ def test_exhaustion_and_explicit_limits(tmp_path, initial, ceiling, expected):
         tmp_path, [("length", SQL)] * 3, sql_max_tokens=initial, sql_token_ceiling=ceiling
     )
     with pytest.raises(QueryError, match="exhausted"):
-        flow.query("Count incidents")
+        flow.query("Summarize queue workload")
     assert [c["max_tokens"] for c in transport.calls] == expected
     assert flow.metrics["sql_attempts"] == 0
     with pytest.raises(QueryError, match="no current evidence"):
@@ -202,8 +202,8 @@ def test_provider_cap_and_reset(tmp_path):
         model_output_token_limit=900,
         response_max_tokens=900,
     )
-    flow.query("Count incidents")
-    flow.query("Count incidents again")
+    flow.query("Summarize queue workload")
+    flow.query("Summarize queue workload again")
     assert [c["max_tokens"] for c in transport.calls] == [600, 900, 600]
     with pytest.raises(ValueError, match="ceiling"):
         SemanticWorkflow(
@@ -244,7 +244,7 @@ def test_valid_response_budget_is_sent_unchanged(tmp_path, response_budget):
         model_output_token_limit=900,
         response_max_tokens=response_budget,
     )
-    flow.query("Count incidents")
+    flow.query("Summarize queue workload")
     answer = flow.respond()
 
     assert answer["source"] == "huggingface"
@@ -260,7 +260,7 @@ def test_response_without_api_call_preserves_prior_call_diagnostics(tmp_path):
         ]
     }
     flow, transport = flow_for(tmp_path, [SQL, response])
-    flow.query("Count incidents")
+    flow.query("Summarize queue workload")
     assert flow.respond()["source"] == "huggingface"
     prior_calls = json.loads(json.dumps(flow.metrics["calls"]))
     assert prior_calls[-1]["response_source"] == "huggingface"
@@ -280,7 +280,7 @@ def test_response_without_api_call_preserves_prior_call_diagnostics(tmp_path):
 
 def test_shadow_uses_distinct_contracts_and_remaining_budget(tmp_path):
     flow, transport = flow_for(tmp_path, [SQL, ("length", PLAN), PLAN], mode="shadow")
-    flow.query("Count incidents")
+    flow.query("Summarize queue workload")
     assert flow.metrics["total_sql_api_calls"] == 3
     assert [c["response_format"]["json_schema"]["name"] for c in transport.calls] == [
         "qwen_legacy_generation",
@@ -297,7 +297,7 @@ def test_format_rejection_spends_one_of_three_calls(tmp_path):
         response=httpx.Response(400),
     )
     flow, transport = flow_for(tmp_path, [error, ("length", SQL), SQL])
-    assert flow.query("Count incidents")["rows"]
+    assert flow.query("Summarize queue workload")["rows"]
     assert len(transport.calls) == 3
     assert "response_format" in transport.calls[0]
     assert all("response_format" not in c for c in transport.calls[1:])
@@ -313,7 +313,7 @@ def test_service_failure_no_correction_or_response(tmp_path, status):
     )
     flow, transport = flow_for(tmp_path, [error])
     with pytest.raises(QueryError):
-        flow.query("Count incidents")
+        flow.query("Summarize queue workload")
     with pytest.raises(QueryError):
         flow.respond()
     assert len(transport.calls) == 1
@@ -325,7 +325,7 @@ def test_service_failure_no_correction_or_response(tmp_path, status):
 def test_timeout_is_one_call(tmp_path, mode):
     flow, transport = flow_for(tmp_path, [httpx.ReadTimeout("PRIVATE")], mode=mode)
     with pytest.raises(QueryError):
-        flow.query("Count incidents")
+        flow.query("Summarize queue workload")
     assert len(transport.calls) == 1
     assert flow.metrics["calls"][0]["service_error"]["category"] == "timeout"
     assert flow.result is None

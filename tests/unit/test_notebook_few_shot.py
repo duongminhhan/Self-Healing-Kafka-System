@@ -106,7 +106,7 @@ def test_enabled_and_disabled_preserve_actual_question(tmp_path):
         client = Client()
         flow = Workflow(Snapshot(path), client, model_id="test", few_shot=enabled)
         assert flow.query("Show the real value")["rows"] == [{"value": 42}]
-        assert len(client.messages) == (2 + 2 * len(SQL_EXAMPLES) if enabled else 2)
+        assert len(client.messages) == (2 + 2 * 3 if enabled else 2)
         assert json.loads(client.messages[-1]["content"])["question"] == "Show the real value"
         assert set(json.loads(client.messages[-1]["content"])["context"]["tables"]) == {
             "real_table"

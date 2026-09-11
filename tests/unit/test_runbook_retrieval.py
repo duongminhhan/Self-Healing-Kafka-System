@@ -11,6 +11,7 @@ from self_healthy_kafka.rag.models import (
     RetrievedChunk,
     SearchDiagnostics,
 )
+from self_healthy_kafka.rag.payload_indexes import PAYLOAD_INDEX_TYPES
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
 
@@ -90,11 +91,16 @@ def _collection_info(*, hybrid=False, payload_schema=None):
     if hybrid:
         vectors = {"dense": vectors}
         sparse_vectors = {"sparse": models.SparseVectorParams(modifier=models.Modifier.IDF)}
+    if payload_schema is None:
+        payload_schema = {
+            field: SimpleNamespace(data_type=models.PayloadSchemaType(field_type))
+            for field, field_type in PAYLOAD_INDEX_TYPES.items()
+        }
     return SimpleNamespace(
         config=SimpleNamespace(
             params=SimpleNamespace(vectors=vectors, sparse_vectors=sparse_vectors)
         ),
-        payload_schema=payload_schema or {},
+        payload_schema=payload_schema,
     )
 
 
@@ -769,6 +775,131 @@ def test_runbook_diversification_round_robins_and_caps_each_runbook():
     assert store.last_search_diagnostics.unique_runbook_count == 2
     assert store.last_search_diagnostics.duplicate_chunks_removed == 0
     assert store.last_search_diagnostics.selected_runbook_ids == ("RB-A", "RB-B")
+    assert store.last_search_diagnostics.diversification_applied is True
+
+
+def test_remediation_query_keeps_diagnostics_and_recovery_from_top_runbook():
+    class Store:
+        last_search_diagnostics = SearchDiagnostics(
+            search_mode="hybrid",
+            collection="v2",
+            dense_model="dense",
+            sparse_model="sparse",
+        )
+
+        def search(self, query, *, limit, score_threshold):
+            return [
+                _chunk("symptoms", 0.99, "symptoms", runbook_id="RB-ORA"),
+                _chunk("verification", 0.98, "verification", runbook_id="RB-ORA"),
+                _chunk("preconditions", 0.97, "preconditions", runbook_id="RB-ORA"),
+                _chunk("diagnostics", 0.70, "diagnostic_steps", runbook_id="RB-ORA"),
+                _chunk("recovery", 0.60, "recovery_steps", runbook_id="RB-ORA"),
+            ]
+
+    store = Store()
+    found = RunbookRetriever(
+        _config(top_k=3, evidence_gate_enabled=False), store
+    ).retrieve(RetrievalQuery("Cách xử lý lỗi ORA-01013 là gì?"))
+
+    assert [item.section for item in found[:2]] == [
+        "diagnostic_steps",
+        "recovery_steps",
+    ]
+    assert store.last_search_diagnostics.requested_sections == (
+        "diagnostic_steps",
+        "recovery_steps",
+    )
+    assert store.last_search_diagnostics.section_coverage_applied is True
+    assert set(store.last_search_diagnostics.selected_sections) >= {
+        "diagnostic_steps",
+        "recovery_steps",
+    }
+
+
+def test_error_meaning_query_keeps_symptoms_from_top_runbook():
+    class Store:
+        def search(self, query, *, limit, score_threshold):
+            return [
+                _chunk("verification", 0.99, "verification", runbook_id="RB-ORA"),
+                _chunk("symptoms", 0.60, "symptoms", runbook_id="RB-ORA"),
+            ]
+
+    found = RunbookRetriever(
+        _config(top_k=1, evidence_gate_enabled=False), Store()
+    ).retrieve(RetrievalQuery("Nội dung lỗi đầy đủ của ORA-01013 là gì?"))
+
+    assert [item.section for item in found] == ["symptoms"]
+
+
+def test_exhausted_retry_remediation_also_keeps_escalation_section():
+    class Store:
+        def search(self, query, *, limit, score_threshold):
+            return [
+                _chunk("symptoms", 0.99, "symptoms", runbook_id="RB-KC"),
+                _chunk("diagnostics", 0.80, "diagnostic_steps", runbook_id="RB-KC"),
+                _chunk("recovery", 0.70, "recovery_steps", runbook_id="RB-KC"),
+                _chunk("escalation", 0.60, "escalation", runbook_id="RB-KC"),
+            ]
+
+    found = RunbookRetriever(
+        _config(top_k=3, evidence_gate_enabled=False), Store()
+    ).retrieve(RetrievalQuery("Quy trình xử lý khi healing đã retry hết là gì?"))
+
+    assert [item.section for item in found] == [
+        "diagnostic_steps",
+        "recovery_steps",
+        "escalation",
+    ]
+
+
+def test_explicit_multi_domain_question_diversifies_without_global_setting():
+    class Store:
+        last_search_diagnostics = SearchDiagnostics(
+            search_mode="dense",
+            collection="v1",
+            dense_model="dense",
+        )
+
+        def search(self, query, *, limit, score_threshold):
+            return [
+                _chunk(
+                    "sr-1",
+                    0.99,
+                    runbook_id="RB-SR",
+                    title="Schema Registry authentication failure",
+                ),
+                _chunk(
+                    "sr-2",
+                    0.98,
+                    "diagnostic_steps",
+                    runbook_id="RB-SR",
+                    title="Schema Registry authentication failure",
+                ),
+                _chunk(
+                    "wrong-oracle",
+                    0.95,
+                    runbook_id="RB-ORACLE-CANCELLED",
+                    title="Oracle operation cancelled",
+                ),
+                _chunk(
+                    "oracle-1",
+                    0.90,
+                    runbook_id="RB-ORACLE",
+                    title="Oracle source authentication failure",
+                ),
+            ]
+
+    store = Store()
+    found = RunbookRetriever(
+        _config(top_k=2, diversification_enabled=False, evidence_gate_enabled=False),
+        store,
+    ).retrieve(
+        RetrievalQuery(
+            "Runbook lỗi xác thực khi chưa biết từ Oracle hay Schema Registry?"
+        )
+    )
+
+    assert [item.runbook_id for item in found] == ["RB-SR", "RB-ORACLE"]
     assert store.last_search_diagnostics.diversification_applied is True
 
 

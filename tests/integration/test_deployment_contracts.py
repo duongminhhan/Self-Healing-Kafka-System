@@ -68,7 +68,11 @@ def test_python_package_exposes_direct_runtime_command():
     run_script = (ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
 
     assert 'self-healthy-kafka = "self_healthy_kafka.main:main"' in project
-    assert "python -m self_healthy_kafka.main" in run_script
+    assert '"${BOOTSTRAP_SCRIPT}" --check' in run_script
+    assert (
+        'exec "${PYTHON_BIN}" "${BOOTSTRAP_SCRIPT}" '
+        "--run-module self_healthy_kafka.main"
+    ) in run_script
 
 
 def test_runtime_has_no_custom_metrics_or_topic_lag_modules():

@@ -10,12 +10,13 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    IF @Limit < 1 OR @Limit > 100
-        SET @Limit = 100;
+    IF @Limit < 1 OR @Limit > 1001
+        SET @Limit = 1001;
 
     SELECT TOP (@Limit)
         [IncidentId], [JobName], [ConnectorName], [FailureAt], [RecoveredAt],
-        [FinalOutcome], [EventType], [Severity], [ErrorCode], [CompletedAt], [QueueStatus]
+        [FinalOutcome], [EventType], [Severity], [ErrorCode], [ErrorMessage],
+        [CompletedAt], [QueueStatus]
     FROM [dbo].[vConnectorIncidentFacts]
     WHERE (@FromAt IS NULL OR [FailureAt] >= @FromAt)
       AND (@ToAt IS NULL OR [FailureAt] < @ToAt)

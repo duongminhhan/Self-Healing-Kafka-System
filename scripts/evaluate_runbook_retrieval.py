@@ -1,5 +1,7 @@
 """Tune and compare dense/hybrid Runbook retrieval without calling an answer LLM."""
 
+# ruff: noqa: E402 -- direct script execution must prefer this checkout's src tree.
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,13 @@ from dataclasses import replace
 from itertools import product
 from pathlib import Path
 from typing import Any
+
+if __package__:
+    from ._repo_bootstrap import bootstrap_repo_src
+else:
+    from _repo_bootstrap import bootstrap_repo_src
+
+bootstrap_repo_src()
 
 from self_healthy_kafka.config import RagConfig
 from self_healthy_kafka.rag.evaluation import (

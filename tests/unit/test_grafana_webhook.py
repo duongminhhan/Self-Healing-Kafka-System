@@ -7,6 +7,8 @@ import json
 import threading
 import time
 
+import pytest
+
 from self_healthy_kafka.config import (
     AnalyticsChatConfig,
     ChatApiConfig,
@@ -14,6 +16,7 @@ from self_healthy_kafka.config import (
     OllamaChatConfig,
     RagConfig,
 )
+from self_healthy_kafka.webhook.analytics_chat import ChatInputError, ChatPlanningError
 from self_healthy_kafka.webhook.grafana import (
     GrafanaWebhookService,
     parse_grafana_alerts,
@@ -391,6 +394,65 @@ def test_existing_chat_endpoint_returns_rag_metadata_without_exposing_credential
         assert payload["citations"][0]["runbook_id"] == "RB-TEST-001"
         assert "hf-private" not in json.dumps(payload)
         assert "qdrant-private" not in json.dumps(payload)
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_message"),
+    [
+        (
+            ChatInputError("question must contain between 1 and 4000 characters"),
+            400,
+            "question must contain between 1 and 4000 characters",
+        ),
+        (
+            ChatPlanningError("private upstream model output"),
+            502,
+            "analytics planner returned an invalid response",
+        ),
+    ],
+)
+def test_chat_endpoint_distinguishes_input_errors_from_planner_failures(
+    error, expected_status, expected_message
+):
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        analytics_chat_config=AnalyticsChatConfig(
+            enabled=True,
+            timezone="UTC",
+            hf_endpoint_url="https://hf.example",
+            hf_token="hf-private",
+            hf_model_id="qwen-test",
+        ),
+        incident_facts=lambda **_kwargs: [],
+    )
+
+    def raise_error(_question):
+        raise error
+
+    service._analytics_chat.ask = raise_error
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "POST",
+            "/api/v1/chat",
+            body=json.dumps({"question": "test"}),
+            headers={
+                "Authorization": "Bearer chat-test-token",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == expected_status
+        assert payload["error"] == expected_message
+        assert "private upstream model output" not in json.dumps(payload)
     finally:
         service.close()
 

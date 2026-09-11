@@ -221,4 +221,182 @@ HOLDOUT = [
     },
 ]
 
-SEMANTIC_CASES = GOLD + HOLDOUT
+GOLD_EXTENDED = [
+    {
+        "id": "gold-natural-incident-ranking-typo",
+        "split": "gold",
+        "question": "Connnector nao thuong xuyen gap su co nhat?",
+        "reference_sql": (
+            "SELECT RootConnectorName,COUNT(DISTINCT QueueId) FROM ConnectorHealingQueue "
+            "GROUP BY RootConnectorName ORDER BY COUNT(DISTINCT QueueId) DESC,"
+            "RootConnectorName ASC LIMIT 1"
+        ),
+        "plan": plan(
+            limit=1,
+            order_by=[
+                {"field": "incident_count", "direction": "desc"},
+                {"field": "root", "direction": "asc"},
+            ],
+        ),
+    },
+    {
+        "id": "gold-status-or-filter",
+        "split": "gold",
+        "question": "Có bao nhiêu sự cố đang chờ hoặc đã chuyển cấp?",
+        "reference_sql": (
+            "SELECT COUNT(DISTINCT QueueId) FROM ConnectorHealingQueue "
+            "WHERE QueueStatus='WAITING' OR QueueStatus='ESCALATED'"
+        ),
+        "plan": plan(
+            dimensions=[],
+            metrics=["incident_count"],
+            filters=[
+                {"field": "queue_status", "op": "eq", "value": "WAITING"},
+                {"field": "queue_status", "op": "eq", "value": "ESCALATED"},
+            ],
+            filter_logic="or",
+            order_by=[],
+        ),
+    },
+    {
+        "id": "gold-daily-incident-buckets-vietnam",
+        "split": "gold",
+        "question": "Mỗi ngày hệ thống nhận bao nhiêu sự cố?",
+        "reference_sql": (
+            "SELECT strftime('%Y-%m-%d',ReceivedAt,'+7 hours'),"
+            "COUNT(DISTINCT QueueId) FROM ConnectorHealingQueue GROUP BY 1 ORDER BY 1"
+        ),
+        "plan": plan(
+            dimensions=[],
+            metrics=["incident_count"],
+            time_bucket={
+                "field": "received_at",
+                "unit": "day",
+                "timezone": "Asia/Ho_Chi_Minh",
+            },
+            order_by=[{"field": "time_bucket", "direction": "asc"}],
+        ),
+    },
+    {
+        "id": "gold-confirmed-failure-ranking-natural",
+        "split": "gold",
+        "question": "Ba connector hay báo lỗi được xác nhận nhất là những connector nào?",
+        "reference_sql": (
+            "SELECT q.RootConnectorName,COUNT(CASE WHEN l.EventType='HEALTH_FAILED_CONFIRMED' "
+            "THEN 1 END) FROM ConnectorHealingLogs l LEFT JOIN ConnectorHealingQueue q "
+            "ON l.QueueId=q.QueueId GROUP BY q.RootConnectorName ORDER BY 2 DESC,1 ASC LIMIT 3"
+        ),
+        "plan": plan(
+            entity="events",
+            metrics=["confirmed_failure_count"],
+            limit=3,
+            order_by=[
+                {"field": "confirmed_failure_count", "direction": "desc"},
+                {"field": "root", "direction": "asc"},
+            ],
+        ),
+    },
+    {
+        "id": "gold-unsupported-owner-question",
+        "split": "gold",
+        "question": "Ai là người chịu trách nhiệm xử lý connector này?",
+        "reference_sql": None,
+        "plan": None,
+        "expected_clarification": True,
+    },
+]
+
+for case in GOLD + GOLD_EXTENDED + HOLDOUT:
+    case.setdefault("expected_answer_facts", "all ordered reference-result cells")
+    case.setdefault(
+        "forbidden_claims",
+        ["unreferenced numbers", "unreferenced connector names", "live health inference"],
+    )
+    case.setdefault("snapshot_version", "evaluator runtime SHA-256")
+
+SEMANTIC_CASES = GOLD + GOLD_EXTENDED + HOLDOUT
+
+# Evaluation-only structured conversation contracts.  These fixtures exercise
+# the real HTTP analytics service with an injected read-only fact source; they
+# are mocked context tests, not live database/model accuracy measurements.
+MULTI_TURN_CASES = [
+    {
+        "id": "conversation-ranked-second",
+        "split": "gold",
+        "now_utc": "2026-09-03T12:00:00+00:00",
+        "facts": [
+            {"incident_id": "a-1", "job_name": "connector-a"},
+            {"incident_id": "a-2", "job_name": "connector-a"},
+            {"incident_id": "b-1", "job_name": "connector-b"},
+        ],
+        "turns": [
+            {
+                "conversation_id": "ranking-a",
+                "question": "Connector nào thường xuyên gặp sự cố nhất?",
+                "expected": {"context_used": False},
+            },
+            {
+                "conversation_id": "ranking-a",
+                "question": "Còn connector thứ hai thì sao?",
+                "expected": {
+                    "status": "ok",
+                    "source": "conversation_verified_result",
+                    "context_used": True,
+                    "action": "reuse_verified_ranking",
+                    "evidence_ids": ["b-1"],
+                },
+            },
+        ],
+        "expected_backend_calls": 1,
+        "forbidden_context": ["naturalized answer", "raw conversation history"],
+    },
+    {
+        "id": "conversation-isolation",
+        "split": "holdout",
+        "now_utc": "2026-09-03T12:00:00+00:00",
+        "facts": [{"incident_id": "a-1", "job_name": "connector-a"}],
+        "turns": [
+            {
+                "conversation_id": "tenant-a",
+                "question": "Connector nào gặp nhiều sự cố nhất?",
+                "expected": {"context_used": False},
+            },
+            {
+                "conversation_id": "tenant-b",
+                "question": "Còn connector thứ hai?",
+                "expected": {
+                    "status": "needs_clarification",
+                    "context_used": False,
+                    "action": "clarification_missing_context",
+                },
+            },
+        ],
+        "expected_backend_calls": 1,
+        "forbidden_context": ["tenant-a verified facts in tenant-b"],
+    },
+    {
+        "id": "conversation-time-override",
+        "split": "holdout",
+        "now_utc": "2026-09-03T12:00:00+00:00",
+        "facts": [{"incident_id": "a-1", "job_name": "connector-a"}],
+        "turns": [
+            {
+                "conversation_id": "time-a",
+                "question": "Connector nào lỗi hôm nay?",
+                "expected": {"context_used": False},
+            },
+            {
+                "conversation_id": "time-a",
+                "question": "Còn hôm qua thì sao?",
+                "expected": {
+                    "status": "ok",
+                    "context_used": True,
+                    "action": "inherit_plan_with_time_override",
+                    "time_range": {"kind": "relative", "value": "yesterday"},
+                },
+            },
+        ],
+        "expected_backend_calls": 2,
+        "forbidden_context": ["unbounded raw history", "changed metric"],
+    },
+]

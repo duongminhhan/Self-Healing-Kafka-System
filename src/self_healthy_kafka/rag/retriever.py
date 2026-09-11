@@ -27,9 +27,13 @@ class RunbookRetriever:
         return value if isinstance(value, SearchDiagnostics) else None
 
     def retrieve(self, query: RetrievalQuery) -> list[RetrievedChunk]:
+        multi_domain = _requests_multi_domain_comparison(query)
+        search_limit = self._config.effective_fusion_limit
+        if multi_domain:
+            search_limit = max(search_limit, self._config.effective_top_k * 8)
         candidates = self._store.search(
             query,
-            limit=self._config.effective_fusion_limit,
+            limit=search_limit,
             score_threshold=self._config.effective_dense_score_threshold,
         )
         diagnostics = self.last_diagnostics
@@ -53,11 +57,23 @@ class RunbookRetriever:
                 diagnostics.evidence_gate_reason = evidence_reason
             evidence_filtered = not candidates
 
+        diversify = (
+            self._config.effective_diversification_enabled
+            or multi_domain
+        )
         ranked, duplicate_count = _select_ranked_chunks(
             candidates,
             limit=self._config.effective_top_k,
             max_chunks_per_runbook=self._config.max_chunks_per_runbook,
-            diversify=self._config.effective_diversification_enabled,
+            diversify=diversify,
+        )
+        requested_sections = _requested_section_coverage(query)
+        ranked, section_coverage_applied = _ensure_section_coverage(
+            candidates,
+            ranked,
+            requested_sections=requested_sections,
+            limit=self._config.effective_top_k,
+            cover_all_selected_runbooks=multi_domain,
         )
         selected: list[RetrievedChunk] = []
         used_chars = 0
@@ -87,9 +103,14 @@ class RunbookRetriever:
                 dict.fromkeys(item.runbook_id for item in selected)
             )
             diagnostics.diversification_applied = (
-                self._config.effective_diversification_enabled and bool(candidates)
+                diversify and bool(candidates)
             )
             diagnostics.duplicate_chunks_removed = duplicate_count
+            diagnostics.requested_sections = requested_sections
+            diagnostics.selected_sections = tuple(
+                dict.fromkeys(item.section for item in selected)
+            )
+            diagnostics.section_coverage_applied = section_coverage_applied
             if not selected and diagnostics.no_result_reason is None:
                 diagnostics.no_result_reason = (
                     diagnostics.evidence_gate_reason
@@ -178,9 +199,25 @@ def _filter_explicit_issue_matches(
     issue_terms = _explicit_issue_terms(query.text)
     if not issue_terms:
         return candidates
+    issue_concepts = _issue_concepts(query.text)
+    named_domain_classes = {
+        connector_class
+        for phrase, connector_class in _RUNBOOK_DOMAIN_CLASSES.items()
+        if phrase in _normalized_text(query.text)
+    }
 
     matching_runbooks: set[str] = set()
     for candidate in candidates:
+        if (
+            len(named_domain_classes) > 1
+            and candidate.connector_class not in named_domain_classes
+        ):
+            continue
+        if issue_concepts:
+            candidate_concepts = _issue_concepts(_candidate_concept_text(candidate))
+            if issue_concepts & candidate_concepts:
+                matching_runbooks.add(candidate.runbook_id)
+            continue
         strong_terms = _lexical_terms(
             " ".join((candidate.title, candidate.connector_class, *candidate.error_codes))
         )
@@ -188,6 +225,59 @@ def _filter_explicit_issue_matches(
         if issue_terms & strong_terms or len(issue_terms & body_terms) >= min(2, len(issue_terms)):
             matching_runbooks.add(candidate.runbook_id)
     return [item for item in candidates if item.runbook_id in matching_runbooks]
+
+
+def _issue_concepts(text: str) -> set[str]:
+    normalized = _normalized_text(text)
+    concepts: set[str] = set()
+    concept_phrases = {
+        "authentication": (
+            "xac thuc",
+            "dang nhap",
+            "authentication",
+            "credential",
+            "unauthorized",
+            "logon",
+            "login",
+        ),
+        "cancellation": (
+            "huy thao tac",
+            "operation cancel",
+            "cancelled",
+            "canceled",
+        ),
+        "logminer": ("logminer", "redo log", "archived log", "missing log"),
+        "retry_exhausted": (
+            "retry het",
+            "het retry",
+            "max retries",
+            "max retry",
+            "healing escalat",
+        ),
+    }
+    for concept, phrases in concept_phrases.items():
+        if any(phrase in normalized for phrase in phrases):
+            concepts.add(concept)
+    return concepts
+
+
+def _candidate_concept_text(item: RetrievedChunk) -> str:
+    return " ".join(
+        (
+            item.title,
+            item.connector_class,
+            item.connector_type,
+            item.connector_family,
+            item.subsystem,
+            *item.error_codes,
+            *item.symptoms,
+            *item.exception_classes,
+            *item.error_signatures,
+            *item.aliases,
+            *item.user_phrases_vi,
+            *item.user_phrases_en,
+        )
+    )
 
 
 def _explicit_issue_terms(text: str) -> set[str]:
@@ -388,3 +478,168 @@ def _select_ranked_chunks(
                 if len(result) >= limit:
                     return result, duplicate_count
     return result, duplicate_count
+
+
+_REMEDIATION_PHRASES = (
+    "cach xu ly",
+    "xu ly",
+    "khac phuc",
+    "cach sua",
+    "lam gi",
+    "huong dan",
+    "remediation",
+    "recover",
+    "resolve",
+    "troubleshoot",
+    "fix",
+)
+_DETAIL_PHRASES = (
+    "noi dung loi",
+    "thong diep loi",
+    "loi day du",
+    "error message",
+    "full error",
+    "what does",
+    "la gi",
+)
+_ESCALATION_PHRASES = (
+    "retry het",
+    "het retry",
+    "max retries",
+    "max retry",
+    "escalat",
+    "nang cap",
+)
+_KNOWLEDGE_LOOKUP_PHRASES = (
+    "runbook nao",
+    "runbook ap dung",
+    "runbook phu hop",
+    "which runbook",
+)
+_RUNBOOK_DOMAIN_CLASSES = {
+    "oracle": "oracle",
+    "jdbc": "jdbc",
+    "kafka connect": "kafka-connect",
+    "schema registry": "schema-registry",
+    "network": "network",
+}
+_ALTERNATIVE_PHRASES = (" hay ", " hoac ", " or ", "chua biet", "giua")
+
+
+def _requested_section_coverage(query: RetrievalQuery) -> tuple[str, ...]:
+    normalized = _normalized_text(query.text)
+    if any(phrase in normalized for phrase in _REMEDIATION_PHRASES):
+        sections = ["diagnostic_steps", "recovery_steps"]
+        if any(phrase in normalized for phrase in _ESCALATION_PHRASES):
+            sections.append("escalation")
+        return tuple(sections)
+    if any(phrase in normalized for phrase in _KNOWLEDGE_LOOKUP_PHRASES):
+        return ("diagnostic_steps",)
+    if _technical_anchors(query) and any(
+        phrase in normalized for phrase in _DETAIL_PHRASES
+    ):
+        return ("symptoms",)
+    return ()
+
+
+def _requests_multi_domain_comparison(query: RetrievalQuery) -> bool:
+    normalized = f" {_normalized_text(query.text)} "
+    domains = {phrase for phrase in _RUNBOOK_DOMAIN_CLASSES if phrase in normalized}
+    return len(domains) > 1 and any(
+        phrase in normalized for phrase in _ALTERNATIVE_PHRASES
+    )
+
+
+def _normalized_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    ascii_text = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", ascii_text))
+
+
+def _ensure_section_coverage(
+    candidates: list[RetrievedChunk],
+    selected: list[RetrievedChunk],
+    *,
+    requested_sections: tuple[str, ...],
+    limit: int,
+    cover_all_selected_runbooks: bool,
+) -> tuple[list[RetrievedChunk], bool]:
+    """Keep intent-critical sections from the strongest retrieved runbook."""
+    if not candidates or not selected or not requested_sections or limit <= 0:
+        return selected, False
+
+    strongest = min(candidates, key=lambda item: (-item.score, item.point_id))
+    strongest_identity = (strongest.runbook_id, strongest.version)
+    result = list(selected)
+    original_positions = {item.point_id: index for index, item in enumerate(result)}
+    changed = False
+    identities = (
+        list(dict.fromkeys((item.runbook_id, item.version) for item in result))
+        if cover_all_selected_runbooks
+        else [strongest_identity]
+    )
+    ordered_candidates = sorted(
+        candidates, key=lambda value: (-value.score, value.point_id)
+    )
+    for identity in identities:
+        identity_candidates = [
+            item
+            for item in ordered_candidates
+            if (item.runbook_id, item.version) == identity
+        ]
+        for section in requested_sections:
+            if any(
+                item.section == section
+                and (item.runbook_id, item.version) == identity
+                for item in result
+            ):
+                continue
+            replacement = next(
+                (item for item in identity_candidates if item.section == section),
+                None,
+            )
+            if replacement is None:
+                continue
+            if len(result) < limit:
+                result.append(replacement)
+                changed = True
+                continue
+
+            replace_index = next(
+                (
+                    index
+                    for index in range(len(result) - 1, -1, -1)
+                    if (result[index].runbook_id, result[index].version) == identity
+                    and result[index].section not in requested_sections
+                ),
+                None,
+            )
+            if replace_index is None and not cover_all_selected_runbooks:
+                replace_index = next(
+                    (
+                        index
+                        for index in range(len(result) - 1, -1, -1)
+                        if result[index].section not in requested_sections
+                    ),
+                    None,
+                )
+            if replace_index is None:
+                continue
+            result[replace_index] = replacement
+            changed = True
+    section_priority = {
+        section: index for index, section in enumerate(requested_sections)
+    }
+    reordered = sorted(
+        result,
+        key=lambda item: (
+            section_priority.get(item.section, len(section_priority)),
+            original_positions.get(item.point_id, len(original_positions)),
+        ),
+    )
+    changed = changed or [item.point_id for item in reordered] != [
+        item.point_id for item in result
+    ]
+    return reordered[:limit], changed

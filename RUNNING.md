@@ -10,6 +10,30 @@ python -m pip install .
 cp env/prod.env.example env/prod.env
 ```
 
+On Windows PowerShell, prefer an editable install so notebooks, tests, and CLI
+commands resolve this checkout rather than a stale editable install from an old
+clone:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+Copy-Item env\prod.env.example env\prod.env
+```
+
+Verify the resolved package before debugging runtime behavior:
+
+```powershell
+python -c "import self_healthy_kafka; print(self_healthy_kafka.__file__)"
+```
+
+The printed path must be under this checkout's `src\self_healthy_kafka`. If an
+older clone is shown, repair the active interpreter with
+`python -m pip install --no-deps -e .`. Repository CLI scripts also perform an
+origin check and refuse to continue with an already-loaded package from another
+checkout.
+
 Install Microsoft ODBC Driver 18 for SQL Server on the host. Update the chosen
 environment file with the real Kafka Connect, SQL Server, webhook, and healing
 settings.
@@ -52,6 +76,28 @@ bash scripts/run.sh uat
 bash scripts/run.sh dev
 ```
 
+Windows PowerShell can start the same environments without Bash:
+
+```powershell
+.\scripts\run.ps1 prod
+.\scripts\run.ps1 uat
+.\scripts\run.ps1 dev
+```
+
+Use `-CheckOnly` to verify the interpreter and resolved package without starting
+the backend or contacting SQL Server/Kafka Connect:
+
+```powershell
+.\scripts\run.ps1 dev -CheckOnly
+```
+
+The Bash launcher supports the same non-starting check and automatically tries
+the repository virtual environment, then `python3`, then `python`:
+
+```bash
+bash scripts/run.sh dev --check-only
+```
+
 Run one connector reconciliation pass:
 
 ```bash
@@ -67,10 +113,14 @@ The application does not expose a custom metrics endpoint.
 The backend exposes `POST /api/v1/chat` on the webhook port when chat analytics
 or runbook RAG is enabled. The optional [chat UI](apps/chat-ui/README.md) runs
 separately with Next.js and assistant-ui LocalRuntime. Its server-side BFF injects
-the private `CHAT_API_TOKEN`; the browser sends only the current question. Natural
+the private `CHAT_API_TOKEN`; the browser sends only the current question and a
+bounded conversation ID, never raw chat history. Natural
 answers, citations, route/source badges and closed technical details are separate.
 The default UI binds to loopback; end-user authentication is required before
-shared deployment. Visual session history is not semantic multi-turn. Keep
+shared deployment. The backend retains only structured, verified semantic state
+(resolved plan, filters, selected connector and bounded evidence references).
+Set `CHAT_CONVERSATION_TTL_SECONDS` and `CHAT_CONVERSATION_MAX_ENTRIES` to bound
+the in-memory TTL/LRU store; restarting the backend clears it. Keep
 diagnostics disabled for ordinary users and never expose backend credentials.
 
 ## Optional Hugging Face analytics planner
@@ -128,6 +178,26 @@ metadata and secret-like values fail validation rather than entering Qdrant.
 2. Create a least-privilege Database API key and set `QDRANT_URL` and
    `QDRANT_API_KEY` only in the selected private environment file or secret
    store. Do not commit either value.
+
+Before retrieval or document synchronization, inspect the configured
+collection's vector schema and payload-index contract. The migration command is
+read-only by default:
+
+```powershell
+python -m scripts.migrate_qdrant_payload_indexes --env-file env/dev.env
+```
+
+Review `planned_changes`, then create only the missing payload indexes with:
+
+```powershell
+python -m scripts.migrate_qdrant_payload_indexes --env-file env/dev.env --apply
+```
+
+The command refuses incompatible vector or payload-index types. It never creates
+or deletes a collection and never inserts, updates, or removes runbook points.
+The backend performs read-only contract validation before retrieval; it does not
+run this migration automatically during startup or retrieval.
+
 3. Validate all Markdown and preview the number of chunks without contacting
    Qdrant:
 
@@ -455,23 +525,22 @@ curl -sS \
   "http://127.0.0.1:8080/api/v1/healing-logs?limit=20"
 ```
 
-To ask the app in normal language, install a local Ollama model, set
-`OLLAMA_ENABLED=true`, `OLLAMA_MODEL`, and `OLLAMA_CONTEXT_LOG_LIMIT` (for
-example `3`), then restart the app. For every question the app performs one
-parameterized retrieval from `ConnectorHealingLogs`, redacts the retrieved rows,
-and sends only that evidence plus the original question to Ollama. Ollama never
-receives SQL Server credentials, arbitrary SQL, or a Kafka Connect write endpoint:
+To ask the app in normal language, enable the bounded analytics planner and use
+the configured Qwen/Hugging Face chat endpoint. The model may return only a
+validated query plan; the backend executes the fixed read-only procedure with
+bound parameters. A follow-up sends the current question plus a conversation ID,
+not the browser's raw history:
 
 ```bash
 curl -sS -X POST \
   -H "Authorization: Bearer $CHAT_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"question":"liệt kê top connector chết nhiều nhất"}' \
+  -d '{"question":"connector nào thường xuyên gặp sự cố nhất?","conversation_id":"demo-1"}' \
   "http://127.0.0.1:8080/api/v1/chat"
 ```
 
-For a local CPU-only Ollama container, bound generation with
-`OLLAMA_MAX_TOKENS=256`. The response contains `sources` with the exact
-redacted rows retrieved from the DB; use their log IDs to verify the answer.
+The response contains bounded `sources` and `evidence_ids`; use those identifiers
+to verify the answer. Follow with `{"question":"còn connector thứ hai?",
+"conversation_id":"demo-1"}` to exercise compatible structured context.
 See [CHATBOT_TEST_SCENARIOS.md](CHATBOT_TEST_SCENARIOS.md) for the full local
 validation procedure.

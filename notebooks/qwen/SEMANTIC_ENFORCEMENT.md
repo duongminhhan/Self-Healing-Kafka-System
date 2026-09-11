@@ -185,7 +185,7 @@ python -m notebooks.evaluation.evaluate_qwen_semantics --split holdout
 Only when billing/key are available, explicitly request charged inference:
 
 ```powershell
-python -m notebooks.evaluation.evaluate_qwen_semantics --live --modes legacy shadow strict
+python -m notebooks.evaluation.evaluate_qwen_semantics --live --modes legacy shadow strict --output "$env:TEMP\qwen-semantics-live.json"
 ```
 
 The evaluator reuses the same questions, snapshot, Qwen/provider and generation settings, rotating
@@ -193,9 +193,10 @@ mode order per question. It reports first/final execution matches, valid SQL rat
 for clear questions, latency, table versus friendly fallback, unsupported-claim rejection, API calls,
 tokens, corrections/reviews and service failures. False rejection is intentionally reported as
 not measured there: it has a labelled deterministic grounding test instead of a made-up model metric.
-HTTP 401/402/403/429 stops remaining
-modes/cases. Unrun cases are never passes. Accuracy denominators include attempted service failures
-as unsuccessful; separate service-error counters prevent attributing those failures to SQL semantics.
+HTTP 401/402/403/429 stops remaining modes/cases. Unrun cases are never passes.
+Provider failures are excluded from the accuracy denominator and reported through
+`service_error_cases` and `service_availability_rate`; generated-but-wrong semantic/SQL results
+remain accuracy failures.
 
 Gold/holdout plans are evaluation-only. Offline results measure the compiler, not Qwen. The
 ambiguous holdout is unrun offline, not passed. Auto routing, tiny data, cloud load and single-run
@@ -208,9 +209,15 @@ Qwen notebook cells from repo/provider directories. HTTP is mocked, not live-mod
 Other consumers have offline regressions. No refresh cells or live provider endpoints are used.
 
 ```powershell
-python -m pytest tests/unit/test_qwen_contract_recovery.py tests/unit/test_qwen_adapter.py tests/unit/test_qwen_semantic_integration.py tests/unit/test_semantic_plan.py tests/unit/test_notebook_analytics.py tests/unit/test_notebook_grounding.py tests/unit/test_notebook_nemotron.py -q
+python -m pytest tests/unit/test_qwen_contract_recovery.py tests/unit/test_qwen_adapter.py tests/unit/test_qwen_semantic_integration.py tests/unit/test_semantic_plan.py tests/unit/test_notebook_analytics.py tests/unit/test_notebook_grounding.py -q
+python -m notebooks.evaluation.evaluate_multi_turn_context
+python scripts/evaluate_runbook_retrieval.py --summary-only
+python scripts/evaluate_runbook_rag.py
 ```
 
 Historical generated validation reports have been removed. Run the evaluator on the
 current snapshot to obtain fresh results; offline tests do not establish live model
 accuracy or latency, and matching rows on a small fixture is not a semantic proof.
+The dated, evidence-labelled implementation report is in
+[`ACCURACY_VALIDATION.md`](ACCURACY_VALIDATION.md); regenerate its JSON inputs before
+using it for a later release decision.

@@ -62,7 +62,7 @@ def test_runbook_route_keeps_backward_compatible_response_fields():
 
     result = workflow.ask("Runbook xử lý ORA-01017 là gì?", analytics_ask=lambda _: {})
 
-    assert result["route"] == "combined"
+    assert result["route"] == "runbook"
     assert result["source"] == "deterministic_fallback"
     assert result["query_plan"] is None
     assert result["sources"] == []

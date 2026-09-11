@@ -1,7 +1,11 @@
 import { z } from "zod";
 
-export const questionSchema = z.object({ question: z.string().trim().min(1).max(4000) }).strict();
 const label = z.string().max(240);
+export const conversationIdSchema = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
+export const questionSchema = z.object({
+  question: z.string().trim().min(1).max(4000),
+  conversation_id: conversationIdSchema.optional(),
+}).strict();
 export const citationSchema = z.object({
   runbook_id: label.optional(), version: z.number().optional(), section: label.optional(),
   source: z.string().max(2000).optional(), url: z.string().max(2000).optional(), title: label.optional(),
@@ -25,6 +29,11 @@ export const backendSchema = z.object({
   diagnostics: z.record(z.string(), z.unknown()).nullish(),
   query_plan: z.record(z.string(), z.unknown()).nullish(),
   sql_evidence: z.unknown().optional(), evidence_ids: z.array(label).max(500).nullish(),
+  conversation: z.object({
+    id: conversationIdSchema,
+    context_used: z.boolean(),
+    action: label,
+  }).strict().nullish(),
 });
 export type ChatResponse = z.infer<typeof backendSchema> & {request_id?: string};
 export const errors: Record<string, string> = {
@@ -46,7 +55,7 @@ export function fallbackMessage(reason?: string | null) {
 }
 export function statusMessage(status?: string | null) {
   if(status==="no_answer") return "Chưa có đủ thông tin phù hợp để đưa ra hướng xử lý.";
-  if(status==="needs_clarification") return "Vui lòng gửi lại câu hỏi đầy đủ kèm thông tin được hỏi thêm; mỗi lượt hiện được xử lý độc lập.";
+  if(status==="needs_clarification") return "Hãy bổ sung thông tin được hỏi; câu tiếp theo có thể kế thừa ngữ cảnh đã kiểm chứng trong cuộc trò chuyện này.";
   if(status==="degraded") return "Một phần dịch vụ đang gián đoạn. Kết quả hiện tại có thể chưa đầy đủ.";
   return null;
 }

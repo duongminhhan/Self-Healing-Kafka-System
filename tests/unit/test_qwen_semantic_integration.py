@@ -17,6 +17,29 @@ from notebooks.shared.analytics import Snapshot
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _runtime_cells(notebook):
+    """Find executable cells by stable code markers, not mutable notebook positions."""
+
+    markers = (
+        "from notebooks.shared.analytics import Snapshot",
+        "from notebooks.qwen.adapter import QwenClient",
+        "workflow = SemanticWorkflow(",
+        "verified_result = workflow.query(question)",
+        "final_answer = workflow.respond()",
+    )
+    sources = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    ]
+    selected = []
+    for marker in markers:
+        matches = [source for source in sources if marker in source]
+        assert len(matches) == 1, f"Expected one notebook cell containing {marker!r}"
+        selected.append(matches[0])
+    return selected
+
+
 class Responses:
     def __init__(self, values):
         self.values = iter(values)
@@ -52,7 +75,8 @@ def test_billing_stops_remaining_modes_and_cases(snapshot_file):
     assert len(client.calls) == 1
     assert len(report["records"]) == 6
     assert sum(r["status"] == "not_run_service_block" for r in report["records"]) == 5
-    assert report["summaries"]["legacy"]["final_execution_accuracy"] == 0
+    assert report["summaries"]["legacy"]["final_execution_accuracy"] is None
+    assert report["summaries"]["legacy"]["service_availability_rate"] == 0
     assert report["summaries"]["strict"]["final_execution_accuracy"] is None
 
 
@@ -80,6 +104,49 @@ def test_evaluation_reports_false_clarification_on_clear_questions():
     summary = summarize(records, ("strict",))["strict"]
     assert summary["clarification_rate_on_clear_questions"] == 1.0
     assert summary["clarification_accuracy"] == 1.0
+
+
+def test_summary_separates_provider_failure_from_accuracy_and_reports_quality_metrics():
+    base_metrics = {
+        "sql_attempts": 1,
+        "valid_sql_attempts": 1,
+        "sql_api_calls": 1,
+        "response_api_calls": 1,
+        "sql_stage_seconds": 0.2,
+        "response_stage_seconds": 0.3,
+        "correction_count": 0,
+    }
+    records = [
+        {
+            "mode": "strict", "status": "attempted", "expected_clarification": False,
+            "clarified": False, "clarification_match": True, "first_match": True,
+            "final_match": True, "fallback": True, "friendly_fallback": True,
+            "unsupported_claim_rejected": False, "accepted_unsupported_claim": False,
+            "service_errors": [], "metrics": base_metrics, "result": {"rows": [{"n": 1}]},
+            "response": {"source": "verified_table_fallback"}, "trace": [],
+            "end_to_end_seconds": 0.5,
+        },
+        {
+            "mode": "strict", "status": "attempted", "expected_clarification": False,
+            "clarified": False, "clarification_match": None, "first_match": False,
+            "final_match": False, "fallback": False, "friendly_fallback": False,
+            "unsupported_claim_rejected": False, "accepted_unsupported_claim": False,
+            "service_errors": [{"category": "billing", "http_status": 402}],
+            "metrics": base_metrics, "result": None, "response": None, "trace": [],
+            "end_to_end_seconds": 0.1,
+        },
+    ]
+    summary = summarize(records, ("strict",))["strict"]
+    assert summary["attempted"] == 2
+    assert summary["accuracy_evaluated"] == 1
+    assert summary["service_error_cases"] == 1
+    assert summary["service_availability_rate"] == 0.5
+    assert summary["final_execution_accuracy"] == 1.0
+    assert summary["fallback_rate"] == 1.0
+    assert summary["friendly_fallback_rate"] == 1.0
+    assert summary["unsupported_claim_rate"] == 0.0
+    assert summary["mean_sql_stage_seconds"] == 0.2
+    assert summary["mean_response_stage_seconds"] == 0.3
 
 
 @pytest.mark.parametrize("mode", ["legacy", "shadow", "strict"])
@@ -116,8 +183,7 @@ def test_notebook_cells_in_order_without_refresh(snapshot_file, monkeypatch, cap
     monkeypatch.chdir(ROOT if cwd == "root" else ROOT / "notebooks/qwen")
     state = {"os": os, "Path": Path, "REPO_ROOT": ROOT}
     before = hashlib.sha256(snapshot_file.read_bytes()).hexdigest()
-    for index in [10, 12, 17, 18, 19]:
-        source = "".join(nb["cells"][index]["source"])
+    for index, source in enumerate(_runtime_cells(nb)):
         assert "pyodbc.connect" not in source and "local_poc_connection_string()" not in source
         exec(compile(source, f"qwen-cell-{index}", "exec"), state)
     assert state["workflow"].mode == mode
@@ -150,7 +216,8 @@ def test_default_mode_is_strict(snapshot_file, monkeypatch):
         "hf_model_id": "Qwen/test",
         "hf_provider": "auto",
     }
-    exec("".join(nb["cells"][17]["source"]), state)
+    setup_cell = next(source for source in _runtime_cells(nb) if "workflow = SemanticWorkflow(" in source)
+    exec(setup_cell, state)
     assert state["workflow"].mode == "strict"
 
 
@@ -223,9 +290,9 @@ def test_notebook_through_real_hf_sdk_mock_http(snapshot_file, monkeypatch, caps
     state = {"os": os, "Path": Path, "REPO_ROOT": ROOT}
     with httpx.Client(transport=httpx.MockTransport(handler)) as session:
         monkeypatch.setattr(sdk, "get_session", lambda: session)
-        for index in [10, 12, 17, 18, 19]:
+        for index, source in enumerate(_runtime_cells(nb)):
             exec(
-                compile("".join(nb["cells"][index]["source"]), f"qwen-cell-{index}", "exec"), state
+                compile(source, f"qwen-cell-{index}", "exec"), state
             )
     assert len(requests) == {"legacy": 2, "strict": 1, "shadow": 2}[mode]
     assert all(r["response_format"]["type"] == "json_schema" for r in requests)

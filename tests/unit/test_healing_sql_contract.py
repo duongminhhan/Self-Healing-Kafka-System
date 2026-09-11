@@ -34,3 +34,8 @@ def test_recovery_projection_requires_both_success_fields():
     assert "q.[CompletedAt] AS [CompletedAt]" in source
     assert "q.[QueueStatus] = 'COMPLETED' AND q.[FinalOutcome] = 'RECOVERED'" in source
     assert "THEN q.[CompletedAt] END AS [RecoveredAt]" in source
+    assert "failure.[Message] AS [ErrorMessage]" in source
+
+    procedure = (SQL / "stored-procedures/spGetConnectorIncidentFacts.sql").read_text()
+    assert "[ErrorMessage]" in procedure
+    assert "@Limit > 1001" in procedure

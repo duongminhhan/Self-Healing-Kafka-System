@@ -1,5 +1,7 @@
 """Build and promote one versioned Hybrid Runbook collection after a passing holdout."""
 
+# ruff: noqa: E402 -- direct script execution must prefer this checkout's src tree.
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from ._repo_bootstrap import bootstrap_repo_src
+else:
+    from _repo_bootstrap import bootstrap_repo_src
+
+bootstrap_repo_src()
+
 from self_healthy_kafka.config import RagConfig
 from self_healthy_kafka.rag.evaluation import (
     GoldRetrievalCase,
@@ -19,25 +28,9 @@ from self_healthy_kafka.rag.evaluation import (
 )
 from self_healthy_kafka.rag.ingestion import RunbookIndexer
 from self_healthy_kafka.rag.models import RetrievalQuery
+from self_healthy_kafka.rag.payload_indexes import inspect_payload_indexes
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
-
-REQUIRED_PAYLOAD_INDEXES = {
-    "tenant_id",
-    "status",
-    "environment",
-    "connector_class",
-    "connector_type",
-    "connector_family",
-    "subsystem",
-    "error_codes",
-    "exception_classes",
-    "config_keys",
-    "runbook_id",
-    "source",
-    "version",
-    "schema_version",
-}
 
 
 def main() -> int:
@@ -119,6 +112,8 @@ def main() -> int:
         timeout=int(config.request_timeout_seconds),
     )
     store = QdrantRunbookStore(config, client=client)
+    store.ensure_collection()
+    _, created_payload_indexes = store.apply_missing_payload_indexes()
     indexer = RunbookIndexer(store, max_chunk_chars=config.max_chunk_chars)
     preview = indexer.index(args.root, tenant_id=args.tenant_id, dry_run=True)
     if preview.errors:
@@ -147,9 +142,12 @@ def main() -> int:
             f"document count mismatch for tenant: expected {preview.inserted}, observed {count}"
         )
     info = client.get_collection(args.collection)
-    missing_indexes = sorted(REQUIRED_PAYLOAD_INDEXES - set(info.payload_schema or {}))
-    if missing_indexes:
-        parser.error("missing payload indexes: " + ", ".join(missing_indexes))
+    payload_index_plan = inspect_payload_indexes(info.payload_schema or {})
+    if not payload_index_plan.valid:
+        parser.error(
+            "invalid payload indexes: "
+            + json.dumps(payload_index_plan.to_dict(), sort_keys=True)
+        )
 
     smoke = _run_smoke_cases(
         load_gold_retrieval(args.dataset),
@@ -207,6 +205,7 @@ def main() -> int:
                 "index_report": indexed.to_dict(),
                 "document_count": count,
                 "payload_indexes_valid": True,
+                "created_payload_indexes": list(created_payload_indexes),
                 "smoke_cases": smoke,
                 "previous_collection": previous,
                 "changed": changed,

@@ -155,6 +155,8 @@ class AnalyticsChatConfig:
     hf_token: str = os.getenv("HF_CHAT_TOKEN", "")
     hf_model_id: str = os.getenv("HF_CHAT_MODEL_ID", "")
     hf_request_timeout_seconds: float = float(os.getenv("HF_CHAT_REQUEST_TIMEOUT_SECONDS", "30"))
+    conversation_ttl_seconds: int = int(os.getenv("CHAT_CONVERSATION_TTL_SECONDS", "1800"))
+    conversation_max_entries: int = int(os.getenv("CHAT_CONVERSATION_MAX_ENTRIES", "500"))
 
 
 @dataclass
