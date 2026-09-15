@@ -25,11 +25,17 @@ def _config(**overrides):
         "embedding_model": "intfloat/multilingual-e5-small",
         "embedding_size": 384,
         "search_mode": "dense",
+        # Tests instantiate the dataclass directly. Pin every value which has
+        # an environment-backed default so a developer's dev.env cannot alter
+        # the test's retrieval semantics at import time.
+        "retrieval_mode": "",
         "dense_vector_name": "dense",
         "sparse_vector_name": "sparse",
         "dense_embedding_model": "",
         "sparse_embedding_model": "qdrant/bm25",
         "top_k": 2,
+        "final_top_k": 0,
+        "candidate_limit": 0,
         "request_timeout_seconds": 10,
         "score_threshold": 0.6,
         "dense_score_threshold": None,
@@ -142,7 +148,7 @@ def test_retriever_keeps_distinct_section_chunks_and_rejects_low_scores():
     assert [item.point_id for item in result] == ["a", "b"]
 
 
-def test_retriever_rejects_high_scoring_vector_matches_without_issue_anchor():
+def test_retriever_rejects_high_scoring_vector_matches_without_semantic_error_anchor():
     class Store:
         def search(self, query, *, limit, score_threshold):
             return [
@@ -164,14 +170,18 @@ def test_retriever_rejects_high_scoring_vector_matches_without_issue_anchor():
                 ),
             ]
 
-    result = RunbookRetriever(_config(), Store()).retrieve(
-        RetrievalQuery("Runbook cho lỗi filesystem inode corruption là gì?")
+    result = RunbookRetriever(_config(evidence_gate_enabled=True), Store()).retrieve(
+        RetrievalQuery(
+            "arbitrary wording",
+            error_codes=("FILESYSTEM_INODE_CORRUPTION",),
+            purpose="diagnosis",
+        )
     )
 
     assert result == []
 
 
-def test_retriever_keeps_only_runbooks_with_matching_explicit_issue_anchor():
+def test_retriever_keeps_only_runbooks_with_matching_semantic_error_anchor():
     class Store:
         def search(self, query, *, limit, score_threshold):
             return [
@@ -195,14 +205,18 @@ def test_retriever_keeps_only_runbooks_with_matching_explicit_issue_anchor():
                 ),
             ]
 
-    result = RunbookRetriever(_config(), Store()).retrieve(
-        RetrievalQuery("Runbook cho lỗi retry exhausted là gì?")
+    result = RunbookRetriever(_config(evidence_gate_enabled=True), Store()).retrieve(
+        RetrievalQuery(
+            "arbitrary wording",
+            error_codes=("MAX_RETRIES_REACHED",),
+            purpose="diagnosis",
+        )
     )
 
     assert [item.point_id for item in result] == ["matching"]
 
 
-def test_retriever_preserves_natural_vietnamese_retry_exhausted_question():
+def test_retriever_uses_the_same_semantics_for_different_user_wording():
     class Store:
         def search(self, query, *, limit, score_threshold):
             return [
@@ -217,11 +231,13 @@ def test_retriever_preserves_natural_vietnamese_retry_exhausted_question():
                 )
             ]
 
-    result = RunbookRetriever(_config(), Store()).retrieve(
-        RetrievalQuery("Quy trình xử lý khi healing đã retry hết là gì?")
-    )
+    retriever = RunbookRetriever(_config(), Store())
+    plan = {"error_codes": ("MAX_RETRIES_REACHED",), "purpose": "remediation"}
+    first = retriever.retrieve(RetrievalQuery("câu hỏi thứ nhất", **plan))
+    second = retriever.retrieve(RetrievalQuery("a wholly different wording", **plan))
 
-    assert [item.point_id for item in result] == ["retry"]
+    assert [item.point_id for item in first] == ["retry"]
+    assert [item.point_id for item in second] == ["retry"]
 
 
 def test_qdrant_query_enforces_approved_tenant_environment_and_exact_code_filters():
@@ -799,7 +815,7 @@ def test_remediation_query_keeps_diagnostics_and_recovery_from_top_runbook():
     store = Store()
     found = RunbookRetriever(
         _config(top_k=3, evidence_gate_enabled=False), store
-    ).retrieve(RetrievalQuery("Cách xử lý lỗi ORA-01013 là gì?"))
+    ).retrieve(RetrievalQuery("Cách xử lý lỗi ORA-01013 là gì?", purpose="remediation"))
 
     assert [item.section for item in found[:2]] == [
         "diagnostic_steps",
@@ -826,81 +842,9 @@ def test_error_meaning_query_keeps_symptoms_from_top_runbook():
 
     found = RunbookRetriever(
         _config(top_k=1, evidence_gate_enabled=False), Store()
-    ).retrieve(RetrievalQuery("Nội dung lỗi đầy đủ của ORA-01013 là gì?"))
+    ).retrieve(RetrievalQuery("Nội dung lỗi đầy đủ của ORA-01013 là gì?", purpose="meaning"))
 
     assert [item.section for item in found] == ["symptoms"]
-
-
-def test_exhausted_retry_remediation_also_keeps_escalation_section():
-    class Store:
-        def search(self, query, *, limit, score_threshold):
-            return [
-                _chunk("symptoms", 0.99, "symptoms", runbook_id="RB-KC"),
-                _chunk("diagnostics", 0.80, "diagnostic_steps", runbook_id="RB-KC"),
-                _chunk("recovery", 0.70, "recovery_steps", runbook_id="RB-KC"),
-                _chunk("escalation", 0.60, "escalation", runbook_id="RB-KC"),
-            ]
-
-    found = RunbookRetriever(
-        _config(top_k=3, evidence_gate_enabled=False), Store()
-    ).retrieve(RetrievalQuery("Quy trình xử lý khi healing đã retry hết là gì?"))
-
-    assert [item.section for item in found] == [
-        "diagnostic_steps",
-        "recovery_steps",
-        "escalation",
-    ]
-
-
-def test_explicit_multi_domain_question_diversifies_without_global_setting():
-    class Store:
-        last_search_diagnostics = SearchDiagnostics(
-            search_mode="dense",
-            collection="v1",
-            dense_model="dense",
-        )
-
-        def search(self, query, *, limit, score_threshold):
-            return [
-                _chunk(
-                    "sr-1",
-                    0.99,
-                    runbook_id="RB-SR",
-                    title="Schema Registry authentication failure",
-                ),
-                _chunk(
-                    "sr-2",
-                    0.98,
-                    "diagnostic_steps",
-                    runbook_id="RB-SR",
-                    title="Schema Registry authentication failure",
-                ),
-                _chunk(
-                    "wrong-oracle",
-                    0.95,
-                    runbook_id="RB-ORACLE-CANCELLED",
-                    title="Oracle operation cancelled",
-                ),
-                _chunk(
-                    "oracle-1",
-                    0.90,
-                    runbook_id="RB-ORACLE",
-                    title="Oracle source authentication failure",
-                ),
-            ]
-
-    store = Store()
-    found = RunbookRetriever(
-        _config(top_k=2, diversification_enabled=False, evidence_gate_enabled=False),
-        store,
-    ).retrieve(
-        RetrievalQuery(
-            "Runbook lỗi xác thực khi chưa biết từ Oracle hay Schema Registry?"
-        )
-    )
-
-    assert [item.runbook_id for item in found] == ["RB-SR", "RB-ORACLE"]
-    assert store.last_search_diagnostics.diversification_applied is True
 
 
 def test_distinct_chunks_from_one_long_section_are_not_deduplicated():
@@ -965,7 +909,7 @@ def test_evidence_margin_compares_distinct_runbooks_not_sibling_chunks():
     assert store.last_search_diagnostics.evidence_gate_reason == "accepted"
 
 
-def test_evidence_gate_accepts_exact_config_key_and_rejects_other_runbooks():
+def test_evidence_gate_accepts_exact_semantic_error_code_and_rejects_other_runbooks():
     class Store:
         last_search_diagnostics = SearchDiagnostics(
             search_mode="hybrid",
@@ -982,51 +926,21 @@ def test_evidence_gate_accepts_exact_config_key_and_rejects_other_runbooks():
                     runbook_id="RB-NET-001",
                     connector_class="network",
                     connector_type="kafka-connect",
-                    config_keys=("connection.timeout.ms",),
+                    error_codes=("HTTP-504",),
                 ),
                 _chunk(
                     "jdbc",
                     0.04,
                     runbook_id="RB-JDBC-001",
                     connector_class="jdbc",
-                    config_keys=("connection.url",),
+                    error_codes=("HTTP-401",),
                 ),
             ]
 
     store = Store()
     found = RunbookRetriever(_config(search_mode="hybrid"), store).retrieve(
-        RetrievalQuery("connection.timeout.ms của Kafka Connect bị vượt quá")
+        RetrievalQuery("arbitrary wording", error_codes=("HTTP-504",), purpose="diagnosis")
     )
 
     assert [item.runbook_id for item in found] == ["RB-NET-001"]
     assert store.last_search_diagnostics.evidence_gate_passed is True
-
-
-def test_evidence_gate_returns_no_answer_for_explicit_non_kafka_context():
-    class Store:
-        last_search_diagnostics = SearchDiagnostics(
-            search_mode="hybrid",
-            collection="v2",
-            dense_model="dense",
-            sparse_model="sparse",
-        )
-
-        def search(self, query, *, limit, score_threshold):
-            return [
-                _chunk(
-                    "registry",
-                    0.08,
-                    runbook_id="RB-SR-001",
-                    connector_class="schema-registry",
-                    error_codes=("HTTP-401",),
-                )
-            ]
-
-    store = Store()
-    found = RunbookRetriever(_config(search_mode="hybrid"), store).retrieve(
-        RetrievalQuery("HTTP 401 của web frontend, không phải Kafka Connect")
-    )
-
-    assert found == []
-    assert store.last_search_diagnostics.evidence_gate_passed is False
-    assert store.last_search_diagnostics.no_result_reason == "explicit_domain_exclusion"

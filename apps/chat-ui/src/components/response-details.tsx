@@ -2,10 +2,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, BookOpen, ChevronDown, ChevronUp, ChevronsUpDown, Maximize2, RotateCcw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { fallbackMessage, statusMessage, safeLink, routeLabel, type ChatResponse } from "@/lib/contract";
+import { fallbackMessage, statusMessage, safeLink, type ChatResponse } from "@/lib/contract";
 import { filterAndSortRows, formatElapsedTime, type SortDirection, type UiTiming } from "@/lib/ui-utils";
 
 type VerifiedRows = NonNullable<NonNullable<ChatResponse["verified_result"]>["rows"]>;
+
+function ExecutedQuery({query}:{query:NonNullable<ChatResponse["executed_query"]>}) {
+  const [copied,setCopied]=useState(false);
+  const copy=()=>{
+    const write=navigator.clipboard?.writeText(query.display_statement);
+    write?.then(()=>{
+      setCopied(true);
+      window.setTimeout(()=>setCopied(false),1500);
+    }).catch(()=>{});
+  };
+  return <details className="disclosure executed-query">
+    <summary>Truy vấn đã chạy <span className="query-badge">T-SQL · chỉ đọc</span><ChevronDown size={14}/></summary>
+    <p>Truy vấn này đã được backend thực thi với các tham số hiển thị bên dưới.</p>
+    <div className="tech-copy"><button type="button" onClick={copy}>{copied?"Đã sao chép":"Sao chép truy vấn"}</button></div>
+    <pre><code>{query.display_statement}</code></pre>
+  </details>;
+}
 
 function VerifiedTable({rows,columns,resultId}:{rows:VerifiedRows;columns:string[];resultId:string}) {
   const [query,setQuery]=useState("");
@@ -58,16 +75,14 @@ function VerifiedTable({rows,columns,resultId}:{rows:VerifiedRows;columns:string
 }
 
 export function ResponseDetails({response,timing,resultId}:{response:ChatResponse;timing?:UiTiming;resultId:string}) {
-  const warning=statusMessage(response.status)??fallbackMessage(response.fallback_reason);
-  const technical={status:response.status,reason:response.reason,fallback_reason:response.fallback_reason,row_count:response.row_count,query_plan:response.query_plan,sql_evidence:response.sql_evidence,evidence:response.evidence,evidence_ids:response.evidence_ids,diagnostics:response.diagnostics};
+  const outcomeHandled=response.outcome==="verified_empty"||response.outcome==="cannot_verify";
+  const responseFallback=/^(?:grounding_failure|response_model_not_configured)/.test(response.fallback_reason??"");
+  const warning=statusMessage(response.status)??(outcomeHandled||responseFallback?null:fallbackMessage(response.fallback_reason));
+  const technical={outcome:response.outcome,query_executed:response.query_executed,evidence_complete:response.evidence_complete,status:response.status,reason:response.reason,fallback_reason:response.fallback_reason,row_count:response.row_count,query_plan:response.query_plan,sql_evidence:response.sql_evidence,evidence:response.evidence,analytics_evidence:response.analytics_evidence,claims:response.claims,runbook_claims:response.runbook_claims,model_usage:response.model_usage,evidence_ids:response.evidence_ids,diagnostics:response.diagnostics};
   const hasTechnical=Object.values(technical).some(value=>value!==undefined&&value!==null);
   const rows=response.verified_result?.rows??[];
   const columns=Array.from(new Set([...(response.verified_result?.columns??[]),...rows.flatMap(row=>Object.keys(row))]));
   const metadata=[
-    routeLabel(response.route)&&`Route: ${routeLabel(response.route)}`,
-    response.source&&`Nguồn: ${response.source.replaceAll("_"," ")}`,
-    (response.row_count??(rows.length||undefined))!==undefined&&`Số dòng: ${response.row_count??rows.length}`,
-    response.request_id&&`Request: ${response.request_id.slice(0,8)}`,
     timing&&`Phản hồi trong ${formatElapsedTime(timing.elapsed_ms)}`,
   ].filter(Boolean) as string[];
   return <div className="response-details">
@@ -75,6 +90,7 @@ export function ResponseDetails({response,timing,resultId}:{response:ChatRespons
     {warning&&<p className="notice">{warning}</p>}
     {!!response.recommended_runbooks?.length&&<details className="disclosure"><summary>Runbook phù hợp ({response.recommended_runbooks.length})</summary><ul>{response.recommended_runbooks.map((item,index)=><li key={index}>{item.title??item.runbook_id}<small>{item.version?`v${item.version}`:""}</small></li>)}</ul></details>}
     {!!rows.length&&<VerifiedTable rows={rows} columns={columns} resultId={resultId}/>}
+    {response.executed_query?.executed&&response.executed_query.read_only&&<ExecutedQuery query={response.executed_query}/>}
     {!!response.citations?.length&&<details className="disclosure"><summary><BookOpen size={15}/> Nguồn tham khảo ({response.citations.length}) <ChevronDown size={14}/></summary><ul>{response.citations.map((citation,index)=>{
       const url=safeLink(citation.url??citation.source);
       const label=citation.title??citation.runbook_id??"Runbook";

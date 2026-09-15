@@ -99,6 +99,7 @@ class GrafanaWebhookService:
         failure_ranking: Callable[..., list[dict[str, Any]]] | None = None,
         analytics_chat_config: AnalyticsChatConfig | None = None,
         incident_facts: Callable[..., list[dict[str, Any]]] | None = None,
+        execute_incident_query: Callable[..., list[dict[str, Any]]] | None = None,
         rag_config: RagConfig | None = None,
     ):
         self._config = config
@@ -130,6 +131,7 @@ class GrafanaWebhookService:
             AnalyticsChatService(
                 analytics_chat_config,
                 incident_facts=incident_facts or (lambda **_kwargs: []),
+                execute_incident_query=execute_incident_query,
                 rag_config=rag_config,
             )
             if analytics_chat_config is not None

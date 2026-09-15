@@ -150,11 +150,13 @@ class AnalyticsChatConfig:
         "yes",
         "on",
     }
-    timezone: str = os.getenv("CHAT_ANALYTICS_TIMEZONE", "UTC")
+    timezone: str = os.getenv("CHAT_ANALYTICS_TIMEZONE", "Asia/Ho_Chi_Minh")
     hf_endpoint_url: str = os.getenv("HF_CHAT_ENDPOINT_URL", "")
     hf_token: str = os.getenv("HF_CHAT_TOKEN", "")
     hf_model_id: str = os.getenv("HF_CHAT_MODEL_ID", "")
     hf_request_timeout_seconds: float = float(os.getenv("HF_CHAT_REQUEST_TIMEOUT_SECONDS", "30"))
+    hf_planner_max_tokens: int = int(os.getenv("HF_CHAT_PLANNER_MAX_TOKENS", "900"))
+    hf_response_max_tokens: int = int(os.getenv("HF_CHAT_RESPONSE_MAX_TOKENS", "900"))
     conversation_ttl_seconds: int = int(os.getenv("CHAT_CONVERSATION_TTL_SECONDS", "1800"))
     conversation_max_entries: int = int(os.getenv("CHAT_CONVERSATION_MAX_ENTRIES", "500"))
 

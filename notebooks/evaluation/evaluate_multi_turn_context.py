@@ -21,6 +21,7 @@ bootstrap_repo_src()
 
 from notebooks.evaluation.semantic_cases import MULTI_TURN_CASES  # noqa: E402
 from self_healthy_kafka.config import AnalyticsChatConfig  # noqa: E402
+from self_healthy_kafka.semantic.planner import SemanticPlanner  # noqa: E402
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService  # noqa: E402
 
 
@@ -28,6 +29,7 @@ def evaluate(cases=MULTI_TURN_CASES):
     records = []
     for case in cases:
         calls = []
+        raw_plans = iter(case["plans"])
 
         def facts(**kwargs):
             calls.append(kwargs)
@@ -37,6 +39,12 @@ def evaluate(cases=MULTI_TURN_CASES):
             AnalyticsChatConfig(enabled=True, timezone="UTC", hf_endpoint_url=""),
             incident_facts=facts,
             now=lambda: datetime.fromisoformat(case["now_utc"]),
+            # These are pre-authored structural fixtures, not user-language
+            # planner outputs.  Production construction keeps cue enforcement
+            # enabled; this evaluator deliberately isolates context handling.
+            semantic_planner=SemanticPlanner(
+                lambda _messages, **_kwargs: next(raw_plans), enforce_cues=False
+            ),
         )
         turn_records = []
         try:

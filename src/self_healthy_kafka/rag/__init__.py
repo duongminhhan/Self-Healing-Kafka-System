@@ -9,7 +9,6 @@ from self_healthy_kafka.rag.models import (
     RetrievalQuery,
     RetrievedChunk,
     Route,
-    RouteDecision,
     RunbookValidationError,
 )
 
@@ -22,6 +21,5 @@ __all__ = [
     "RetrievalQuery",
     "RetrievedChunk",
     "Route",
-    "RouteDecision",
     "RunbookValidationError",
 ]

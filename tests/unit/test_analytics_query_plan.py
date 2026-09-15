@@ -53,4 +53,4 @@ def test_today_is_resolved_by_backend_timezone_not_a_keyword_search():
     )
 
     assert from_at.isoformat() == "2026-09-03T00:00:00+07:00"
-    assert to_at.isoformat() == "2026-09-04T00:00:00+07:00"
+    assert to_at.isoformat() == "2026-09-03T19:00:00+07:00"

@@ -6,9 +6,12 @@ from datetime import datetime
 from typing import Any
 
 from self_healthy_kafka.redaction import redact, redact_text
+from self_healthy_kafka.semantic.tsql import is_read_only_incident_query
 from self_healthy_kafka.storage.common import json_value, rows_to_dicts
 
 logger = logging.getLogger(__name__)
+
+_COMPILED_ANALYTICS_QUERY_TIMEOUT_SECONDS = 10
 
 
 class MssqlConnectorLogRepository:
@@ -137,6 +140,32 @@ class MssqlConnectorLogRepository:
                         limit,
                     ),
                 )
+                return rows_to_dicts(cur)
+
+    def execute_compiled_incident_query(
+        self,
+        *,
+        statement: str,
+        parameters: tuple[str | int | None, ...],
+    ) -> list[dict[str, Any]]:
+        """Execute only the compiler's bounded analytics SELECT shape.
+
+        The service owns compilation and this repository independently checks
+        that a caller did not substitute DDL/DML, a stored procedure, or a
+        different database object at the last boundary before SQL Server.
+        """
+
+        if not isinstance(statement, str) or not is_read_only_incident_query(statement):
+            raise ValueError("compiled incident SQL is not an approved read-only query")
+        if not isinstance(parameters, tuple) or len(parameters) > 12:
+            raise ValueError("compiled incident SQL parameters are invalid")
+        with self._get_conn() as conn:
+            # pyodbc exposes the statement timeout on Connection, not Cursor.
+            # Assigning it here makes the bound apply to the following cursor
+            # execution without relying on a driver-specific cursor attribute.
+            conn.timeout = _COMPILED_ANALYTICS_QUERY_TIMEOUT_SECONDS
+            with conn.cursor() as cur:
+                cur.execute(statement, parameters)
                 return rows_to_dicts(cur)
 
 def _connector_log_details(

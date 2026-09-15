@@ -57,5 +57,6 @@ def build_grafana_webhook(
         failure_ranking=state_machine.db.get_failure_ranking,
         analytics_chat_config=cfg.analytics_chat,
         incident_facts=state_machine.db.list_incident_facts_for_chat,
+        execute_incident_query=state_machine.db.execute_compiled_incident_query,
         rag_config=cfg.rag,
     )

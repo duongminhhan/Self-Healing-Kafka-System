@@ -108,6 +108,17 @@ class HealingRepository:
     def list_incident_facts_for_chat(self, **filters: Any) -> list[dict[str, Any]]:
         return self._logs.list_incident_facts_for_chat(**filters)
 
+    def execute_compiled_incident_query(
+        self,
+        *,
+        statement: str,
+        parameters: tuple[str | int | None, ...],
+    ) -> list[dict[str, Any]]:
+        return self._logs.execute_compiled_incident_query(
+            statement=statement,
+            parameters=parameters,
+        )
+
     def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:
         self._connectors.update_queue_fields(queue_id, **fields)
 

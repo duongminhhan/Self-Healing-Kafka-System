@@ -1,3 +1,10 @@
+"""Runbook orchestration driven by a validated semantic plan.
+
+There is intentionally no question router in this module.  The caller supplies
+the backend-validated plan and this workflow derives the route from its data
+and guidance requirements.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -15,22 +22,31 @@ from self_healthy_kafka.rag.models import (
     Route,
     SearchDiagnostics,
 )
-from self_healthy_kafka.rag.router import RunbookRouter
 from self_healthy_kafka.rag.shadow import Retriever
 from self_healthy_kafka.redaction import redact_text
+from self_healthy_kafka.semantic.planner import SemanticPlan
 
 logger = logging.getLogger(__name__)
 
 
 def _empty_analytics_fields() -> dict[str, Any]:
-    """Keep the pre-RAG response shape for clients that render analytics fields."""
     return {
         "sources": [],
         "query_plan": None,
+        "semantic_plan": None,
         "from_at": None,
         "to_at": None,
         "row_count": 0,
+        "outcome": "cannot_verify",
+        "query_executed": False,
+        "evidence_complete": False,
+        "source_kind": "historical_incident_snapshot",
+        "snapshot_freshness": None,
+        "time_range_applied": None,
         "evidence_ids": [],
+        "analytics_evidence": [],
+        "claims": [],
+        "runbook_claims": [],
     }
 
 
@@ -41,65 +57,80 @@ class RunbookRagWorkflow:
         *,
         retriever: Retriever,
         composer: GroundedAnswerComposer,
-        router: RunbookRouter | None = None,
     ):
         self._config = config
         self._retriever = retriever
         self._composer = composer
-        self._router = router or RunbookRouter()
 
     def ask(
         self,
         question: str,
         *,
-        analytics_ask: Callable[[str], dict[str, Any]],
+        plan: SemanticPlan,
+        analytics_ask: Callable[[SemanticPlan], dict[str, Any]],
     ) -> dict[str, Any]:
         started = time.perf_counter()
-        decision = self._router.route(question)
-        if decision.needs_clarification:
+        route = plan.route
+        if plan.clarification:
             result = {
                 **_empty_analytics_fields(),
-                "answer": decision.clarification_question,
-                "route": decision.route.value,
+                "answer": plan.clarification,
+                "route": "clarification",
                 "source": "deterministic_fallback",
                 "citations": [],
                 "fallback_reason": "material_ambiguity",
                 "status": "needs_clarification",
+                "outcome": "needs_clarification",
+                "query_executed": False,
+                "evidence_complete": False,
                 "reason": "material_ambiguity",
                 "evidence": [],
                 "recommended_runbooks": [],
                 "candidates": [],
             }
-            self._log_result(decision.route, started, result, retrieval_hits=0)
+            self._log_result("clarification", started, result, retrieval_hits=0)
             return result
-        if decision.route is Route.ANALYTICS:
-            result = analytics_ask(question)
+        if route is None:
             result = {
-                **result,
-                "route": "analytics",
-                "source": "analytics",
+                **_empty_analytics_fields(),
+                "answer": "Mình chưa có yêu cầu dữ liệu hoặc hướng dẫn có thể thực thi từ câu hỏi này.",
+                "route": "unsupported",
+                "source": "deterministic_fallback",
                 "citations": [],
-                "fallback_reason": result.get("fallback_reason"),
-                "status": result.get("status") or "ok",
-                "reason": result.get("reason"),
+                "fallback_reason": "unsupported_semantic_plan",
+                "status": "no_answer",
+                "outcome": "cannot_verify",
+                "query_executed": False,
+                "evidence_complete": False,
+                "reason": "unsupported_semantic_plan",
                 "evidence": [],
                 "recommended_runbooks": [],
                 "candidates": [],
             }
-            self._log_result(decision.route, started, result, retrieval_hits=0)
+            self._log_result("unsupported", started, result, retrieval_hits=0)
+            return result
+        if route is Route.ANALYTICS:
+            result = _analytics_envelope(analytics_ask(plan))
+            self._log_result(route.value, started, result, retrieval_hits=0)
             return result
 
         analytics_result: dict[str, Any] = {}
         facts: list[dict[str, Any]] = []
-        if decision.route is Route.COMBINED:
-            analytics_result = analytics_ask(question)
+        analytics_evidence: list[dict[str, Any]] = []
+        if route is Route.COMBINED:
+            analytics_result = analytics_ask(plan)
             facts = extract_verified_facts(analytics_result)
-        error_codes = decision.error_codes or tuple(
+            analytics_evidence = _analytics_evidence(analytics_result)
+
+        guidance = plan.guidance_request
+        error_codes = guidance.error_codes or tuple(
             dict.fromkeys(
-                str(item["error_code"]).upper() for item in facts if item.get("error_code")
+                str(item.get("error_code") or item.get("failure_code") or "").upper()
+                for item in facts
+                if item.get("error_code") or item.get("failure_code")
             )
         )
-        connector_class = decision.connector_class or next(
+        connector_class = guidance.connector_class or next(
             (str(item["connector_class"]).lower() for item in facts if item.get("connector_class")),
             None,
         )
@@ -109,100 +140,93 @@ class RunbookRagWorkflow:
             environment=self._config.environment,
             connector_class=connector_class,
             error_codes=error_codes,
+            purpose=guidance.purpose,
         )
         try:
             chunks = self._retriever.retrieve(retrieval_query)
             search_diagnostics = self._retriever.last_diagnostics
         except (RagStoreError, RagConfigurationError) as exc:
             fallback_reason = (
-                "qdrant_configuration_error"
-                if isinstance(exc, RagConfigurationError)
-                else "qdrant_service_error"
+                "qdrant_configuration_error" if isinstance(exc, RagConfigurationError) else "qdrant_service_error"
             )
-            if analytics_result:
-                result = {
-                    **analytics_result,
-                    "route": decision.route.value,
-                    "source": "analytics",
-                    "citations": [],
-                    "fallback_reason": fallback_reason,
-                    "status": "degraded",
-                    "reason": fallback_reason,
-                    "evidence": [],
-                    "recommended_runbooks": [],
-                    "candidates": [],
-                }
-            else:
-                result = {
-                    **_empty_analytics_fields(),
-                    "answer": "Kho runbook hiện không truy cập được. Vui lòng thử lại sau.",
-                    "route": decision.route.value,
-                    "source": "deterministic_fallback",
-                    "citations": [],
-                    "fallback_reason": fallback_reason,
-                    "status": "degraded",
-                    "reason": fallback_reason,
-                    "evidence": [],
-                    "recommended_runbooks": [],
-                    "candidates": [],
-                }
+            result = _rag_failure_result(analytics_result, route, fallback_reason)
             self._log_result(
-                decision.route,
+                route.value,
                 started,
                 result,
                 retrieval_hits=0,
                 search_diagnostics=self._retriever.last_diagnostics,
             )
             return result
+
         composed = self._composer.compose(
             question=question,
-            route=decision.route,
+            route=route,
             analytics_facts=facts,
             chunks=chunks,
+            guidance_purpose=guidance.purpose,
+            analytics_evidence=analytics_evidence,
         )
         no_answer_reason = _no_answer_reason(search_diagnostics, composed.fallback_reason)
         recommended = _recommended_runbooks(chunks)
-        answer = composed.answer
-        if not chunks and composed.source != "analytics":
-            answer = _no_answer_message(no_answer_reason)
+        # Analytics is authoritative for every combined request, not merely a
+        # retrieval miss.  Runbook text is supplementary guidance appended to
+        # the verified data answer and is never allowed to reinterpret it.
+        keep_analytics = route is Route.COMBINED and bool(analytics_result)
+        analytics_answer = str(analytics_result.get("answer") or "").strip()
+        if keep_analytics:
+            answer = analytics_answer
+            if chunks and composed.answer.strip():
+                answer = f"{analytics_answer}\n\nHướng dẫn liên quan:\n{composed.answer.strip()}"
+            elif not chunks:
+                # This is a fixed retrieval-system outcome, not a business
+                # answer template.  Keep the verified data conclusion intact
+                # and make the missing guidance visible to the user.
+                answer = (
+                    f"{analytics_answer}\n\n"
+                    "Mình chưa tìm thấy runbook đã được phê duyệt đủ phù hợp để đề xuất bước xử lý."
+                )
+        else:
+            answer = composed.answer if chunks or composed.source == "analytics" else _no_answer_message(no_answer_reason)
+        runbook_evidence = _response_evidence(chunks, retrieval_query)
         result = {
             **_empty_analytics_fields(),
             **analytics_result,
             "answer": answer,
-            "route": decision.route.value,
-            "source": composed.source,
+            "route": route.value,
+            "source": "combined" if keep_analytics and chunks else ("analytics" if keep_analytics else composed.source),
             "citations": [item.to_dict() for item in composed.citations],
             "fallback_reason": composed.fallback_reason,
-            "status": "ok" if chunks else "no_answer",
-            "reason": (
-                None
-                if chunks
-                else no_answer_reason
+            "status": (
+                str(analytics_result.get("status") or "ok")
+                if keep_analytics else ("ok" if chunks or composed.source == "analytics" else "no_answer")
             ),
-            "evidence": _response_evidence(chunks, retrieval_query),
+            "reason": (
+                analytics_result.get("reason")
+                if keep_analytics else (None if chunks or composed.source == "analytics" else no_answer_reason)
+            ),
+            # Preserve the existing ``evidence`` runbook shape for the UI and
+            # expose typed analytics facts separately.  This avoids a breaking
+            # union while retaining both provenance packets for technical
+            # details and downstream auditing.
+            "evidence": runbook_evidence,
+            "analytics_evidence": analytics_evidence,
+            "runbook_claims": list(composed.claims),
+            "runbook_generation_attempts": composed.generation_attempts,
             "recommended_runbooks": recommended,
             "candidates": recommended,
         }
         if self._config.diagnostics_enabled:
             result["diagnostics"] = {
-                "router": decision.to_dict(),
+                "semantic_plan": plan.to_dict(),
                 "retrieval": [
-                    {
-                        "point_id": item.point_id,
-                        "runbook_id": item.runbook_id,
-                        "section": item.section,
-                        "score": round(item.score, 6),
-                    }
+                    {"point_id": item.point_id, "runbook_id": item.runbook_id, "section": item.section}
                     for item in chunks
                 ],
-                "search": (
-                    search_diagnostics.to_dict()
-                    if search_diagnostics is not None
-                    else None
-                ),
+                "search": search_diagnostics.to_dict() if search_diagnostics is not None else None,
             }
         self._log_result(
-            decision.route,
+            route.value,
             started,
             result,
             retrieval_hits=len(chunks),
@@ -217,7 +241,7 @@ class RunbookRagWorkflow:
 
     @staticmethod
     def _log_result(
-        route: Route,
+        route: str,
         started: float,
         result: dict[str, Any],
         *,
@@ -229,7 +253,7 @@ class RunbookRagWorkflow:
             "Runbook RAG request completed",
             extra={
                 "event": "runbook_rag_completed",
-                "route": route.value,
+                "route": route,
                 "source": result.get("source"),
                 "fallback_reason": result.get("fallback_reason"),
                 "retrieval_hits": retrieval_hits,
@@ -239,12 +263,64 @@ class RunbookRagWorkflow:
         )
 
 
+def _analytics_envelope(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **result,
+        "route": "analytics",
+        "source": result.get("source") or "analytics",
+        "citations": [],
+        "fallback_reason": result.get("fallback_reason"),
+        "status": result.get("status") or "ok",
+        "reason": result.get("reason"),
+        "recommended_runbooks": [],
+        "candidates": [],
+    }
+
+
+def _rag_failure_result(analytics_result: dict[str, Any], route: Route, reason: str) -> dict[str, Any]:
+    if analytics_result:
+        analytics_answer = str(analytics_result.get("answer") or "").strip()
+        return {
+            **analytics_result,
+            "answer": (
+                f"{analytics_answer}\n\n"
+                "Phần hướng dẫn chưa thể tải từ kho runbook; kết quả dữ liệu ở trên vẫn dựa trên nguồn đã xác minh."
+            ),
+            "route": route.value,
+            "source": analytics_result.get("source") or "analytics",
+            "citations": [],
+            "fallback_reason": reason,
+            # RAG availability is separate from whether the analytics evidence
+            # was complete.  Do not relabel a verified analytics answer as a
+            # data failure merely because supplementary guidance failed.
+            "status": analytics_result.get("status") or "ok",
+            "reason": reason,
+            "evidence": analytics_result.get("evidence") or [],
+            "recommended_runbooks": [],
+            "candidates": [],
+        }
+    return {
+        **_empty_analytics_fields(),
+        "answer": "Kho runbook hiện không truy cập được. Vui lòng thử lại sau.",
+        "route": route.value,
+        "source": "deterministic_fallback",
+        "citations": [],
+        "fallback_reason": reason,
+        "status": "degraded",
+        "outcome": "degraded",
+        "query_executed": False,
+        "evidence_complete": False,
+        "reason": reason,
+        "evidence": [],
+        "recommended_runbooks": [],
+        "candidates": [],
+    }
+
+
 def extract_verified_facts(result: dict[str, Any]) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for source in result.get("sources") or []:
-        if not isinstance(source, dict) or not str(source.get("source", "")).startswith(
-            "vConnectorIncidentFacts"
-        ):
+        if not isinstance(source, dict) or not str(source.get("source", "")).startswith("vConnectorIncidentFacts"):
             continue
         items = source.get("items") or []
         if isinstance(items, list):
@@ -252,22 +328,31 @@ def extract_verified_facts(result: dict[str, Any]) -> list[dict[str, Any]]:
     return bounded_verified_facts(facts)
 
 
+def _analytics_evidence(result: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list):
+        return []
+    # Evidence is built in the analytics boundary, redacted there, and bounded
+    # by the source row limit. Keep only recognisable fact packets here.
+    return [
+        item for item in evidence[:100]
+        if isinstance(item, dict) and isinstance(item.get("fact_id"), str)
+        and isinstance(item.get("metrics"), list) and isinstance(item.get("time_range"), dict)
+    ]
+
+
 def _retrieval_text(question: str, facts: list[dict[str, Any]]) -> str:
     identifiers: list[str] = []
     for item in facts[:10]:
-        for field in ("connector_name", "connector_class", "error_code", "event_type"):
+        for field in ("connector_name", "connector_class", "error_code", "failure_code", "event_type"):
             value = str(item.get(field) or "").strip()
             if value and value not in identifiers:
                 identifiers.append(value)
     suffix = " ".join(identifiers)
-    text = f"{question.strip()}\nVerified identifiers: {suffix}" if suffix else question.strip()
-    return redact_text(text)
+    return redact_text(f"{question.strip()}\nVerified identifiers: {suffix}" if suffix else question.strip())
 
 
-def _no_answer_reason(
-    diagnostics: SearchDiagnostics | None,
-    fallback_reason: str | None,
-) -> str:
+def _no_answer_reason(diagnostics: SearchDiagnostics | None, fallback_reason: str | None) -> str:
     if diagnostics is not None and diagnostics.no_result_reason:
         return diagnostics.no_result_reason
     if fallback_reason is None or fallback_reason == "no_applicable_runbook":
@@ -275,62 +360,31 @@ def _no_answer_reason(
     return fallback_reason
 
 
-def _response_evidence(
-    chunks: list[RetrievedChunk],
-    query: RetrievalQuery,
-) -> list[dict[str, Any]]:
-    """Expose bounded evidence labels to clients, never raw scores or chunk text."""
-
+def _response_evidence(chunks: list[RetrievedChunk], query: RetrievalQuery) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str]] = set()
     requested_codes = {value.upper() for value in query.error_codes}
-    normalized_query = _canonical_evidence(query.text)
     for chunk in chunks:
         identity = (chunk.runbook_id, chunk.version, chunk.section)
         if identity in seen:
             continue
         seen.add(identity)
-        matched_codes = sorted(
-            requested_codes & {str(value).upper() for value in chunk.error_codes}
-        )
-        matched_config_keys = [
-            value
-            for value in chunk.config_keys
-            if _canonical_evidence(value) in normalized_query
-        ]
-        matched_exceptions = [
-            value
-            for value in chunk.exception_classes
-            if _canonical_evidence(value) in normalized_query
-        ]
-        matched_signatures = [
-            value
-            for value in chunk.error_signatures
-            if _canonical_evidence(value) in normalized_query
-        ]
+        matched_codes = sorted(requested_codes & {str(value).upper() for value in chunk.error_codes})
         if matched_codes:
             match_basis = "error_code"
-        elif matched_config_keys:
-            match_basis = "config_key"
-        elif matched_exceptions:
-            match_basis = "exception_class"
-        elif matched_signatures:
-            match_basis = "error_signature"
         else:
-            match_basis = "semantic_or_lexical"
-        result.append(
-            {
-                "runbook_id": chunk.runbook_id,
-                "version": chunk.version,
-                "section": chunk.section,
-                "source": chunk.source,
-                "match_basis": match_basis,
-                "matched_error_codes": matched_codes,
-                "matched_config_keys": matched_config_keys[:5],
-                "matched_exception_classes": matched_exceptions[:5],
-                "matched_error_signatures": matched_signatures[:5],
-            }
-        )
+            match_basis = "semantic_plan"
+        result.append({
+            "runbook_id": chunk.runbook_id,
+            "version": chunk.version,
+            "section": chunk.section,
+            "source": chunk.source,
+            "match_basis": match_basis,
+            "matched_error_codes": matched_codes,
+            "matched_config_keys": [],
+            "matched_exception_classes": [],
+            "matched_error_signatures": [],
+        })
         if len(result) >= 10:
             break
     return result
@@ -344,33 +398,15 @@ def _recommended_runbooks(chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
         if identity in seen:
             continue
         seen.add(identity)
-        result.append(
-            {
-                "runbook_id": chunk.runbook_id,
-                "title": chunk.title,
-                "version": chunk.version,
-            }
-        )
+        result.append({"runbook_id": chunk.runbook_id, "title": chunk.title, "version": chunk.version})
         if len(result) >= 5:
             break
     return result
 
 
-def _canonical_evidence(value: str) -> str:
-    return "".join(character for character in value.casefold() if character.isalnum())
-
-
 def _no_answer_message(reason: str) -> str:
-    if reason in {"strong_anchor_not_found", "explicit_issue_guard_filtered_all"}:
-        return (
-            "Mình chưa tìm thấy runbook đã được phê duyệt khớp với mã lỗi hoặc dấu hiệu "
-            "kỹ thuật bạn cung cấp."
-        )
-    if reason in {"explicit_domain_exclusion", "insufficient_domain_evidence"}:
-        return "Câu hỏi này chưa có đủ bằng chứng liên quan đến sự cố Kafka Connect trong kho runbook."
+    if reason == "strong_anchor_not_found":
+        return "Mình chưa tìm thấy runbook đã được phê duyệt khớp với mã lỗi hoặc dấu hiệu kỹ thuật được cung cấp."
     if reason == "rank_margin_below_evidence_threshold":
-        return (
-            "Mình thấy nhiều runbook có mức phù hợp gần nhau nên chưa thể đề xuất an toàn. "
-            "Bạn vui lòng bổ sung tên loại connector hoặc một mã lỗi ngắn trong log."
-        )
-    return "Mình chưa tìm thấy runbook đủ phù hợp với lỗi được cung cấp."
+        return "Mình thấy nhiều runbook có mức phù hợp gần nhau nên chưa thể đề xuất an toàn. Bạn vui lòng bổ sung dấu hiệu kỹ thuật cụ thể."
+    return "Mình chưa tìm thấy runbook đủ phù hợp với yêu cầu này."

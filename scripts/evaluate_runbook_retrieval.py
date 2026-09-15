@@ -32,7 +32,6 @@ from self_healthy_kafka.rag.evaluation import (
 from self_healthy_kafka.rag.models import RetrievalQuery
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
-from self_healthy_kafka.rag.router import RunbookRouter
 
 _QUALITY_METRICS = (
     "recall_at_1",
@@ -75,9 +74,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=("router", "controlled"),
-        default="router",
-        help="router is end-to-end and does not use expected labels as retrieval filters.",
+        choices=("unfiltered", "controlled"),
+        default="unfiltered",
+        help="unfiltered is retrieval-only and does not use expected labels as runtime filters.",
     )
     parser.add_argument(
         "--summary-only",
@@ -248,21 +247,18 @@ def _evaluate_mode(
 ) -> dict[str, Any]:
     config.validate()
     retriever = RunbookRetriever(config, QdrantRunbookStore(config))
-    router = RunbookRouter()
-
     def retrieve(case: GoldRetrievalCase):
-        decision = router.route(case.question)
         controlled = profile == "controlled"
         filters = case.filters
         connector_class = (
             str(filters.get("connector_class") or case.expected_connector_class or "") or None
             if controlled
-            else decision.connector_class
+            else None
         )
         error_codes = (
             tuple(map(str, filters.get("error_codes") or case.expected_error_codes))
             if controlled
-            else decision.error_codes
+            else ()
         )
         chunks = retriever.retrieve(
             RetrievalQuery(

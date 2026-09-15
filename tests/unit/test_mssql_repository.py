@@ -3,6 +3,8 @@ import json
 import pytest
 
 from self_healthy_kafka.storage.mssql import HealingRepository
+from self_healthy_kafka.semantic.tsql import compile_incident_query
+from self_healthy_kafka.webhook.analytics import parse_plan
 
 
 class _Cursor:
@@ -131,6 +133,37 @@ def test_incident_facts_use_fixed_read_only_procedure_and_bound_parameters():
         "HEALTH_FAILED_CONFIRMED", "OPEN", "TOPO-A", "ORA-01013", 20,
     )
     assert rows == [{"incident_id": "incident-1"}]
+
+
+def test_compiled_incident_query_executes_only_the_approved_parameterized_cte():
+    connection = _Connection(results=[[{"root_connector_name": "orders", "incident_count": 3}]])
+    query = compile_incident_query(parse_plan({
+        "dataset": "connector_incidents",
+        "metrics": [{"name": "failure_count", "aggregation": "count_distinct_incident"}],
+        "group_by": ["job_name"],
+        "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
+        "order_by": [{"field": "failure_count", "direction": "desc"}],
+        "limit": 3,
+    }), from_at=None, to_at=None, row_limit=501)
+
+    rows = _repository(connection).execute_compiled_incident_query(
+        statement=query.statement, parameters=query.parameter_values
+    )
+
+    sql, parameters = connection.cursor_obj.executed[-1]
+    assert sql == query.statement
+    assert parameters == query.parameter_values
+    assert connection.timeout == 10
+    assert "ConnectorHealingLogs" not in sql
+    assert "EXEC " not in sql.upper()
+    assert rows == [{"root_connector_name": "orders", "incident_count": 3}]
+
+
+def test_compiled_incident_query_rejects_non_select_input_at_repository_boundary():
+    with pytest.raises(ValueError, match="approved read-only"):
+        _repository(_Connection()).execute_compiled_incident_query(
+            statement="DELETE FROM [dbo].[ConnectorHealingLogs]", parameters=()
+        )
 
 
 def test_list_connectors_reads_only_due_open_queue_items():

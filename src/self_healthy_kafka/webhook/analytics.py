@@ -21,17 +21,26 @@ ALLOWED_GROUP_BY = {
     "failure_code",
     "final_outcome",
 }
+ALLOWED_DETAILS = {
+    "error_message",
+    "connector_name",
+    "job_name",
+    "final_outcome",
+    "queue_status",
+}
 ALLOWED_METRICS = {
     "failure_count",
     "recovered_count",
     "open_count",
     "average_recovery_minutes",
+    "recovery_rate_percent",
 }
 ALLOWED_AGGREGATIONS = {
     "failure_count": "count_distinct_incident",
     "recovered_count": "count_distinct_incident",
     "open_count": "count_distinct_incident",
     "average_recovery_minutes": "average_recovery_minutes",
+    "recovery_rate_percent": "recovery_rate_percent",
 }
 ALLOWED_EVENT_TYPES = {"HEALTH_FAILED_CONFIRMED"}
 ALLOWED_OUTCOMES = {"RECOVERED", "FAILED", "ESCALATED", "OPEN"}
@@ -63,6 +72,10 @@ class QueryPlan:
     direction: str
     limit: int
     comparison: str | None
+    details: tuple[str, ...] = ()
+    # Ranking defaults to business ranks.  A fixed row count is only used when
+    # the user explicitly asks for exactly N connectors.
+    tie_policy: str = "include_ties"
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -74,7 +87,9 @@ def parse_plan(value: object) -> QueryPlan:
     """Parse and validate the only model output format accepted by the app."""
     if not isinstance(value, dict):
         raise ValueError("query plan must be a JSON object")
-    if not set(value) <= {"dataset", "metrics", "group_by", "filters", "order_by", "limit", "comparison"}:
+    if not set(value) <= {
+        "dataset", "metrics", "group_by", "filters", "order_by", "limit", "comparison", "details", "tie_policy"
+    }:
         raise ValueError("query plan contains an unsupported field")
     if value.get("dataset") != DATASET:
         raise ValueError("dataset is not allowed")
@@ -129,12 +144,22 @@ def parse_plan(value: object) -> QueryPlan:
     comparison = value.get("comparison")
     if comparison not in {None, "previous_period"}:
         raise ValueError("comparison is not allowed")
+    tie_policy = value.get("tie_policy", "include_ties")
+    if tie_policy not in {"include_ties", "exact_limit"}:
+        raise ValueError("tie_policy is not allowed")
+    if tie_policy == "exact_limit" and not raw_group_by:
+        raise ValueError("tie_policy requires a ranked dimension")
+    raw_details = value.get("details") or []
+    if not isinstance(raw_details, list) or len(raw_details) > len(ALLOWED_DETAILS):
+        raise ValueError("details are not allowed")
+    if not all(isinstance(item, str) and item in ALLOWED_DETAILS for item in raw_details):
+        raise ValueError("details are not allowed")
     return QueryPlan(
         dataset=DATASET,
         metrics=tuple(metrics), group_by=tuple(raw_group_by), time_range=time_range,
         event_types=event_types, outcomes=outcomes, connector_name=connector_name,
         error_code=error_code, order_by=order_field, direction=direction, limit=limit,
-        comparison=comparison,
+        comparison=comparison, details=tuple(dict.fromkeys(raw_details)), tie_policy=tie_policy,
     )
 
 
@@ -149,7 +174,9 @@ def resolve_time_range(time_range: TimeRange | None, *, now: datetime, timezone_
     today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     value = time_range.value
     if value == "today":
-        return today, today + timedelta(days=1)
+        # "Today" is the elapsed business day, not the entire calendar day
+        # including future rows that could be inserted later.
+        return today, local_now
     if value == "yesterday":
         return today - timedelta(days=1), today
     if value == "last_7_days":

@@ -62,6 +62,72 @@ describe("chat BFF", () => {
     expect(data.verified_result.rows).toEqual([{ count: 75 }]);
     expect(data.answer).not.toMatch(/\d/);
   });
+  it("keeps bounded structured analytics evidence and claims for technical details", async () => {
+    const fact={fact_id:"analytics:orders:1",rank:1,entity:{connector:"orders"},metrics:[{name:"failure_count",label:"số incident",value:1,unit:"incident",aggregation:"count_distinct_incident"}],details:{},detail_values:{},time_range:{from_at:null,to_at:null,timestamp:"failure_at"},status:null,grain:"aggregated connector incident facts",source:"vConnectorIncidentFacts",evidence_ids:["one"],complete:true,semantic_catalog_version:"2026-09-11.1"};
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"orders có số incident là 1.",analytics_evidence:[fact],claims:[{fact_id:"analytics:orders:1",entity:{connector:"orders"},metric:"failure_count",value:1,time_range:fact.time_range,status:null,text:"orders có số incident là 1."}],model_usage:{planning:[],analytics_response:[],runbook:[]}})));
+    const data=await response.json();
+    expect(data.analytics_evidence[0]).toMatchObject({fact_id:"analytics:orders:1",entity:{connector:"orders"},metrics:[{value:1}]});
+    expect(data.claims[0]).toMatchObject({metric:"failure_count",value:1});
+    expect(data.model_usage).toEqual({planning:[],analytics_response:[],runbook:[]});
+  });
+  it("forwards only an executed, read-only T-SQL query packet for safe display", async () => {
+    const executed_query={kind:"tsql_select",dialect:"tsql",statement:"SELECT ? AS [incident_count];",display_statement:"DECLARE @limit int = 3;\n\nSELECT @limit AS [incident_count];",parameters:[{name:"@limit",type:"int",value:3}],executed:true,read_only:true,result_shape:["incident_count"]};
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có 3 incident.",executed_query})));
+    expect(response.status).toBe(200);
+    expect((await response.json()).executed_query).toEqual(executed_query);
+  });
+  it("rejects a query packet that was not actually executed or is not read-only", async () => {
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có dữ liệu.",executed_query:{kind:"tsql_select",dialect:"tsql",statement:"SELECT 1",display_statement:"SELECT 1",parameters:[],executed:false,read_only:false,result_shape:["value"]}})));
+    expect(response.status).toBe(502);
+    expect((await response.json()).error.code).toBe("invalid_response");
+  });
+  it("forwards the public-safe execution outcome without downgrading verified empty evidence", async () => {
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      answer:"Trong snapshot hiện tại, chưa ghi nhận connector FAILED.",outcome:"verified_empty",query_executed:true,evidence_complete:true,row_count:0,
+      source_kind:"historical_incident_snapshot",time_range_applied:{from_at:"2026-09-14T00:00:00+07:00",to_at:"2026-09-14T09:00:00+07:00",timezone:"Asia/Ho_Chi_Minh",timestamp:"failure_at"},
+    })));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({outcome:"verified_empty",query_executed:true,evidence_complete:true,row_count:0});
+  });
+  it("rejects an unproven verified-empty outcome before it reaches the browser", async () => {
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      answer:"Không có connector failed.",outcome:"verified_empty",query_executed:false,evidence_complete:false,row_count:0,
+    })));
+    expect(response.status).toBe(502);
+    expect((await response.json()).error.code).toBe("invalid_response");
+  });
+  it("preserves numeric token accounting while redacting credentials in a successful payload", async () => {
+    const usage={model:"qwen",http_status:200,input_tokens:123,output_tokens:45,total_tokens:168,latency_seconds:0.5,transport_attempts:1};
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      answer:"Có dữ liệu.",model_usage:{planning:[usage],analytics_response:[],runbook:[]},
+      diagnostics:{access_token:"private",refresh_token:"private",api_key:"private",authorization:"private",token:"private",raw_log:"private",input_tokens:123},
+    })));
+    expect(response.status).toBe(200);
+    const data=await response.json();
+    expect(data.model_usage.planning[0]).toMatchObject({input_tokens:123,output_tokens:45,total_tokens:168});
+    expect(data.diagnostics).toMatchObject({access_token:"[REDACTED]",refresh_token:"[REDACTED]",api_key:"[REDACTED]",authorization:"[REDACTED]",token:"[REDACTED]",raw_log:"[REDACTED]",input_tokens:123});
+    expect(JSON.stringify(data)).not.toContain("private");
+  });
+  it("records only safe validation diagnostics when a post-redaction payload is invalid", async () => {
+    const audit=vi.fn();
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có dữ liệu.",model_usage:{planning:[{model:"qwen",http_status:200,input_tokens:"not-a-number",output_tokens:45,total_tokens:168,latency_seconds:0.5,transport_attempts:1}],analytics_response:[],runbook:[]}})),audit);
+    expect(response.status).toBe(502);
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({failure_kind:"schema_validation",validation_issues:[expect.objectContaining({path:"model_usage.planning.0.input_tokens",code:"invalid_type"})]}));
+    expect(JSON.stringify(audit.mock.calls)).not.toContain("Có dữ liệu");
+  });
+  it("classifies upstream HTTP, JSON and empty-response failures for server audit", async () => {
+    const cases=[
+      {upstream:new Response("not json"),kind:"upstream_json_parse",code:"invalid_response"},
+      {upstream:new Response("unavailable",{status:502}),kind:"upstream_http",code:"invalid_response"},
+      {upstream:Response.json({answer:" "}),kind:"empty_answer",code:"empty_answer"},
+    ] as const;
+    for(const item of cases){
+      const audit=vi.fn();
+      const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(item.upstream),audit);
+      expect((await response.json()).error.code).toBe(item.code);
+      expect(audit).toHaveBeenCalledWith(expect.objectContaining({failure_kind:item.kind}));
+    }
+  });
   it("rejects invalid JSON", async () => {
     const response = await handleChat(request(), settings, vi.fn<typeof fetch>().mockResolvedValue(new Response("not json")));
     expect((await response.json()).error.code).toBe("invalid_response");

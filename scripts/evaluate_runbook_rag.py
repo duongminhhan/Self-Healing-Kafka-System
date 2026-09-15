@@ -26,7 +26,6 @@ from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJ
 from self_healthy_kafka.rag.models import RetrievalQuery, Route
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
-from self_healthy_kafka.rag.router import RunbookRouter
 
 
 def main() -> int:
@@ -44,15 +43,13 @@ def main() -> int:
     if args.with_generation and not args.live:
         parser.error("--with-generation requires --live")
     records = [json.loads(line) for line in args.dataset.read_text(encoding="utf-8").splitlines() if line.strip()]
-    router = RunbookRouter()
-    route_hits = sum(router.route(item["question"]).route.value == item["expected_route"] for item in records)
     report: dict[str, Any] = {
         "records": len(records),
         "pass_count": 0,
         "fail_count": 0,
         "not_run_count": 0,
         "case_results": [],
-        "route_accuracy": route_hits / len(records) if records else 0.0,
+        "route_accuracy": None,
         "live_retrieval": False,
         "retrieval_recall_at_k": None,
         "mean_reciprocal_rank": None,
@@ -64,7 +61,8 @@ def main() -> int:
         "retrieval_latency_seconds": None,
         "end_to_end_latency_seconds": None,
         "not_measured": [
-            "Qwen answer metrics require a separate opt-in end-to-end run with verified analytics facts"
+            "Semantic-plan route accuracy requires an opt-in end-to-end evaluation with the configured planner",
+            "Qwen answer metrics require a separate opt-in end-to-end run with verified analytics facts",
         ],
     }
     if args.live:
@@ -113,19 +111,16 @@ def main() -> int:
                     "reasons": ["analytics_requires_live_api_evaluation"],
                 })
                 continue
-            decision = router.route(item["question"])
             started = time.perf_counter()
             found = retriever.retrieve(RetrievalQuery(
                 text=item["question"], tenant_id=config.tenant_id,
-                environment=config.environment, connector_class=decision.connector_class,
-                error_codes=decision.error_codes,
+                environment=config.environment, connector_class=None,
+                error_codes=(),
             ))
             latencies.append(time.perf_counter() - started)
             ids = [chunk.runbook_id for chunk in found]
             expected = item.get("expected_runbook_ids") or []
             reasons: list[str] = []
-            if decision.route.value != item["expected_route"]:
-                reasons.append("route_mismatch")
             if expected:
                 recall = sum(value in ids for value in expected) / len(expected)
                 recalls.append(recall)
@@ -148,7 +143,11 @@ def main() -> int:
             if composer is not None:
                 answer = composer.compose(
                     question=item["question"],
-                    route=decision.route,
+                    route=(
+                        Route.COMBINED
+                        if item.get("expected_route") == Route.COMBINED.value
+                        else Route.RUNBOOK
+                    ),
                     analytics_facts=[],
                     chunks=found,
                 )

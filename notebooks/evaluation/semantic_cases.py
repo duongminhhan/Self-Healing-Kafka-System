@@ -7,6 +7,7 @@ to generate its own plan/SQL; these plans are only offline compiler oracles.
 """
 
 from notebooks.evaluation.evaluate import CASES
+from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
 
 
 def plan(entity="incidents", dimensions=None, metrics=None, **options):
@@ -316,87 +317,77 @@ for case in GOLD + GOLD_EXTENDED + HOLDOUT:
 
 SEMANTIC_CASES = GOLD + GOLD_EXTENDED + HOLDOUT
 
-# Evaluation-only structured conversation contracts.  These fixtures exercise
-# the real HTTP analytics service with an injected read-only fact source; they
-# are mocked context tests, not live database/model accuracy measurements.
+def _conversation_plan(*, time: str = "today", inherited: list[str] | None = None, clarification: str | None = None):
+    return {
+        "version": CATALOG_VERSION,
+        "data_request": None if clarification else {
+            "metrics": ["incident_count"],
+            "dimensions": ["root_connector"],
+            "filters": {"time_range": {"kind": "relative", "value": time}},
+            "sort": {"metric": "incident_count", "direction": "desc"},
+            "limit": 5,
+            "comparison": None,
+            "detail_fields": [],
+        },
+        "guidance_request": {"needed": False, "purpose": None, "error_codes": [], "connector_class": None},
+        "clarification": clarification,
+        "conversation_action": "none",
+        "inherited_fields": inherited or [],
+    }
+
+
+# Evaluation-only contracts. They inject raw semantic plans into the real
+# service to verify context boundaries and compiler behavior; they explicitly
+# do not claim a model understands the natural-language phrasing.
 MULTI_TURN_CASES = [
     {
-        "id": "conversation-ranked-second",
+        "id": "conversation-time-override",
         "split": "gold",
         "now_utc": "2026-09-03T12:00:00+00:00",
-        "facts": [
-            {"incident_id": "a-1", "job_name": "connector-a"},
-            {"incident_id": "a-2", "job_name": "connector-a"},
-            {"incident_id": "b-1", "job_name": "connector-b"},
+        "facts": [{"incident_id": "a-1", "job_name": "connector-a"}],
+        "plans": [
+            _conversation_plan(time="today"),
+            _conversation_plan(time="yesterday", inherited=["metrics", "dimensions"]),
         ],
         "turns": [
-            {
-                "conversation_id": "ranking-a",
-                "question": "Connector nào thường xuyên gặp sự cố nhất?",
-                "expected": {"context_used": False},
-            },
-            {
-                "conversation_id": "ranking-a",
-                "question": "Còn connector thứ hai thì sao?",
-                "expected": {
-                    "status": "ok",
-                    "source": "conversation_verified_result",
-                    "context_used": True,
-                    "action": "reuse_verified_ranking",
-                    "evidence_ids": ["b-1"],
-                },
-            },
+            {"conversation_id": "time-a", "question": "Connector nào lỗi hôm nay?", "expected": {"context_used": False}},
+            {"conversation_id": "time-a", "question": "Còn hôm qua thì sao?", "expected": {
+                "status": "verified_results", "context_used": True, "action": "semantic_plan",
+                "time_range": {"kind": "relative", "value": "yesterday"},
+            }},
         ],
-        "expected_backend_calls": 1,
-        "forbidden_context": ["naturalized answer", "raw conversation history"],
+        "expected_backend_calls": 2,
     },
     {
         "id": "conversation-isolation",
         "split": "holdout",
         "now_utc": "2026-09-03T12:00:00+00:00",
         "facts": [{"incident_id": "a-1", "job_name": "connector-a"}],
+        "plans": [
+            _conversation_plan(),
+            _conversation_plan(clarification="Bạn muốn connector nào?"),
+        ],
         "turns": [
-            {
-                "conversation_id": "tenant-a",
-                "question": "Connector nào gặp nhiều sự cố nhất?",
-                "expected": {"context_used": False},
-            },
-            {
-                "conversation_id": "tenant-b",
-                "question": "Còn connector thứ hai?",
-                "expected": {
-                    "status": "needs_clarification",
-                    "context_used": False,
-                    "action": "clarification_missing_context",
-                },
-            },
+            {"conversation_id": "tenant-a", "question": "Connector nào gặp nhiều sự cố nhất?", "expected": {"context_used": False}},
+            {"conversation_id": "tenant-b", "question": "Còn connector đó thì sao?", "expected": {
+                "status": "needs_clarification", "context_used": False, "action": "clarification",
+            }},
         ],
         "expected_backend_calls": 1,
-        "forbidden_context": ["tenant-a verified facts in tenant-b"],
     },
     {
-        "id": "conversation-time-override",
+        "id": "conversation-topic-change",
         "split": "holdout",
         "now_utc": "2026-09-03T12:00:00+00:00",
         "facts": [{"incident_id": "a-1", "job_name": "connector-a"}],
+        "plans": [_conversation_plan(), _conversation_plan(time="last_7_days")],
         "turns": [
-            {
-                "conversation_id": "time-a",
-                "question": "Connector nào lỗi hôm nay?",
-                "expected": {"context_used": False},
-            },
-            {
-                "conversation_id": "time-a",
-                "question": "Còn hôm qua thì sao?",
-                "expected": {
-                    "status": "ok",
-                    "context_used": True,
-                    "action": "inherit_plan_with_time_override",
-                    "time_range": {"kind": "relative", "value": "yesterday"},
-                },
-            },
+            {"conversation_id": "topic-a", "question": "Connector nào lỗi hôm nay?", "expected": {"context_used": False}},
+            {"conversation_id": "topic-a", "question": "Cho số incident trong 7 ngày gần đây.", "expected": {
+                "status": "verified_results", "context_used": False, "action": "semantic_plan",
+                "time_range": {"kind": "relative", "value": "last_7_days"},
+            }},
         ],
         "expected_backend_calls": 2,
-        "forbidden_context": ["unbounded raw history", "changed metric"],
     },
 ]

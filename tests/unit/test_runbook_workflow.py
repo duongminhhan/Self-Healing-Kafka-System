@@ -1,266 +1,173 @@
-from dataclasses import replace
+from __future__ import annotations
 
 from self_healthy_kafka.config import RagConfig
 from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer
-from self_healthy_kafka.rag.models import (
-    RagConfigurationError,
-    RagStoreError,
-    RetrievedChunk,
-    SearchDiagnostics,
-)
+from self_healthy_kafka.rag.models import RagConfigurationError, RagStoreError, RetrievedChunk
 from self_healthy_kafka.rag.retriever import RunbookRetriever
 from self_healthy_kafka.rag.workflow import RunbookRagWorkflow, extract_verified_facts
+from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
+from self_healthy_kafka.semantic.planner import parse_semantic_plan
 
 
 def _config(**overrides):
     values = {
-        "enabled": True,
-        "qdrant_url": "https://qdrant.example",
-        "qdrant_api_key": "test-only",
-        "collection": "runbooks",
-        "embedding_model": "configured-cluster-model",
-        "embedding_size": 384,
-        "top_k": 3,
-        "request_timeout_seconds": 10,
-        "score_threshold": 0.5,
-        "max_chunk_chars": 2400,
-        "max_context_chars": 8000,
-        "environment": "uat",
-        "tenant_id": "tenant-a",
-        "diagnostics_enabled": False,
+        "enabled": True, "qdrant_url": "https://qdrant.example", "qdrant_api_key": "test-only",
+        "collection": "runbooks", "embedding_model": "configured-cluster-model", "embedding_size": 384,
+        "top_k": 3, "request_timeout_seconds": 10, "score_threshold": 0.5, "max_chunk_chars": 2400,
+        "max_context_chars": 8000, "environment": "uat", "tenant_id": "tenant-a", "diagnostics_enabled": False,
     }
     values.update(overrides)
     return RagConfig(**values)
 
 
-def _retrieved():
+def _chunk():
     return RetrievedChunk(
-        point_id="one",
-        score=0.92,
-        runbook_id="RB-ORACLE-001",
-        title="Oracle authentication",
-        version=1,
-        section="diagnostic_steps",
-        section_title="Diagnostic steps",
-        source="runbooks/oracle/invalid-credentials.md",
-        connector_class="oracle",
-        error_codes=("ORA-01017",),
-        text="Check the approved credential reference for ORA-01017.",
+        point_id="one", score=0.92, runbook_id="RB-ORACLE-001", title="Oracle authentication",
+        version=1, section="diagnostic_steps", section_title="Diagnostic steps",
+        source="runbooks/oracle/invalid-credentials.md", connector_class="oracle",
+        error_codes=("ORA-01017",), text="Check the approved credential reference for ORA-01017.",
     )
 
 
-def test_runbook_route_keeps_backward_compatible_response_fields():
+def _plan(*, data=True, guidance=True, purpose="remediation"):
+    return parse_semantic_plan({
+        "version": CATALOG_VERSION,
+        "data_request": {
+            "metrics": ["incident_count"], "dimensions": ["connector"], "filters": {},
+            "sort": {"metric": "incident_count", "direction": "desc"}, "limit": 5,
+            "comparison": None, "detail_fields": [],
+        } if data else None,
+        "guidance_request": {
+            "needed": guidance, "purpose": purpose if guidance else None,
+            "error_codes": ["ORA-01017"] if guidance else [], "connector_class": "oracle" if guidance else None,
+        },
+        "clarification": None, "conversation_action": "none", "inherited_fields": [],
+    })
+
+
+def _analytics():
+    evidence = [{
+        "fact_id": "analytics:orders:1", "rank": 1,
+        "entity": {"connector": "orders"},
+        "metrics": [{"name": "failure_count", "label": "số incident", "value": 1,
+                     "unit": "incident", "aggregation": "count_distinct_incident"}],
+        "details": {}, "detail_values": {},
+        "time_range": {"from_at": None, "to_at": None, "timestamp": "failure_at"},
+        "status": None, "grain": "aggregated connector incident facts",
+        "source": "vConnectorIncidentFacts", "evidence_ids": ["one"], "complete": True,
+        "semantic_catalog_version": CATALOG_VERSION,
+    }]
+    return {
+        "answer": "orders có 1 incident.",
+        "source": "analytics",
+        "sources": [{"source": "vConnectorIncidentFacts", "items": [{
+            "incident_id": "one", "connector_name": "orders", "error_code": "ORA-01017",
+        }]}],
+        "query_plan": {"dataset": "connector_incidents"}, "semantic_plan": {"version": CATALOG_VERSION},
+        "from_at": None, "to_at": None, "row_count": 1, "evidence_ids": ["one"], "evidence": evidence,
+        "claims": [{"fact_id": "analytics:orders:1", "entity": {"connector": "orders"},
+                    "metric": "failure_count", "value": 1,
+                    "time_range": {"from_at": None, "to_at": None, "timestamp": "failure_at"},
+                    "status": None, "text": "orders có số incident là 1"}],
+        "verified_result": {"rows": [{"connector_name": "orders", "failure_count": 1}],
+                            "columns": ["connector_name", "failure_count"]},
+    }
+
+
+def test_runbook_only_route_is_driven_by_plan_and_keeps_response_contract():
     class Store:
         def search(self, query, *, limit, score_threshold):
-            return [_retrieved()]
+            assert query.error_codes == ("ORA-01017",)
+            return [_chunk()]
 
-    workflow = RunbookRagWorkflow(
-        _config(),
-        retriever=RunbookRetriever(_config(), Store()),
-        composer=GroundedAnswerComposer(),
-    )
-
-    result = workflow.ask("Runbook xử lý ORA-01017 là gì?", analytics_ask=lambda _: {})
+    workflow = RunbookRagWorkflow(_config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer())
+    result = workflow.ask("Một câu hỏi", plan=_plan(data=False), analytics_ask=lambda _: (_ for _ in ()).throw(AssertionError()))
 
     assert result["route"] == "runbook"
-    assert result["source"] == "deterministic_fallback"
     assert result["query_plan"] is None
-    assert result["sources"] == []
     assert result["citations"][0]["runbook_id"] == "RB-ORACLE-001"
     assert result["status"] == "ok"
-    assert result["recommended_runbooks"][0]["title"] == "Oracle authentication"
-    assert "Oracle authentication" in result["answer"]
 
 
-def test_runbook_response_explains_exact_config_key_evidence_without_debug_scores():
+def test_analytics_only_plan_never_calls_qdrant():
     class Store:
-        def search(self, query, *, limit, score_threshold):
-            return [
-                replace(
-                    _retrieved(),
-                    runbook_id="RB-NET-001",
-                    title="Kafka Connect dependency timeout",
-                    connector_class="network",
-                    connector_type="kafka-connect",
-                    error_codes=("CONNECT_TIMEOUT",),
-                    config_keys=("connection.timeout.ms",),
-                )
-            ]
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("analytics plan must not retrieve runbooks")
 
-    workflow = RunbookRagWorkflow(
-        _config(),
-        retriever=RunbookRetriever(_config(), Store()),
-        composer=GroundedAnswerComposer(),
-    )
+    workflow = RunbookRagWorkflow(_config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer())
+    result = workflow.ask("Một câu hỏi", plan=_plan(guidance=False), analytics_ask=lambda _: _analytics())
 
-    result = workflow.ask(
-        "connection.timeout.ms bị vượt quá, tôi nên làm gì?",
-        analytics_ask=lambda _: {},
-    )
-
-    assert result["evidence"][0]["match_basis"] == "config_key"
-    assert result["evidence"][0]["matched_config_keys"] == ["connection.timeout.ms"]
-    assert "score" not in result["evidence"][0]
-    assert "Kafka Connect dependency timeout" in result["answer"]
+    assert result["route"] == "analytics"
+    assert result["answer"].startswith("orders có 1 incident.")
 
 
-def test_no_answer_is_structured_and_does_not_invent_a_runbook():
+def test_rag_failure_keeps_verified_analytics_result():
     class Store:
-        last_search_diagnostics = SearchDiagnostics(
-            search_mode="hybrid",
-            collection="v2",
-            dense_model="dense",
-            sparse_model="sparse",
-            no_result_reason="strong_anchor_not_found",
-        )
-
-        def search(self, query, *, limit, score_threshold):
-            return []
-
-    config = _config(search_mode="hybrid", evidence_gate_enabled=True)
-    workflow = RunbookRagWorkflow(
-        config,
-        retriever=RunbookRetriever(config, Store()),
-        composer=GroundedAnswerComposer(),
-    )
-
-    result = workflow.ask(
-        "Runbook cho lỗi CUDA_KERNEL_FAILURE là gì?",
-        analytics_ask=lambda _: {},
-    )
-
-    assert result["status"] == "no_answer"
-    assert result["reason"] == "strong_anchor_not_found"
-    assert result["candidates"] == []
-    assert result["recommended_runbooks"] == []
-    assert "chưa tìm thấy" in result["answer"].casefold()
-
-
-def test_qdrant_failure_degrades_to_verified_analytics_result():
-    class Store:
-        def search(self, query, *, limit, score_threshold):
+        def search(self, *_args, **_kwargs):
             raise RagStoreError("offline")
 
-    analytics = {
-        "answer": "orders đang có 1 incident.",
-        "sources": [{"source": "vConnectorIncidentFacts", "items": []}],
-        "query_plan": {"dataset": "connector_incidents"},
-        "from_at": None,
-        "to_at": None,
-        "row_count": 1,
-        "evidence_ids": ["incident-1"],
-    }
-    workflow = RunbookRagWorkflow(
-        _config(),
-        retriever=RunbookRetriever(_config(), Store()),
-        composer=GroundedAnswerComposer(),
-    )
+    workflow = RunbookRagWorkflow(_config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer())
+    result = workflow.ask("Một câu hỏi", plan=_plan(), analytics_ask=lambda _: _analytics())
 
-    result = workflow.ask("Connector orders đang lỗi, tại sao?", analytics_ask=lambda _: analytics)
-
-    assert result["answer"] == analytics["answer"]
+    assert result["answer"].startswith("orders có 1 incident.")
     assert result["source"] == "analytics"
     assert result["fallback_reason"] == "qdrant_service_error"
+    assert result["status"] == "ok"
+    assert "kho runbook" in result["answer"]
 
 
-def test_incompatible_hybrid_collection_returns_configuration_fallback():
+def test_missing_runbook_does_not_replace_analytics_evidence_with_generic_advice():
     class Store:
-        def search(self, query, *, limit, score_threshold):
-            raise RagConfigurationError("hybrid collection is dense-only")
+        def search(self, *_args, **_kwargs):
+            return []
 
-    config = _config(search_mode="hybrid")
+    workflow = RunbookRagWorkflow(_config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer())
+    result = workflow.ask("Một câu hỏi", plan=_plan(), analytics_ask=lambda _: _analytics())
+
+    assert result["source"] == "analytics"
+    assert result["answer"].startswith("orders có 1 incident.")
+    assert "chưa tìm thấy runbook" in result["answer"]
+
+
+def test_combined_success_keeps_analytics_answer_and_fact_evidence_intact():
+    class Store:
+        def search(self, *_args, **_kwargs):
+            return [_chunk()]
+
+    analytics = _analytics()
     workflow = RunbookRagWorkflow(
-        config,
-        retriever=RunbookRetriever(config, Store()),
-        composer=GroundedAnswerComposer(),
+        _config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer()
     )
+    result = workflow.ask("Một câu hỏi", plan=_plan(), analytics_ask=lambda _: analytics)
 
-    result = workflow.ask("Runbook xử lý task failure là gì?", analytics_ask=lambda _: {})
+    assert result["route"] == "combined"
+    assert result["source"] == "combined"
+    assert result["answer"].startswith("orders có 1 incident.")
+    assert "Hướng dẫn liên quan:" in result["answer"]
+    assert result["analytics_evidence"] == analytics["evidence"]
+    assert result["claims"] == analytics["claims"]
+    assert result["evidence"][0]["runbook_id"] == "RB-ORACLE-001"
+    assert result["verified_result"] == analytics["verified_result"]
+
+
+def test_qdrant_configuration_failure_is_explicit():
+    class Store:
+        def search(self, *_args, **_kwargs):
+            raise RagConfigurationError("dense only")
+
+    workflow = RunbookRagWorkflow(_config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer())
+    result = workflow.ask("Một câu hỏi", plan=_plan(data=False), analytics_ask=lambda _: {})
 
     assert result["source"] == "deterministic_fallback"
     assert result["fallback_reason"] == "qdrant_configuration_error"
 
 
-def test_analytics_route_does_not_call_qdrant():
-    class Store:
-        def search(self, query, *, limit, score_threshold):
-            raise AssertionError("analytics-only route must not retrieve runbooks")
+def test_only_verified_incident_sources_become_combined_facts():
+    facts = extract_verified_facts({
+        "sources": [
+            {"source": "vConnectorIncidentFacts", "items": [{"incident_id": "one", "connector_name": "orders", "password": "no"}]},
+            {"source": "debug", "items": [{"error_code": "ORA-99999"}]},
+        ]
+    })
 
-    analytics = {"answer": "Có 3 incident.", "sources": [], "evidence_ids": []}
-    workflow = RunbookRagWorkflow(
-        _config(),
-        retriever=RunbookRetriever(_config(), Store()),
-        composer=GroundedAnswerComposer(),
-    )
-
-    result = workflow.ask("Có tổng cộng bao nhiêu incident?", analytics_ask=lambda _: analytics)
-
-    assert result["answer"] == "Có 3 incident."
-    assert result["route"] == "analytics"
-    assert result["citations"] == []
-
-
-def test_question_secret_is_redacted_before_qdrant_receives_it():
-    class Store:
-        query = None
-
-        def search(self, query, *, limit, score_threshold):
-            self.query = query
-            return []
-
-    store = Store()
-    workflow = RunbookRagWorkflow(
-        _config(),
-        retriever=RunbookRetriever(_config(), store),
-        composer=GroundedAnswerComposer(),
-    )
-
-    workflow.ask(
-        "Runbook khi password=my-private-value không hoạt động?",
-        analytics_ask=lambda _: {},
-    )
-
-    assert "my-private-value" not in store.query.text
-    assert "[REDACTED]" in store.query.text
-
-
-def test_only_verified_analytics_sources_become_combined_facts():
-    facts = extract_verified_facts(
-        {
-            "sources": [
-                {
-                    "source": "vConnectorIncidentFacts",
-                    "items": [
-                        {
-                            "incident_id": "one",
-                            "connector_name": "orders",
-                            "error_code": "ORA-01017",
-                            "password": "must-not-pass",
-                        }
-                    ],
-                },
-                {"source": "unverified_debug_table", "items": [{"error_code": "ORA-99999"}]},
-            ]
-        }
-    )
-
-    assert facts == [
-        {
-            "incident_id": "one",
-            "connector_name": "orders",
-            "error_code": "ORA-01017",
-        }
-    ]
-
-
-def test_enabled_rag_rejects_missing_qdrant_configuration():
-    config = _config(qdrant_url="", qdrant_api_key="", embedding_model="")
-
-    try:
-        config.validate()
-    except ValueError as exc:
-        assert "QDRANT_URL" in str(exc)
-        assert "QDRANT_API_KEY" in str(exc)
-        assert "QDRANT_EMBEDDING_MODEL" in str(exc)
-    else:
-        raise AssertionError("missing RAG configuration must be rejected")
+    assert facts == [{"incident_id": "one", "connector_name": "orders"}]

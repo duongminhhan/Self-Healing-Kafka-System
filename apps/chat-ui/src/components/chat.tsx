@@ -50,13 +50,11 @@ function AssistantMessage(){
   const followUp=(text:string)=>aui.thread().append({role:"user",content:[{type:"text",text}]});
   const showQuickActions=!running&&!cancelled&&!!response?.answer?.trim()&&response.status!=="no_answer";
   return <MessagePrimitive.Root id={`message-${message.id}`} data-message-id={message.id} className={`assistant-message searchable-message${active?" search-selected":""}`}>
-    <div className="assistant-label"><span className="mini-brand"><Activity size={15}/></span> Healing <span>Trợ lý vận hành</span></div>
     {running?<div role="status" aria-live="polite" className="loading"><span className="pulse"/> Đang tìm và kiểm tra thông tin… <span className="elapsed">{formatElapsedTime(liveElapsed)}</span></div>:<MessagePrimitive.Content components={{Text:Markdown}}/>}
     {cancelled&&<p role="status" className="notice">Đã hủy chờ câu trả lời{liveElapsed>0?` sau ${formatElapsedTime(liveElapsed)}`:""}. Bạn có thể thử lại khi sẵn sàng.</p>}
     {response&&<ResponseDetails response={response} timing={timing} resultId={resultId}/>}
     {!response&&timing&&!cancelled&&<div className="response-meta" aria-label="Thông tin phản hồi" aria-live="polite"><span title="Thời gian end-to-end quan sát từ trình duyệt">Đã chờ {formatElapsedTime(timing.elapsed_ms)}</span></div>}
     {showQuickActions&&<div className="quick-actions" aria-label="Gợi ý thao tác">
-      <button type="button" onClick={()=>followUp("Hãy giải thích câu trả lời vừa rồi ngắn gọn và dễ hiểu hơn.")}>Giải thích ngắn hơn</button>
       <button type="button" onClick={()=>followUp("Dựa trên câu trả lời vừa rồi, hãy đề xuất bước tiếp theo phù hợp.")}>Đề xuất bước tiếp theo</button>
       {!!response?.verified_result?.rows?.length&&<button type="button" onClick={()=>document.getElementById(resultId)?.scrollIntoView({behavior:"smooth",block:"center"})}>Xem dữ liệu xác minh</button>}
     </div>}

@@ -1,8 +1,13 @@
+"""Safe chat orchestration using a validated semantic plan.
+
+Natural language is interpreted once by :class:`SemanticPlanner`.  All
+database access remains a bounded compilation to ``QueryPlan`` and all routes
+are derived by the backend from the plan's data/guidance requirements.
+"""
+
 from __future__ import annotations
 
-import json
 import re
-import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
@@ -14,68 +19,46 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from self_healthy_kafka.config import AnalyticsChatConfig, RagConfig
-from self_healthy_kafka.rag.answer_composer import (
-    GroundedAnswerComposer,
-    QwenJsonGenerator,
-    chat_completions_url,
-)
+from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJsonGenerator
 from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 from self_healthy_kafka.rag.retriever import RunbookRetriever
 from self_healthy_kafka.rag.shadow import ShadowRetrievalCoordinator
 from self_healthy_kafka.rag.workflow import RunbookRagWorkflow
 from self_healthy_kafka.redaction import redact_text
-from self_healthy_kafka.storage.common import json_safe
-from self_healthy_kafka.webhook.analytics import (
-    MAX_LIMIT,
-    QueryPlan,
-    TimeRange,
-    parse_plan,
-    resolve_time_range,
+from self_healthy_kafka.semantic.catalog import SEMANTIC_CATALOG
+from self_healthy_kafka.semantic.evidence import AnalyticsResponseComposer, build_evidence
+from self_healthy_kafka.semantic.outcome import (
+    cannot_verify,
+    classify_execution,
+    degraded,
+    needs_clarification,
 )
+from self_healthy_kafka.semantic.planner import (
+    SemanticPlan,
+    SemanticPlanError,
+    SemanticPlanner,
+    compile_analytics_request,
+)
+from self_healthy_kafka.semantic.tsql import ExecutedTsql, compile_incident_query
+from self_healthy_kafka.semantic.presentation import (
+    SemanticResponseRenderer,
+    build_fallback_presentation,
+    build_presentation_facts,
+)
+from self_healthy_kafka.storage.common import json_safe
+from self_healthy_kafka.webhook.analytics import MAX_LIMIT, QueryPlan, resolve_time_range
 
-CATALOG = {
-    "dataset": "connector_incidents",
-    "fields": [
-        "job_name",
-        "connector_name",
-        "error_code",
-        "failure_code",
-        "final_outcome",
-        "failure_at",
-    ],
-    "metrics": ["failure_count", "recovered_count", "open_count", "average_recovery_minutes"],
-    "event_types": ["HEALTH_FAILED_CONFIRMED"],
-    "outcomes": ["RECOVERED", "FAILED", "ESCALATED", "OPEN"],
-}
-
+CATALOG = SEMANTIC_CATALOG
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_CONTEXT_RESET_PHRASES = {
-    "bat dau lai",
-    "chuyen chu de moi",
-    "reset context",
-    "reset conversation",
-    "xoa ngu canh",
-}
-_ORDINAL_WORDS = {"nhat": 1, "hai": 2, "ba": 3, "tu": 4, "nam": 5}
-_RELATIVE_TIME_PHRASES = {
-    "hom nay": "today",
-    "hom qua": "yesterday",
-    "7 ngay qua": "last_7_days",
-    "tuan nay": "this_week",
-    "tuan truoc": "last_week",
-    "thang nay": "this_month",
-}
 _MAX_ERROR_MESSAGE_CHARS = 2_000
 _MAX_ANALYTICS_ROWS = 1_000
 _FACT_FETCH_LIMIT = _MAX_ANALYTICS_ROWS + 1
+_MAX_EXECUTED_RESULT_ROWS = 500
 _TECHNICAL_CODE = re.compile(
-    r"\b(?:ORA-\d{5}|SQLSTATE-?[0-9A-Z]{5}|HTTP-?\d{3}|"
-    r"[A-Z][A-Z0-9]+(?:_[A-Z0-9]+){1,6})\b",
+    r"\b(?:ORA-\d{5}|SQLSTATE-?[0-9A-Z]{5}|HTTP-?\d{3}|[A-Z][A-Z0-9]+(?:_[A-Z0-9]+){1,6})\b",
     re.IGNORECASE,
 )
-_EXCEPTION_CLASS = re.compile(
-    r"(?:[A-Za-z_$][\w$]*\.)*([A-Z][A-Za-z0-9_$]*(?:Exception|Error))\b"
-)
+_EXCEPTION_CLASS = re.compile(r"(?:[A-Za-z_$][\w$]*\.)*([A-Z][A-Za-z0-9_$]*(?:Exception|Error))\b")
 
 
 class ChatInputError(ValueError):
@@ -83,116 +66,106 @@ class ChatInputError(ValueError):
 
 
 class ChatPlanningError(RuntimeError):
-    """The model response could not be converted to the safe analytics contract."""
+    """Backward-compatible exception type for callers that explicitly plan."""
 
 
 @dataclass(frozen=True)
 class _ConversationState:
-    """Bounded semantic state; never stores raw chat history or naturalized answers."""
-
     expires_at: datetime
-    route: str
-    resolved_entity: str | None
-    plan: QueryPlan | None
+    semantic_plan: SemanticPlan
+    query_plan: QueryPlan | None
     facts: tuple[dict[str, Any], ...]
-    selected_connector: str | None
-    selected_error_code: str | None
     evidence_ids: tuple[str, ...]
-    from_at: str | None
-    to_at: str | None
 
-
-@dataclass(frozen=True)
-class _FollowUp:
-    kind: str
-    ordinal: int | None = None
-    time_range: str | None = None
+    def planner_context(self) -> dict[str, Any]:
+        return {
+            **self.semantic_plan.context(),
+            "previous_query_plan": self.query_plan.to_dict() if self.query_plan else None,
+            "available_evidence_ids": list(self.evidence_ids[:20]),
+            "available_fact_count": len(self.facts),
+        }
 
 
 class AnalyticsChatService:
-    """Plans safe incident analysis; neither this class nor its model executes SQL."""
+    """Semantic planner, safe compiler, analytics execution and optional RAG."""
 
     def __init__(
         self,
         config: AnalyticsChatConfig,
         *,
         incident_facts: Callable[..., list[dict[str, Any]]],
+        execute_incident_query: Callable[..., list[dict[str, Any]]] | None = None,
         client: httpx.Client | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         rag_config: RagConfig | None = None,
         rag_workflow: RunbookRagWorkflow | None = None,
+        semantic_planner: SemanticPlanner | None = None,
     ):
         self._config = config
         self._incident_facts = incident_facts
+        self._execute_incident_query = execute_incident_query
         self._owns_client = client is None
         self._client = client or httpx.Client()
         self._now = now
         self._rag_config = rag_config
         self._qwen = QwenJsonGenerator(config, self._client)
+        generator = self._qwen.generate if config.hf_endpoint_url else None
+        self._planner = semantic_planner or SemanticPlanner(
+            generator, max_tokens=config.hf_planner_max_tokens
+        )
+        self._response_composer = AnalyticsResponseComposer(
+            generator, max_tokens=config.hf_response_max_tokens
+        )
         self._rag_workflow = rag_workflow
         self._closed = False
         self._conversation_states: OrderedDict[str, _ConversationState] = OrderedDict()
         self._conversation_lock = RLock()
         if self._rag_workflow is None and rag_config is not None and rag_config.enabled:
-            retrieval_mode = getattr(
+            self._rag_workflow = self._build_rag_workflow(rag_config)
+
+    def _build_rag_workflow(self, rag_config: RagConfig) -> RunbookRagWorkflow:
+        retrieval_mode = getattr(rag_config, "effective_retrieval_mode", rag_config.search_mode)
+        primary_mode = "dense" if retrieval_mode == "shadow" else retrieval_mode
+        canonical_mode = bool(
+            getattr(rag_config, "retrieval_mode", "") or getattr(rag_config, "hybrid_shadow_enabled", False)
+        )
+        if canonical_mode:
+            primary_collection = (
+                getattr(rag_config, "dense_collection", rag_config.collection)
+                if primary_mode == "dense"
+                else getattr(rag_config, "hybrid_collection", rag_config.collection)
+            )
+        else:
+            primary_collection = rag_config.collection
+        primary_config = _retrieval_config(rag_config, mode=primary_mode, collection=primary_collection)
+        retriever: RunbookRetriever | ShadowRetrievalCoordinator = RunbookRetriever(
+            primary_config, QdrantRunbookStore(primary_config)
+        )
+        if retrieval_mode == "shadow":
+            shadow_config = _retrieval_config(
                 rag_config,
-                "effective_retrieval_mode",
-                rag_config.search_mode,
+                mode="hybrid",
+                collection=getattr(rag_config, "hybrid_collection", rag_config.collection),
+                timeout_seconds=float(getattr(rag_config, "shadow_timeout_seconds", rag_config.request_timeout_seconds)),
             )
-            primary_mode = "dense" if retrieval_mode == "shadow" else retrieval_mode
-            canonical_mode = bool(
-                getattr(rag_config, "retrieval_mode", "")
-                or getattr(rag_config, "hybrid_shadow_enabled", False)
+            retriever = ShadowRetrievalCoordinator(
+                retriever,
+                RunbookRetriever(shadow_config, QdrantRunbookStore(shadow_config)),
+                sample_rate=float(getattr(rag_config, "shadow_sample_rate", 0.0)),
+                queue_size=int(getattr(rag_config, "shadow_queue_size", 100)),
+                shutdown_timeout_seconds=float(getattr(rag_config, "shadow_timeout_seconds", rag_config.request_timeout_seconds)),
             )
-            if canonical_mode:
-                primary_collection = (
-                    getattr(rag_config, "dense_collection", rag_config.collection)
-                    if primary_mode == "dense"
-                    else getattr(rag_config, "hybrid_collection", rag_config.collection)
-                )
-            else:
-                # RAG_SEARCH_MODE/QDRANT_COLLECTION remain a backward-compatible pair.
-                primary_collection = rag_config.collection
-            primary_config = _retrieval_config(
-                rag_config,
-                mode=primary_mode,
-                collection=primary_collection,
-            )
-            retriever: RunbookRetriever | ShadowRetrievalCoordinator = RunbookRetriever(
-                primary_config,
-                QdrantRunbookStore(primary_config),
-            )
-            if retrieval_mode == "shadow":
-                shadow_config = _retrieval_config(
-                    rag_config,
-                    mode="hybrid",
-                    collection=getattr(rag_config, "hybrid_collection", rag_config.collection),
-                    timeout_seconds=float(
-                        getattr(
-                            rag_config,
-                            "shadow_timeout_seconds",
-                            rag_config.request_timeout_seconds,
-                        )
-                    ),
-                )
-                retriever = ShadowRetrievalCoordinator(
-                    retriever,
-                    RunbookRetriever(shadow_config, QdrantRunbookStore(shadow_config)),
-                    sample_rate=float(getattr(rag_config, "shadow_sample_rate", 0.0)),
-                    queue_size=int(getattr(rag_config, "shadow_queue_size", 100)),
-                    shutdown_timeout_seconds=float(
-                        getattr(
-                            rag_config,
-                            "shadow_timeout_seconds",
-                            rag_config.request_timeout_seconds,
-                        )
-                    ),
-                )
-            self._rag_workflow = RunbookRagWorkflow(
-                rag_config,
-                retriever=retriever,
-                composer=GroundedAnswerComposer(self._qwen.generate),
-            )
+        return RunbookRagWorkflow(
+            rag_config,
+            retriever=retriever,
+            composer=GroundedAnswerComposer(
+                (
+                    lambda messages: self._qwen.generate(
+                        messages, max_tokens=self._config.hf_response_max_tokens
+                    )
+                ) if self._config.hf_endpoint_url else None
+            ),
+        )
 
     @property
     def enabled(self) -> bool:
@@ -217,147 +190,441 @@ class AnalyticsChatService:
             raise ValueError("CHAT_CONVERSATION_TTL_SECONDS must be between 1 and 86400")
         if not 1 <= self._config.conversation_max_entries <= 10_000:
             raise ValueError("CHAT_CONVERSATION_MAX_ENTRIES must be between 1 and 10000")
+        if not 128 <= self._config.hf_planner_max_tokens <= 4_096:
+            raise ValueError("HF_CHAT_PLANNER_MAX_TOKENS must be between 128 and 4096")
+        if not 128 <= self._config.hf_response_max_tokens <= 4_096:
+            raise ValueError("HF_CHAT_RESPONSE_MAX_TOKENS must be between 128 and 4096")
         if self._rag_config is not None and self._rag_config.enabled:
             self._rag_config.validate()
-            missing_hf = [
-                name
-                for name, value in (
+            missing = [
+                name for name, value in (
                     ("HF_CHAT_ENDPOINT_URL", self._config.hf_endpoint_url),
                     ("HF_CHAT_TOKEN", self._config.hf_token),
                     ("HF_CHAT_MODEL_ID", self._config.hf_model_id),
-                )
-                if not value.strip()
+                ) if not value.strip()
             ]
-            if missing_hf:
-                raise ValueError(
-                    "RAG is enabled but Qwen configuration is missing: " + ", ".join(missing_hf)
-                )
+            if missing:
+                raise ValueError("RAG is enabled but Qwen configuration is missing: " + ", ".join(missing))
 
     def ask(self, question: str, *, conversation_id: str | None = None) -> dict[str, Any]:
         question = question.strip()
         if not question or len(question) > 4_000:
             raise ChatInputError("question must contain between 1 and 4000 characters")
         conversation_id = _validate_conversation_id(conversation_id)
-        normalized = _normalize_text(question)
-        if conversation_id and normalized in _CONTEXT_RESET_PHRASES:
-            self.clear_conversation(conversation_id)
-            return {
+        prior = self._get_conversation(conversation_id) if conversation_id else None
+        planning_model_index = self._qwen.call_count
+        try:
+            semantic_plan, planning_attempts = self._planner.plan(
+                question,
+                context=prior.planner_context() if prior else None,
+            )
+        except SemanticPlanError as exc:
+            result = _planning_failure(str(exc), timezone_name=self._config.timezone)
+            result["model_usage"] = {
+                "planning": self._qwen.calls_since(planning_model_index),
+                "analytics_response": [],
+                "runbook": [],
+            }
+            return self._with_conversation(result, conversation_id, context_used=prior is not None, action="planning_failed")
+        planning_calls = self._qwen.calls_since(planning_model_index)
+
+        if semantic_plan.conversation_action == "clear_context":
+            if conversation_id:
+                self.clear_conversation(conversation_id)
+            result = {
                 "answer": "Mình đã xóa ngữ cảnh của cuộc trò chuyện này. Bạn có thể bắt đầu câu hỏi mới.",
                 "route": "conversation",
                 "source": "deterministic_fallback",
                 "status": "ok",
+                "reason": None,
+                "fallback_reason": None,
                 "citations": [],
-                "conversation": {
-                    "id": conversation_id,
-                    "context_used": False,
-                    "action": "reset",
-                },
+                "sources": [],
+                "evidence": [],
+                "query_plan": None,
+                "semantic_plan": semantic_plan.to_dict(),
+                "row_count": 0,
+                "evidence_ids": [],
+                "planning_attempts": planning_attempts,
             }
+            result["model_usage"] = {"planning": planning_calls, "analytics_response": [], "runbook": []}
+            return self._with_conversation(result, conversation_id, context_used=False, action="clear_context")
 
-        state = self._get_conversation(conversation_id) if conversation_id else None
-        follow_up = _detect_follow_up(question) if conversation_id else None
-        context_used = False
-        context_action = "none"
-        if follow_up is not None:
-            if follow_up.kind == "remediation":
-                if state is None or not state.selected_error_code:
-                    result = _missing_context_response(follow_up)
-                    context_action = "clarification_missing_error_context"
-                elif self._rag_workflow is None:
-                    result = _missing_context_response(follow_up)
-                    context_action = "clarification_runbook_unavailable"
-                else:
-                    contextual_question = (
-                        f"{question.rstrip(' ?')} cho lỗi {state.selected_error_code} là gì?"
-                    )
-                    result = self._rag_workflow.ask(
-                        contextual_question,
-                        analytics_ask=self._ask_analytics,
-                    )
-                    context_used = True
-                    context_action = "inherit_verified_error_for_remediation"
-            elif state is None or state.plan is None:
-                result = _missing_context_response(follow_up)
-                context_action = "clarification_missing_context"
-            elif follow_up.kind == "ordinal":
-                result = _ordinal_follow_up_response(state, follow_up.ordinal or 1)
-                context_used = result.get("status") == "ok"
-                context_action = "reuse_verified_ranking" if context_used else "clarification"
-            else:
-                inherited_plan = replace(
-                    state.plan,
-                    time_range=TimeRange("relative", str(follow_up.time_range)),
-                )
-                result = self._ask_analytics(question, plan_override=inherited_plan)
-                result = _analytics_envelope(result)
-                context_used = True
-                context_action = "inherit_plan_with_time_override"
-        elif self._rag_workflow is not None:
-            result = self._rag_workflow.ask(question, analytics_ask=self._ask_analytics)
+        if semantic_plan.clarification:
+            clarification_outcome = needs_clarification()
+            presentation = build_presentation_facts(
+                semantic_plan,
+                query_plan=None,
+                outcome=clarification_outcome,
+                source_rows=[],
+                facts=[],
+                evidence=[],
+                from_at=None,
+                to_at=None,
+                timezone_name=self._config.timezone,
+            )
+            result = {
+                **_planning_failure("material_ambiguity", timezone_name=self._config.timezone),
+                "answer": SemanticResponseRenderer().render_outcome(presentation),
+                "route": "clarification",
+                "status": "needs_clarification",
+                "outcome": "needs_clarification",
+                "query_executed": False,
+                "evidence_complete": False,
+                "reason": "material_ambiguity",
+                "fallback_reason": "material_ambiguity",
+                "semantic_plan": semantic_plan.to_dict(),
+                "planning_attempts": planning_attempts,
+            }
+            result["model_usage"] = {"planning": planning_calls, "analytics_response": [], "runbook": []}
+            return self._with_conversation(result, conversation_id, context_used=prior is not None, action="clarification")
+
+        execution_model_index = self._qwen.call_count
+        if self._rag_workflow is not None:
+            result = self._rag_workflow.ask(
+                question,
+                plan=semantic_plan,
+                analytics_ask=lambda planned: self._execute_analytics(planned, question=question),
+            )
         else:
-            result = self._ask_analytics(question)
+            result = self._without_rag(semantic_plan, question=question)
+        result["semantic_plan"] = semantic_plan.to_dict()
+        result["planning_attempts"] = planning_attempts
+        analytics_calls = result.pop("_analytics_model_calls", [])
+        execution_calls = self._qwen.calls_since(execution_model_index)
+        result["model_usage"] = {
+            "planning": planning_calls,
+            "analytics_response": analytics_calls,
+            "runbook": execution_calls[len(analytics_calls):],
+        }
+        internal = result.pop("_conversation_state", None)
+        if conversation_id and isinstance(internal, dict):
+            self._remember_conversation(conversation_id, semantic_plan, internal)
+        return self._with_conversation(
+            result,
+            conversation_id,
+            context_used=prior is not None and bool(semantic_plan.inherited_fields),
+            action="semantic_plan",
+        )
 
-        internal_state = result.pop("_conversation_state", None)
-        if conversation_id:
-            if isinstance(internal_state, dict):
-                self._remember_conversation(conversation_id, result, internal_state)
-            elif (
-                not context_used
-                and result.get("route") in {"runbook", "combined"}
-                and not result.get("query_plan")
-            ):
-                self.clear_conversation(conversation_id)
-                context_action = "reset_on_topic_change"
-            result["conversation"] = {
-                "id": conversation_id,
-                "context_used": context_used,
-                "action": context_action,
+    def _without_rag(self, plan: SemanticPlan, *, question: str) -> dict[str, Any]:
+        route = plan.route
+        if route is None:
+            return _planning_failure("unsupported_semantic_plan", timezone_name=self._config.timezone)
+        if route.value == "analytics":
+            return _analytics_envelope(self._execute_analytics(plan, question=question))
+        if route.value == "combined":
+            result = _analytics_envelope(self._execute_analytics(plan, question=question))
+            return {
+                **result,
+                "route": "combined",
+                # Preserve the independently established analytics outcome.
+                # A missing supplementary runbook must not relabel verified
+                # data as degraded, or turn unverified data into a result.
+                "status": result.get("status"),
+                "reason": result.get("reason"),
+                "fallback_reason": "runbook_unavailable",
             }
+        return {
+            **_planning_failure("runbook_unavailable", timezone_name=self._config.timezone),
+            "route": "runbook",
+            "status": "degraded",
+            "outcome": "degraded",
+            "query_executed": False,
+            "evidence_complete": False,
+            "reason": "runbook_unavailable",
+            "fallback_reason": "runbook_unavailable",
+        }
+
+    def _execute_analytics(self, semantic_plan: SemanticPlan, *, question: str = "") -> dict[str, Any]:
+        try:
+            plan = compile_analytics_request(
+                semantic_plan, require_semantic_enforcement=True
+            )
+        except SemanticPlanError as exc:
+            return _planning_failure(
+                f"semantic_compiler_failed:{exc}", timezone_name=self._config.timezone
+            )
+        try:
+            from_at, to_at = resolve_time_range(
+                plan.time_range, now=self._now(), timezone_name=self._config.timezone
+            )
+        except (TypeError, ValueError) as exc:
+            return _planning_failure(
+                f"semantic_time_range_failed:{type(exc).__name__}", timezone_name=self._config.timezone
+            )
+        # Production wiring supplies this executor.  It runs the exact
+        # compiler-produced T-SQL aggregation/ranking query, which prevents a
+        # misleading UI query being shown for Python-side aggregation.  The
+        # legacy bounded fact callable remains for offline fixtures and for
+        # query shapes intentionally not supported by the aggregate compiler.
+        if self._execute_incident_query is not None:
+            try:
+                compiled = compile_incident_query(
+                    plan,
+                    from_at=from_at,
+                    to_at=to_at,
+                    row_limit=_MAX_EXECUTED_RESULT_ROWS + 1,
+                )
+            except ValueError:
+                compiled = None
+            if compiled is not None:
+                return self._execute_compiled_analytics(
+                    semantic_plan=semantic_plan,
+                    plan=plan,
+                    compiled=compiled,
+                    from_at=from_at,
+                    to_at=to_at,
+                )
+        try:
+            raw_rows = self._incident_facts(
+                from_at=from_at,
+                to_at=to_at,
+                event_type=plan.event_types[0] if plan.event_types else None,
+                final_outcome=plan.outcomes[0] if plan.outcomes else None,
+                connector_name=plan.connector_name,
+                error_code=_database_error_filter(plan.error_code),
+                limit=_FACT_FETCH_LIMIT,
+            )
+        except Exception as exc:
+            return _execution_failure(
+                "analytics_source_unavailable", exception=exc, timezone_name=self._config.timezone
+            )
+        truncated = len(raw_rows) > _MAX_ANALYTICS_ROWS
+        rows = _prepare_incident_rows(raw_rows[:_MAX_ANALYTICS_ROWS])
+        if _database_error_filter(plan.error_code) is None:
+            rows = _filter_failure_code(rows, plan.error_code)
+        facts = _aggregate(rows, plan)
+        comparison_facts: list[dict[str, Any]] = []
+        comparison_rows: list[dict[str, Any]] = []
+        if plan.comparison and from_at and to_at:
+            interval = to_at - from_at
+            try:
+                previous_raw = self._incident_facts(
+                    from_at=from_at - interval,
+                    to_at=from_at,
+                    event_type=plan.event_types[0] if plan.event_types else None,
+                    final_outcome=plan.outcomes[0] if plan.outcomes else None,
+                    connector_name=plan.connector_name,
+                    error_code=_database_error_filter(plan.error_code),
+                    limit=_FACT_FETCH_LIMIT,
+                )
+            except Exception as exc:
+                return _execution_failure(
+                    "analytics_comparison_source_unavailable",
+                    exception=exc,
+                    timezone_name=self._config.timezone,
+                )
+            truncated = truncated or len(previous_raw) > _MAX_ANALYTICS_ROWS
+            comparison_rows = _prepare_incident_rows(previous_raw[:_MAX_ANALYTICS_ROWS])
+            if _database_error_filter(plan.error_code) is None:
+                comparison_rows = _filter_failure_code(comparison_rows, plan.error_code)
+            comparison_facts = _aggregate(comparison_rows, plan)
+        outcome = classify_execution(
+            row_count=len(rows), fact_count=len(facts), truncated=truncated
+        )
+        evidence = build_evidence(
+            facts if outcome.outcome == "verified_results" else [],
+            query_plan=plan,
+            semantic_plan=semantic_plan,
+            from_at=from_at,
+            to_at=to_at,
+            truncated=truncated,
+        )
+        presentation = build_presentation_facts(
+            semantic_plan,
+            query_plan=plan,
+            outcome=outcome,
+            source_rows=rows,
+            facts=facts,
+            evidence=evidence,
+            from_at=from_at,
+            to_at=to_at,
+            timezone_name=self._config.timezone,
+        )
+        response_model_index = self._qwen.call_count
+        answer, response_source, fallback_reason, response_attempts, claims = self._response_composer.compose(
+            presentation=presentation,
+        )
+        # ``_execute_analytics`` is also called by the RAG workflow. Its public
+        # result is useful independently; a generic renderer remains grounded
+        # even when a response provider is unavailable.
+        sources = [{
+            "source": "vConnectorIncidentFacts",
+            "count": len(rows),
+            "items": [json_safe(row) for row in rows[:MAX_LIMIT]],
+        }]
+        if comparison_rows:
+            sources.append({
+                "source": "vConnectorIncidentFacts.previous_period",
+                "count": len(comparison_rows),
+                "items": [json_safe(row) for row in comparison_rows[:MAX_LIMIT]],
+            })
+        return {
+            "answer": answer,
+            "source": response_source,
+            "sources": sources,
+            "query_plan": plan.to_dict(),
+            "from_at": from_at.isoformat() if from_at else None,
+            "to_at": to_at.isoformat() if to_at else None,
+            "time_range_applied": _time_range_applied(from_at, to_at, self._config.timezone),
+            **outcome.to_dict(),
+            "evidence_ids": [str(row.get("incident_id")) for row in (rows + comparison_rows)[:MAX_LIMIT]],
+            "evidence": evidence,
+            "claims": claims,
+            "verified_result": {
+                "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
+                "columns": list(dict.fromkeys(
+                    [field for fact in facts for field in fact]
+                )),
+            },
+            "status": outcome.outcome,
+            "reason": outcome.reason,
+            "fallback_reason": outcome.reason or fallback_reason,
+            "response_attempts": response_attempts,
+            "comparison_evidence": build_evidence(
+                comparison_facts,
+                query_plan=plan,
+                semantic_plan=semantic_plan,
+                from_at=from_at - (to_at - from_at) if from_at and to_at else None,
+                to_at=from_at,
+                truncated=truncated,
+            ) if comparison_facts else [],
+            "_analytics_model_calls": self._qwen.calls_since(response_model_index),
+            "_conversation_state": {"plan": plan, "facts": facts},
+        }
+
+    def _execute_compiled_analytics(
+        self,
+        *,
+        semantic_plan: SemanticPlan,
+        plan: QueryPlan,
+        compiled: ExecutedTsql,
+        from_at: datetime | None,
+        to_at: datetime | None,
+    ) -> dict[str, Any]:
+        """Execute and render one compiler-generated SQL Server aggregation."""
+
+        try:
+            database_rows = self._execute_incident_query(
+                statement=compiled.statement,
+                parameters=compiled.parameter_values,
+            )
+        except Exception as exc:
+            return _execution_failure(
+                "analytics_source_unavailable", exception=exc, timezone_name=self._config.timezone
+            )
+        truncated = len(database_rows) > _MAX_EXECUTED_RESULT_ROWS
+        facts = _compiled_result_facts(database_rows[:_MAX_EXECUTED_RESULT_ROWS], plan)
+        outcome = classify_execution(
+            row_count=len(database_rows), fact_count=len(facts), truncated=truncated
+        )
+        evidence = build_evidence(
+            facts if outcome.outcome == "verified_results" else [],
+            query_plan=plan,
+            semantic_plan=semantic_plan,
+            from_at=from_at,
+            to_at=to_at,
+            truncated=truncated,
+        )
+        presentation = build_presentation_facts(
+            semantic_plan,
+            query_plan=plan,
+            outcome=outcome,
+            source_rows=facts,
+            facts=facts,
+            evidence=evidence,
+            from_at=from_at,
+            to_at=to_at,
+            timezone_name=self._config.timezone,
+        )
+        response_model_index = self._qwen.call_count
+        answer, response_source, fallback_reason, response_attempts, claims = self._response_composer.compose(
+            presentation=presentation,
+        )
+        executed_query = compiled.to_public_dict(executed=True)
+        evidence_ids = [
+            identifier
+            for fact in facts
+            for identifier in fact.get("evidence_ids") or []
+        ][:MAX_LIMIT]
+        return {
+            "answer": answer,
+            "source": response_source,
+            "sources": [{
+                "source": "vConnectorIncidentFacts",
+                "count": len(facts),
+                "items": [json_safe(row) for row in facts[:MAX_LIMIT]],
+            }],
+            "query_plan": plan.to_dict(),
+            "executed_query": executed_query,
+            "from_at": from_at.isoformat() if from_at else None,
+            "to_at": to_at.isoformat() if to_at else None,
+            "time_range_applied": _time_range_applied(from_at, to_at, self._config.timezone),
+            **outcome.to_dict(),
+            "evidence_ids": evidence_ids,
+            "evidence": evidence,
+            "claims": claims,
+            "verified_result": {
+                "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
+                "columns": list(dict.fromkeys(field for fact in facts for field in fact)),
+            },
+            "status": outcome.outcome,
+            "reason": outcome.reason,
+            # This is technical-only metadata.  The UI intentionally does not
+            # render grounding fallback diagnostics in its primary answer.
+            "fallback_reason": outcome.reason or fallback_reason,
+            "response_attempts": response_attempts,
+            "_analytics_model_calls": self._qwen.calls_since(response_model_index),
+            "_conversation_state": {"plan": plan, "facts": facts},
+        }
+
+    def _with_conversation(
+        self,
+        result: dict[str, Any],
+        conversation_id: str | None,
+        *,
+        context_used: bool,
+        action: str,
+    ) -> dict[str, Any]:
+        if conversation_id:
+            result["conversation"] = {"id": conversation_id, "context_used": context_used, "action": action}
         return result
 
     def clear_conversation(self, conversation_id: str) -> None:
-        validated_id = _validate_conversation_id(conversation_id)
-        if validated_id is None:
-            return
-        with self._conversation_lock:
-            self._conversation_states.pop(validated_id, None)
+        value = _validate_conversation_id(conversation_id)
+        if value is not None:
+            with self._conversation_lock:
+                self._conversation_states.pop(value, None)
 
     def _get_conversation(self, conversation_id: str) -> _ConversationState | None:
-        now = self._now()
         with self._conversation_lock:
-            self._evict_expired_conversations(now)
+            self._evict_expired_conversations(self._now())
             state = self._conversation_states.get(conversation_id)
-            if state is not None:
+            if state:
                 self._conversation_states.move_to_end(conversation_id)
             return state
 
     def _remember_conversation(
         self,
         conversation_id: str,
-        result: dict[str, Any],
+        semantic_plan: SemanticPlan,
         internal: dict[str, Any],
     ) -> None:
-        plan = internal.get("plan")
+        query_plan = internal.get("plan")
         facts = internal.get("facts")
-        if not isinstance(plan, QueryPlan) or not isinstance(facts, list):
+        if not isinstance(query_plan, QueryPlan) or not isinstance(facts, list):
             return
-        selected = internal.get("selected_connector")
-        if not isinstance(selected, str):
-            selected = _selected_connector(facts[0], plan) if len(facts) == 1 else None
-        selected_error = internal.get("selected_error_code")
-        if not isinstance(selected_error, str):
-            selected_error = _selected_error_code(facts[0]) if facts else None
         state = _ConversationState(
             expires_at=self._now() + timedelta(seconds=self._config.conversation_ttl_seconds),
-            route=str(result.get("route") or "analytics"),
-            resolved_entity=plan.dataset,
-            plan=plan,
-            facts=tuple(dict(fact) for fact in facts[:MAX_LIMIT]),
-            selected_connector=selected,
-            selected_error_code=selected_error,
-            evidence_ids=tuple(str(value) for value in result.get("evidence_ids") or ())[:MAX_LIMIT],
-            from_at=result.get("from_at"),
-            to_at=result.get("to_at"),
+            semantic_plan=semantic_plan,
+            query_plan=query_plan,
+            facts=tuple(dict(item) for item in facts[:MAX_LIMIT]),
+            evidence_ids=tuple(
+                str(identifier)
+                for fact in facts[:MAX_LIMIT]
+                for identifier in fact.get("evidence_ids") or []
+            )[:MAX_LIMIT],
         )
         with self._conversation_lock:
             self._evict_expired_conversations(self._now())
@@ -367,10 +634,7 @@ class AnalyticsChatService:
                 self._conversation_states.popitem(last=False)
 
     def _evict_expired_conversations(self, now: datetime) -> None:
-        expired = [
-            key for key, state in self._conversation_states.items() if state.expires_at <= now
-        ]
-        for key in expired:
+        for key in [key for key, state in self._conversation_states.items() if state.expires_at <= now]:
             self._conversation_states.pop(key, None)
 
     def close(self) -> None:
@@ -385,170 +649,169 @@ class AnalyticsChatService:
             if self._owns_client:
                 self._client.close()
 
-    def _ask_analytics(
-        self,
-        question: str,
-        *,
-        plan_override: QueryPlan | None = None,
-    ) -> dict[str, Any]:
-        intent = _question_intent(question)
-        plan = plan_override or self._plan(question)
-        from_at, to_at = resolve_time_range(
-            plan.time_range, now=self._now(), timezone_name=self._config.timezone
-        )
-        raw_rows = self._incident_facts(
-            from_at=from_at,
-            to_at=to_at,
-            event_type=plan.event_types[0] if plan.event_types else None,
-            final_outcome=plan.outcomes[0] if plan.outcomes else None,
-            connector_name=plan.connector_name,
-            error_code=_database_error_filter(plan.error_code),
-            # Fetch a bounded fact packet before applying group-by/top-N.  Passing
-            # the display limit here could make a top-5 aggregate incomplete.
-            limit=_FACT_FETCH_LIMIT,
-        )
-        evidence_truncated = len(raw_rows) > _MAX_ANALYTICS_ROWS
-        raw_rows = raw_rows[:_MAX_ANALYTICS_ROWS]
-        rows = _prepare_incident_rows(raw_rows)
-        if _database_error_filter(plan.error_code) is None:
-            rows = _filter_failure_code(rows, plan.error_code)
-        facts = _aggregate(rows, plan)
-        comparison_facts = []
-        comparison_rows: list[dict[str, Any]] = []
-        if plan.comparison and from_at and to_at:
-            interval = to_at - from_at
-            comparison_rows = _prepare_incident_rows(self._incident_facts(
-                from_at=from_at - interval,
-                to_at=from_at,
-                event_type=plan.event_types[0] if plan.event_types else None,
-                final_outcome=plan.outcomes[0] if plan.outcomes else None,
-                connector_name=plan.connector_name,
-                error_code=_database_error_filter(plan.error_code),
-                limit=_FACT_FETCH_LIMIT,
-            ))
-            evidence_truncated = evidence_truncated or len(comparison_rows) > _MAX_ANALYTICS_ROWS
-            comparison_rows = comparison_rows[:_MAX_ANALYTICS_ROWS]
-            if _database_error_filter(plan.error_code) is None:
-                comparison_rows = _filter_failure_code(comparison_rows, plan.error_code)
-            comparison_facts = _aggregate(comparison_rows, plan)
-        sources = [{
-            "source": "vConnectorIncidentFacts",
-            "count": len(rows),
-            "items": [json_safe(row) for row in rows[:MAX_LIMIT]],
-        }]
-        if comparison_rows:
-            sources.append({
-                "source": "vConnectorIncidentFacts.previous_period",
-                "count": len(comparison_rows),
-                "items": [json_safe(row) for row in comparison_rows[:MAX_LIMIT]],
-            })
-        answer = _answer(
-                facts,
-                plan,
-                from_at,
-                to_at,
-                comparison_facts,
-                rows=rows,
-                intent=intent,
-            )
-        if evidence_truncated:
-            answer = (
-                "Mình chưa thể xác nhận kết quả chính xác vì phạm vi truy vấn vượt quá "
-                f"{_MAX_ANALYTICS_ROWS} incident. Cần dùng phép tổng hợp tại database "
-                "thay vì suy luận từ một tập dữ liệu bị cắt."
-            )
-        return {
-            "answer": answer,
-            "sources": sources,
-            "query_plan": plan.to_dict(),
-            "from_at": from_at.isoformat() if from_at else None,
-            "to_at": to_at.isoformat() if to_at else None,
-            "row_count": len(rows),
-            "evidence_ids": [
-                str(row.get("incident_id"))
-                for row in (rows + comparison_rows)[:MAX_LIMIT]
-            ],
-            "status": "no_answer" if evidence_truncated else "ok",
-            "reason": "analytics_evidence_truncated" if evidence_truncated else None,
-            "fallback_reason": "analytics_evidence_truncated" if evidence_truncated else None,
-            "_conversation_state": {
-                "plan": plan,
-                "facts": facts,
-                "selected_error_code": _selected_error_code(facts[0]) if facts else None,
-            },
-        }
 
-    def _plan(self, question: str) -> QueryPlan:
-        if _question_intent(question) in {"top_error", "error_detail"}:
-            return _fallback_plan(question)
-        if not self._config.hf_endpoint_url:
-            return _fallback_plan(question)
-        response = self._client.post(
-            chat_completions_url(self._config.hf_endpoint_url),
-            headers={"Authorization": f"Bearer {self._config.hf_token}"},
-            json={
-                "model": self._config.hf_model_id,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": _planner_prompt()},
-                    {"role": "user", "content": question},
-                ],
-                "temperature": 0,
-                "max_tokens": 700,
-            },
-            timeout=self._config.hf_request_timeout_seconds,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        try:
-            content = payload["choices"][0]["message"]["content"]
-            return _enforce_question_semantics(question, parse_plan(json.loads(content)))
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError, ValueError) as exc:
-            raise ChatPlanningError(
-                "Hugging Face planner did not return a valid query plan"
-            ) from exc
+def _planning_failure(reason: str, *, timezone_name: str = "Asia/Ho_Chi_Minh") -> dict[str, Any]:
+    outcome = cannot_verify(reason=reason)
+    presentation = build_fallback_presentation(outcome, timezone_name=timezone_name)
+    return {
+        "answer": SemanticResponseRenderer().render_outcome(presentation),
+        "route": "unsupported",
+        "source": "deterministic_fallback",
+        **outcome.to_dict(),
+        "status": outcome.outcome,
+        "reason": reason,
+        "fallback_reason": reason,
+        "citations": [],
+        "sources": [],
+        "evidence": [],
+        "recommended_runbooks": [],
+        "candidates": [],
+        "query_plan": None,
+        "semantic_plan": None,
+        "evidence_ids": [],
+    }
 
 
-def _normalize_text(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value.casefold())
-    plain = "".join(character for character in decomposed if not unicodedata.combining(character))
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", plain).split())
+def _execution_failure(
+    reason: str,
+    *,
+    exception: Exception,
+    timezone_name: str = "Asia/Ho_Chi_Minh",
+) -> dict[str, Any]:
+    """Return a public-safe source failure without converting it into no data."""
+
+    outcome = degraded(reason=reason)
+    presentation = build_fallback_presentation(outcome, timezone_name=timezone_name)
+    return {
+        "answer": SemanticResponseRenderer().render_outcome(presentation),
+        "route": "analytics",
+        "source": "deterministic_outcome_renderer",
+        **outcome.to_dict(),
+        "status": outcome.outcome,
+        "reason": outcome.reason,
+        "fallback_reason": outcome.reason,
+        "citations": [],
+        "sources": [],
+        "evidence": [],
+        "recommended_runbooks": [],
+        "candidates": [],
+        "query_plan": None,
+        "semantic_plan": None,
+        "evidence_ids": [],
+        "diagnostics": {"execution_error": type(exception).__name__},
+    }
 
 
-def _question_intent(question: str) -> str:
-    """Recognize a small set of business intents that require deterministic semantics."""
+def _time_range_applied(
+    from_at: datetime | None, to_at: datetime | None, timezone_name: str
+) -> dict[str, str | None]:
+    return {
+        "from_at": from_at.isoformat() if from_at else None,
+        "to_at": to_at.isoformat() if to_at else None,
+        "timezone": timezone_name,
+        "timestamp": "failure_at",
+    }
 
-    normalized = _normalize_text(question)
-    top = any(
-        phrase in normalized
-        for phrase in ("pho bien nhat", "thuong gap nhat", "nhieu nhat", "top 1")
-    )
-    error_subject = any(
-        phrase in normalized
-        for phrase in ("loi", "ma loi", "error", "failure", "nguyen nhan")
-    )
-    connector_ranking = bool(
-        re.search(
-            r"\b(?:connector|job)\b.{0,40}\b(?:nhieu nhat|thuong xuyen|hay gap)\b",
-            normalized,
-        )
-    )
-    if top and error_subject and not connector_ranking:
-        return "top_error"
-    if _TECHNICAL_CODE.search(question) and any(
-        phrase in normalized
-        for phrase in (
-            "noi dung loi",
-            "thong bao loi",
-            "message loi",
-            "error message",
-            "loi day du",
-            "loi gi",
-            "y nghia",
-        )
-    ):
-        return "error_detail"
-    return "analytics"
+
+def _analytics_envelope(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **result,
+        "route": "analytics",
+        "source": result.get("source") or "analytics",
+        "citations": [],
+        "status": result.get("status") or "ok",
+        "reason": result.get("reason"),
+        "fallback_reason": result.get("fallback_reason"),
+        "recommended_runbooks": [],
+        "candidates": [],
+    }
+
+
+def _retrieval_config(config: RagConfig, *, mode: str, collection: str, timeout_seconds: float | None = None) -> RagConfig:
+    available = {item.name for item in fields(config)}
+    changes: dict[str, Any] = {"search_mode": mode, "collection": collection}
+    if "retrieval_mode" in available:
+        changes["retrieval_mode"] = mode
+    if timeout_seconds is not None:
+        changes["request_timeout_seconds"] = timeout_seconds
+    return replace(config, **changes)
+
+
+def _validate_conversation_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _CONVERSATION_ID.fullmatch(value):
+        raise ChatInputError("conversation_id is invalid")
+    return value
+
+
+def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, Any]]:
+    """Translate scalar aliases from the executed T-SQL result to facts.
+
+    The mapping is fixed in the compiler; it is not a second aggregation and
+    cannot alter counts, rank, or connector lineage returned by SQL Server.
+    """
+
+    dimensions = {
+        "job_name": "root_connector_name",
+        "connector_name": "current_connector_name",
+        "error_code": "error_code",
+        "failure_code": "error_signature",
+        "final_outcome": "final_outcome",
+    }
+    metrics = {
+        "failure_count": "incident_count",
+        "recovered_count": "recovered_incident_count",
+        "open_count": "open_incident_count",
+        "average_recovery_minutes": "average_recovery_minutes",
+        "recovery_rate_percent": "recovery_rate_percent",
+    }
+    facts: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        required = [dimensions[field] for field in plan.group_by] + [
+            metrics[metric.name] for metric in plan.metrics
+        ]
+        if plan.group_by:
+            required.extend(["rank", "tie_count", "row_number"])
+        if any(field not in row for field in required):
+            # The query did run, but a changed view/driver result cannot be
+            # treated as complete evidence.  Returning no facts lets the
+            # outcome classifier emit cannot_verify rather than a false empty.
+            return []
+        fact: dict[str, Any] = {}
+        for field in plan.group_by:
+            value = row.get(dimensions[field])
+            if value is None and field in {"error_code", "failure_code"}:
+                # The compiler filters these dimensions; a NULL now means the
+                # source did not honour its result contract.
+                continue
+            fact[field] = value if value not in {None, ""} else "Chưa xác định"
+        if not plan.group_by:
+            fact["label"] = "Tất cả"
+        for metric in plan.metrics:
+            value = row.get(metrics[metric.name])
+            # pyodbc may return Decimal.  Convert at the boundary so evidence
+            # and the JSON response remain scalar and deterministic.
+            if hasattr(value, "as_tuple"):
+                value = float(value)
+            fact[metric.name] = value
+        for field in ("recovery_rate_numerator", "recovery_rate_denominator", "rank", "tie_count", "row_number"):
+            value = row.get(field)
+            if value is not None:
+                fact[field] = int(value) if field in {"rank", "tie_count", "row_number", "recovery_rate_numerator", "recovery_rate_denominator"} else value
+        raw_ids = row.get("evidence_ids")
+        fact["evidence_ids"] = [
+            item for item in str(raw_ids or "").split(";") if item
+        ]
+        facts.append(fact)
+    if plan.tie_policy == "exact_limit" and facts and plan.group_by:
+        boundary = facts[-1].get(plan.order_by)
+        selected = sum(1 for item in facts if item.get(plan.order_by) == boundary)
+        for fact in facts:
+            if fact.get(plan.order_by) == boundary:
+                fact["tie_truncated"] = int(fact.get("tie_count") or 0) > selected
+    return facts
 
 
 def _prepare_incident_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -577,388 +840,115 @@ def _failure_signature(row: dict[str, Any]) -> str | None:
     if error_code:
         return error_code.group(1)
     exceptions = _EXCEPTION_CLASS.findall(message)
-    if exceptions:
-        return exceptions[-1]
-    return None
+    return exceptions[-1] if exceptions else None
 
 
 def _database_error_filter(error_code: str | None) -> str | None:
-    """The SQL view currently has an exact indexed projection only for Oracle codes."""
-
-    if error_code and re.fullmatch(r"ORA-\d{5}", error_code, re.IGNORECASE):
-        return error_code.upper()
-    return None
+    return error_code.upper() if error_code and re.fullmatch(r"ORA-\d{5}", error_code, re.I) else None
 
 
-def _filter_failure_code(
-    rows: list[dict[str, Any]],
-    requested: str | None,
-) -> list[dict[str, Any]]:
+def _filter_failure_code(rows: list[dict[str, Any]], requested: str | None) -> list[dict[str, Any]]:
     if not requested:
         return rows
     expected = requested.upper()
-    return [
-        row
-        for row in rows
-        if str(row.get("failure_code") or "").upper() == expected
-    ]
-
-
-def _enforce_question_semantics(question: str, plan: QueryPlan) -> QueryPlan:
-    if _question_intent(question) == "top_error":
-        return replace(
-            plan,
-            metrics=plan.metrics
-            if any(metric.name == "failure_count" for metric in plan.metrics)
-            else _fallback_plan(question).metrics,
-            group_by=("failure_code",),
-            order_by="failure_count",
-            direction="desc",
-            limit=1,
-        )
-    return plan
-
-
-def _validate_conversation_id(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not _CONVERSATION_ID.fullmatch(value):
-        raise ChatInputError("conversation_id is invalid")
-    return value
-
-
-def _detect_follow_up(question: str) -> _FollowUp | None:
-    normalized = _normalize_text(question)
-    contextual = any(
-        marker in normalized
-        for marker in ("con ", "thi sao", "the nao", "vay ", "truong hop do")
-    )
-    ordinal_match = re.search(r"\bconnector\s+(?:thu\s+)?(\d+|nhat|hai|ba|tu|nam)\b", normalized)
-    if ordinal_match:
-        raw = ordinal_match.group(1)
-        ordinal = int(raw) if raw.isdigit() else _ORDINAL_WORDS[raw]
-        return _FollowUp("ordinal", ordinal=ordinal)
-    if (
-        not _TECHNICAL_CODE.search(question)
-        and not re.search(r"\bconnector\s+[a-z0-9._-]{3,}\b", normalized)
-        and re.fullmatch(
-            r"(?:(?:vay|the|con) )?(?:cach|huong) (?:xu ly|khac phuc)"
-            r"(?: (?:loi|su co)(?: nay| do)?)?(?: la gi)?",
-            normalized,
-        )
-    ):
-        return _FollowUp("remediation")
-    if contextual:
-        for phrase, value in _RELATIVE_TIME_PHRASES.items():
-            if phrase in normalized:
-                return _FollowUp("time", time_range=value)
-    return None
-
-
-def _missing_context_response(follow_up: _FollowUp) -> dict[str, Any]:
-    if follow_up.kind == "ordinal":
-        answer = (
-            "Mình chưa có kết quả xếp hạng trước đó trong cuộc trò chuyện này. "
-            "Bạn muốn xếp hạng connector theo số incident, số healing log hay chỉ số nào khác?"
-        )
-    elif follow_up.kind == "remediation":
-        answer = (
-            "Mình chưa xác định được lỗi nào từ ngữ cảnh trước. "
-            "Bạn hãy cho biết mã lỗi hoặc tên lỗi cần xử lý."
-        )
-    else:
-        answer = (
-            "Mình chưa có câu hỏi trước đó để biết cần áp dụng mốc thời gian này cho chỉ số nào. "
-            "Bạn muốn xem số incident, tỷ lệ phục hồi hay thời gian xử lý?"
-        )
-    return {
-        "answer": answer,
-        "route": "analytics",
-        "source": "deterministic_fallback",
-        "status": "needs_clarification",
-        "reason": "missing_compatible_context",
-        "fallback_reason": "missing_compatible_context",
-        "citations": [],
-        "sources": [],
-        "query_plan": None,
-        "row_count": 0,
-        "evidence_ids": [],
-    }
-
-
-def _ordinal_follow_up_response(state: _ConversationState, ordinal: int) -> dict[str, Any]:
-    plan = state.plan
-    if (
-        plan is None
-        or ordinal < 1
-        or not set(plan.group_by).intersection({"job_name", "connector_name"})
-    ):
-        return _missing_context_response(_FollowUp("ordinal", ordinal=ordinal))
-    if ordinal > len(state.facts):
-        return {
-            **_missing_context_response(_FollowUp("ordinal", ordinal=ordinal)),
-            "answer": (
-                f"Kết quả trước chỉ có {len(state.facts)} connector, nên chưa có vị trí thứ {ordinal}. "
-                "Bạn có muốn mình chạy lại với phạm vi rộng hơn không?"
-            ),
-            "reason": "ordinal_out_of_range",
-            "fallback_reason": "ordinal_out_of_range",
-        }
-    fact = dict(state.facts[ordinal - 1])
-    connector = _selected_connector(fact, plan) or "connector chưa xác định"
-    metric_text = _fact_metric_text(fact, plan)
-    tie_note = ""
-    if ordinal > 1:
-        previous = state.facts[ordinal - 2].get(plan.order_by)
-        current = fact.get(plan.order_by)
-        if previous is not None and previous == current:
-            tie_note = " Connector này đồng hạng với vị trí ngay trước đó."
-    return {
-        "answer": f"Ở vị trí thứ {ordinal} là {connector}, với {metric_text}.{tie_note}",
-        "route": "analytics",
-        "source": "conversation_verified_result",
-        "status": "ok",
-        "reason": None,
-        "fallback_reason": None,
-        "citations": [],
-        "sources": [{"source": "conversation_verified_result", "count": 1, "items": [fact]}],
-        "query_plan": plan.to_dict(),
-        "from_at": state.from_at,
-        "to_at": state.to_at,
-        "row_count": 1,
-        "evidence_ids": list(fact.get("evidence_ids") or state.evidence_ids),
-        "_conversation_state": {
-            "plan": plan,
-            "facts": [dict(item) for item in state.facts],
-            "selected_connector": connector,
-        },
-    }
-
-
-def _selected_connector(fact: dict[str, Any], plan: QueryPlan) -> str | None:
-    for field in ("connector_name", "job_name"):
-        value = fact.get(field)
-        if field in plan.group_by and isinstance(value, str) and value.strip() and value != "—":
-            return value.strip()
-    return None
-
-
-def _selected_error_code(fact: dict[str, Any]) -> str | None:
-    for field in ("failure_code", "error_code"):
-        value = fact.get(field)
-        if isinstance(value, str) and value.strip() and value != "—":
-            return value.strip()
-    return None
-
-
-def _fact_metric_text(fact: dict[str, Any], plan: QueryPlan) -> str:
-    values: list[str] = []
-    for metric in plan.metrics:
-        value = fact.get(metric.name)
-        if metric.name == "failure_count":
-            values.append(f"{value} incident đã xác nhận")
-        elif metric.name == "recovered_count":
-            values.append(f"{value} incident đã phục hồi")
-        elif metric.name == "open_count":
-            values.append(f"{value} incident chưa có kết quả cuối")
-        elif value is None:
-            values.append("chưa có thời gian phục hồi hợp lệ để tính trung bình")
-        else:
-            values.append(f"thời gian phục hồi trung bình {value} phút")
-    return ", ".join(values)
-
-
-def _analytics_envelope(result: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **result,
-        "route": "analytics",
-        "source": "analytics",
-        "citations": [],
-        "fallback_reason": result.get("fallback_reason"),
-        "status": result.get("status") or "ok",
-        "reason": result.get("reason"),
-        "evidence": [],
-        "recommended_runbooks": [],
-        "candidates": [],
-    }
-
-
-def _retrieval_config(
-    config: RagConfig,
-    *,
-    mode: str,
-    collection: str,
-    timeout_seconds: float | None = None,
-) -> RagConfig:
-    """Create one concrete store config while preserving legacy RagConfig callers."""
-
-    available = {item.name for item in fields(config)}
-    changes: dict[str, Any] = {
-        "search_mode": mode,
-        "collection": collection,
-    }
-    # Newer configuration exposes the orchestration mode separately. Replacing it
-    # prevents validation from treating a concrete shadow store as another shadow.
-    if "retrieval_mode" in available:
-        changes["retrieval_mode"] = mode
-    if timeout_seconds is not None:
-        changes["request_timeout_seconds"] = timeout_seconds
-    return replace(config, **changes)
-
-
-def _planner_prompt() -> str:
-    contract = {
-        "dataset": "connector_incidents",
-        "metrics": [
-            {"name": "failure_count", "aggregation": "count_distinct_incident"}
-        ],
-        "group_by": ["job_name"],
-        "filters": {
-            "time_range": {"kind": "relative", "value": "last_7_days"},
-            "event_type": ["HEALTH_FAILED_CONFIRMED"],
-            "final_outcome": ["RECOVERED"],
-            "connector_name": "optional exact connector name",
-            "error_code": "optional exact error code",
-        },
-        "order_by": [{"field": "failure_count", "direction": "desc"}],
-        "limit": 5,
-        "comparison": "previous_period",
-    }
-    ranking_example = {
-        "dataset": "connector_incidents",
-        "metrics": [
-            {"name": "failure_count", "aggregation": "count_distinct_incident"}
-        ],
-        "group_by": ["job_name"],
-        "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
-        "order_by": [{"field": "failure_count", "direction": "desc"}],
-        "limit": 5,
-    }
-    top_error_example = {
-        "dataset": "connector_incidents",
-        "metrics": [
-            {"name": "failure_count", "aggregation": "count_distinct_incident"}
-        ],
-        "group_by": ["failure_code"],
-        "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
-        "order_by": [{"field": "failure_count", "direction": "desc"}],
-        "limit": 1,
-    }
-    incident_example = {
-        "dataset": "connector_incidents",
-        "metrics": [
-            {"name": "failure_count", "aggregation": "count_distinct_incident"}
-        ],
-        "group_by": ["connector_name", "error_code", "final_outcome"],
-        "filters": {
-            "event_type": ["HEALTH_FAILED_CONFIRMED"],
-            "connector_name": "sample-oracle-orders",
-            "error_code": "ORA-01017",
-        },
-        "order_by": [{"field": "failure_count", "direction": "desc"}],
-        "limit": 20,
-    }
-    return (
-        "You are a query planner, not an answer writer. Return exactly one JSON object "
-        "and no prose. Never return SQL, database object names, procedures, code, advice, "
-        "causes, actions, credentials, or keys outside this contract. The only top-level "
-        "keys are dataset, metrics, group_by, filters, order_by, limit, and optional "
-        "comparison. metrics must be an array of objects with name and aggregation; "
-        "filters must contain every filter. Omit optional filters and comparison when the "
-        "question does not request them. Select values only from this semantic catalog: "
-        + json.dumps(CATALOG, ensure_ascii=False)
-        + ". Valid relative time values are today, yesterday, last_7_days, this_month, "
-        "this_week, and last_week. Valid metric-to-aggregation mappings are: failure_count, "
-        "recovered_count, and open_count use count_distinct_incident; "
-        "average_recovery_minutes uses average_recovery_minutes. Use failure_count and "
-        "group_by job_name for connector ranking. Use failure_code, not error_code, for "
-        "ranking error types because failure_code also covers non-Oracle failures. A singular "
-        "'most common' question uses limit 1. A question that also asks for causes or "
-        "actions still requires only an analytics query plan here. Contract shape example "
-        "(illustrative optional fields; do not copy filters not asked for): "
-        + json.dumps(contract, ensure_ascii=False)
-        + ". Example input: Connector nào thường xuyên gặp sự cố nhất? Example output: "
-        + json.dumps(ranking_example, ensure_ascii=False)
-        + ". Example input: Lỗi phổ biến nhất là gì? Example output: "
-        + json.dumps(top_error_example, ensure_ascii=False)
-        + ". Example input: Connector sample-oracle-orders đang báo ORA-01017, nguyên nhân "
-        "có thể là gì và cần xử lý thế nào? Example output: "
-        + json.dumps(incident_example, ensure_ascii=False)
-    )
-
-
-def _fallback_plan(question: str) -> QueryPlan:
-    text = question.lower()
-    intent = _question_intent(question)
-    time_value = next((value for term, value in {
-        "hôm nay": "today", "hôm qua": "yesterday", "7 ngày": "last_7_days",
-        "tuần trước": "last_week", "tháng này": "this_month",
-    }.items() if term in text), None)
-    metric = "average_recovery_minutes" if "thời gian" in text else "failure_count"
-    outcome = ["OPEN"] if "chưa recovery" in text or "chưa phục hồi" in text else []
-    error_match = _TECHNICAL_CODE.search(question)
-    error_code = error_match.group(0).upper() if error_match else None
-    comparison = "previous_period" if "tăng hay giảm" in text or "so với" in text else None
-    group_by = ["failure_code"] if intent == "top_error" else ["job_name"]
-    if intent == "error_detail":
-        group_by = ["connector_name", "error_code"]
-    return parse_plan({
-        "dataset": "connector_incidents",
-        "metrics": [{
-            "name": metric,
-            "aggregation": "average_recovery_minutes" if metric == "average_recovery_minutes" else "count_distinct_incident",
-        }],
-        "group_by": group_by,
-        "filters": {**({"time_range": {"kind": "relative", "value": time_value}} if time_value else {}), "event_type": ["HEALTH_FAILED_CONFIRMED"], **({"final_outcome": outcome} if outcome else {}), **({"error_code": error_code} if error_code else {})},
-        "order_by": [{"field": metric, "direction": "desc"}],
-        "limit": 1 if intent == "top_error" else 20 if intent == "error_detail" else 5,
-        **({"comparison": comparison} if comparison else {}),
-    })
+    return [row for row in rows if str(row.get("failure_code") or "").upper() == expected]
 
 
 def _aggregate(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, Any]]:
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for row in rows:
-        if any(
-            field in {"error_code", "failure_code"} and not row.get(field)
-            for field in plan.group_by
-        ):
-            # Unknown errors are not a named error category and must never win a
-            # "most common error" ranking merely because many rows are unclassified.
+        if any(field in {"error_code", "failure_code"} and not row.get(field) for field in plan.group_by):
             continue
-        key = tuple(str(row.get(field) or "Chưa xác định") for field in plan.group_by) or (
-            "Tất cả",
-        )
+        key = tuple(str(row.get(field) or "Chưa xác định") for field in plan.group_by) or ("Tất cả",)
         groups.setdefault(key, []).append(row)
-    facts = []
+    facts: list[dict[str, Any]] = []
     for key, items in groups.items():
         fact: dict[str, Any] = dict(zip(plan.group_by or ("label",), key, strict=True))
-        fact["evidence_ids"] = [str(item.get("incident_id")) for item in items]
+        fact["evidence_ids"] = [str(item.get("incident_id")) for item in items if item.get("incident_id") is not None]
         for metric in plan.metrics:
             if metric.name == "failure_count":
                 fact[metric.name] = len({item.get("incident_id") for item in items})
             elif metric.name == "recovered_count":
-                fact[metric.name] = sum(item.get("final_outcome") == "RECOVERED" for item in items)
+                fact[metric.name] = len({item.get("incident_id") for item in items if item.get("final_outcome") == "RECOVERED"})
             elif metric.name == "open_count":
-                fact[metric.name] = sum(item.get("final_outcome") == "OPEN" for item in items)
+                fact[metric.name] = len({item.get("incident_id") for item in items if item.get("final_outcome") == "OPEN"})
             elif metric.name == "average_recovery_minutes":
-                durations = []
-                for item in items:
-                    duration = _duration(item)
-                    if duration is not None:
-                        durations.append(duration)
+                durations = [duration for item in items if (duration := _duration(item)) is not None]
                 fact[metric.name] = round(sum(durations) / len(durations), 2) if durations else None
                 fact["valid_recovery_duration_count"] = len(durations)
                 fact["excluded_recovery_duration_count"] = len(items) - len(durations)
+            elif metric.name == "recovery_rate_percent":
+                denominator = len({item.get("incident_id") for item in items if item.get("incident_id") is not None})
+                numerator = len({
+                    item.get("incident_id")
+                    for item in items
+                    if item.get("incident_id") is not None and item.get("final_outcome") == "RECOVERED"
+                })
+                fact[metric.name] = round((numerator / denominator) * 100, 2) if denominator else None
+                fact["recovery_rate_denominator"] = denominator
+                fact["recovery_rate_numerator"] = numerator
+        for detail in plan.details:
+            values = _unique_values(items, detail)
+            if values:
+                fact[detail] = values[0] if len(values) == 1 else values[:3]
         facts.append(fact)
     present = [item for item in facts if item.get(plan.order_by) is not None]
     missing = [item for item in facts if item.get(plan.order_by) is None]
     present.sort(key=lambda item: tuple(str(item.get(field) or "") for field in plan.group_by))
-    present.sort(
-        key=lambda item: item[plan.order_by],
-        reverse=plan.direction == "desc",
-    )
-    return (present + missing)[: plan.limit]
+    present.sort(key=lambda item: item[plan.order_by], reverse=plan.direction == "desc")
+    ordered = present + missing
+    if not plan.group_by:
+        return ordered[:plan.limit]
+    # The fallback aggregation exists for offline fixtures and unsupported
+    # projections.  It applies exactly the same ranking semantics as the
+    # production T-SQL compiler: top N ranks include boundary ties by default.
+    rank = 0
+    previous: Any = object()
+    tie_counts: dict[Any, int] = {}
+    for item in present:
+        tie_counts[item[plan.order_by]] = tie_counts.get(item[plan.order_by], 0) + 1
+    for index, item in enumerate(ordered, start=1):
+        value = item.get(plan.order_by)
+        if value != previous:
+            rank += 1
+            previous = value
+        item["rank"] = rank
+        item["tie_count"] = tie_counts.get(value, 1)
+        item["row_number"] = index
+    if plan.tie_policy == "exact_limit":
+        selected = ordered[:plan.limit]
+        if selected:
+            boundary = selected[-1].get(plan.order_by)
+            selected_boundary_count = sum(1 for item in selected if item.get(plan.order_by) == boundary)
+            for item in selected:
+                if item.get(plan.order_by) == boundary:
+                    item["tie_truncated"] = int(item["tie_count"]) > selected_boundary_count
+        return selected
+    return [item for item in ordered if int(item["rank"]) <= plan.limit]
+
+
+def _unique_values(rows: list[dict[str, Any]], field: str) -> list[Any]:
+    values: list[Any] = []
+    for row in rows:
+        value = row.get(field)
+        if value not in {None, ""} and value not in values:
+            values.append(value)
+    return values
+
+
+def _verified_result_row(fact: dict[str, Any]) -> dict[str, str | int | float | bool | None]:
+    """Keep the browser table contract scalar while retaining all fact values."""
+
+    row: dict[str, str | int | float | bool | None] = {}
+    for key, value in fact.items():
+        safe = json_safe(value)
+        if safe is None or isinstance(safe, (str, int, float, bool)):
+            row[key] = safe
+        elif isinstance(safe, list):
+            row[key] = "; ".join(str(item) for item in safe)
+        else:
+            row[key] = str(safe)
+    return row
 
 
 def _duration(item: dict[str, Any]) -> float | None:
@@ -967,119 +957,7 @@ def _duration(item: dict[str, Any]) -> float | None:
     start, end = item.get("failure_at"), item.get("recovered_at")
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return None
-    # MSSQL timestamps are offset-aware. Unknown timezones must not be guessed.
     if start.utcoffset() is None or end.utcoffset() is None:
         return None
     minutes = (end - start).total_seconds() / 60
     return minutes if minutes >= 0 else None
-
-
-def _answer(
-    facts: list[dict[str, Any]],
-    plan: QueryPlan,
-    from_at: datetime | None,
-    to_at: datetime | None,
-    comparison_facts: list[dict[str, Any]],
-    *,
-    rows: list[dict[str, Any]],
-    intent: str,
-) -> str:
-    if not facts:
-        return "Không có dữ liệu phù hợp trong khoảng thời gian đã truy vấn."
-    if intent == "top_error":
-        return _top_error_answer(facts[0], rows)
-    if intent == "error_detail":
-        return _error_detail_answer(plan.error_code, rows)
-    lines = _summary_lines(facts, plan)
-    details = facts
-    if lines and len(facts) > 1:
-        leader_value = facts[0].get(plan.order_by)
-        details = [fact for fact in facts if fact.get(plan.order_by) != leader_value]
-        if details:
-            lines.append("Các kết quả tiếp theo:")
-    elif lines:
-        details = []
-    for fact in details:
-        label = ", ".join(
-            str(fact.get(key) or "—") for key in plan.group_by
-        ) or "Toàn bộ phạm vi"
-        metrics = []
-        for metric in plan.metrics:
-            value = fact.get(metric.name)
-            if metric.name == "failure_count":
-                metrics.append(f"{value} incident đã xác nhận")
-            elif metric.name == "recovered_count":
-                metrics.append(f"{value} incident đã phục hồi")
-            elif metric.name == "open_count":
-                metrics.append(f"{value} incident chưa có kết quả cuối")
-            elif value is None:
-                metrics.append("chưa có thời gian phục hồi hợp lệ để tính trung bình")
-            else:
-                metrics.append(f"thời gian phục hồi trung bình {value} phút")
-        lines.append(f"{label}: {', '.join(metrics)}.")
-    if from_at and to_at:
-        lines.append(f"Khoảng thời gian: {from_at.isoformat()} đến {to_at.isoformat()}.")
-    if plan.comparison:
-        current = sum(int(fact.get("failure_count") or 0) for fact in facts)
-        previous = sum(int(fact.get("failure_count") or 0) for fact in comparison_facts)
-        direction = "tăng" if current > previous else "giảm" if current < previous else "không đổi"
-        lines.append(f"So với kỳ trước: {direction} ({current} so với {previous}).")
-    return "\n".join(lines)
-
-
-def _top_error_answer(leader: dict[str, Any], rows: list[dict[str, Any]]) -> str:
-    code = str(leader.get("failure_code") or leader.get("error_code") or "").strip()
-    count = int(leader.get("failure_count") or 0)
-    matching = [row for row in rows if row.get("failure_code") == code]
-    connectors = _unique_text(matching, "job_name")
-    messages = _unique_text(matching, "error_message")
-    answer = f"Lỗi phổ biến nhất là {code}, xuất hiện trong {count} incident đã xác nhận."
-    if connectors:
-        answer += " Connector gặp lỗi này: " + ", ".join(connectors) + "."
-    if messages:
-        answer += " Nội dung lỗi được ghi nhận: " + " | ".join(f"“{item}”" for item in messages[:3])
-        answer += "."
-    return answer
-
-
-def _error_detail_answer(error_code: str | None, rows: list[dict[str, Any]]) -> str:
-    code = error_code or next(
-        (str(row.get("failure_code")) for row in rows if row.get("failure_code")),
-        "mã lỗi được hỏi",
-    )
-    messages = _unique_text(rows, "error_message")
-    connectors = _unique_text(rows, "job_name")
-    if not messages:
-        return f"Mình chưa tìm thấy nội dung log đã xác minh cho {code} trong phạm vi dữ liệu hiện tại."
-    answer = f"Nội dung lỗi đầy đủ được ghi nhận cho {code}: "
-    answer += " | ".join(f"“{item}”" for item in messages[:3]) + "."
-    if connectors:
-        answer += " Lỗi xuất hiện trên connector: " + ", ".join(connectors) + "."
-    return answer
-
-
-def _unique_text(rows: list[dict[str, Any]], field: str) -> list[str]:
-    result: list[str] = []
-    for row in rows:
-        value = str(row.get(field) or "").strip()
-        if value and value not in result:
-            result.append(value)
-    return result
-
-
-def _summary_lines(facts: list[dict[str, Any]], plan: QueryPlan) -> list[str]:
-    """State the ranking conclusion before the detailed, cited evidence."""
-    if plan.order_by != "failure_count" or not plan.group_by:
-        return []
-    highest = max(int(fact.get("failure_count") or 0) for fact in facts)
-    leaders = [
-        str(fact.get(plan.group_by[0]) or "—")
-        for fact in facts
-        if int(fact.get("failure_count") or 0) == highest
-    ]
-    if len(leaders) == 1:
-        return [f"{leaders[0]} gặp lỗi nhiều nhất: {highest} incident đã xác nhận."]
-    return [
-        "Không có connector nào gặp lỗi nhiều hơn; "
-        f"{', '.join(leaders)} đồng hạng với {highest} incident đã xác nhận."
-    ]

@@ -13,6 +13,9 @@ dependencies = [
     "python-json-logger==2.0.7",
     "PyYAML>=6.0.2,<7",
     "qdrant-client>=1.17,<2",
+    # Windows has no system IANA timezone database; ZoneInfo needs this for UTC
+    # and configured zones such as Asia/Ho_Chi_Minh.
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]

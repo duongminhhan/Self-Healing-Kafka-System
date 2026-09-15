@@ -136,6 +136,10 @@ class RetrievalQuery:
     environment: str = "all"
     connector_class: str | None = None
     error_codes: tuple[str, ...] = ()
+    # This value originates from the backend-validated semantic plan.  The
+    # retriever may use it to select relevant runbook sections, but must never
+    # infer it from the user's natural-language wording.
+    purpose: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,33 +264,13 @@ class Citation:
 
 
 @dataclass(frozen=True)
-class RouteDecision:
-    route: Route
-    connector_name: str | None = None
-    connector_class: str | None = None
-    error_codes: tuple[str, ...] = ()
-    time_scope: str | None = None
-    needs_clarification: bool = False
-    clarification_question: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "route": self.route.value,
-            "connector_name": self.connector_name,
-            "connector_class": self.connector_class,
-            "error_codes": list(self.error_codes),
-            "time_scope": self.time_scope,
-            "needs_clarification": self.needs_clarification,
-            "clarification_question": self.clarification_question,
-        }
-
-
-@dataclass(frozen=True)
 class ComposedAnswer:
     answer: str
     source: Literal["analytics", "runbook", "combined", "deterministic_fallback"]
     citations: tuple[Citation, ...] = ()
     fallback_reason: str | None = None
+    claims: tuple[dict[str, Any], ...] = ()
+    generation_attempts: int = 0
 
 
 @dataclass
