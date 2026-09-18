@@ -58,12 +58,20 @@ const timeRangeAppliedSchema = z.object({
   from_at: z.string().max(80).nullish(), to_at: z.string().max(80).nullish(),
   timezone: label, timestamp: label,
 });
+const presentationSchema = z.object({
+  summary_item_limit:z.number().int().positive(), summary_detail_limit:z.number().int().positive(),
+  result_total_count:z.number().int().nonnegative(), displayed_count:z.number().int().nonnegative(),
+  remaining_count:z.number().int().nonnegative(), ranking:label.nullish(),
+  tie_policy:z.enum(["exact_limit","include_ties"]).nullish(), boundary_tie_count:z.number().int().positive().nullish(),
+  boundary_tie_truncated:z.boolean(), has_more_verified_results:z.boolean(), detail_accessible:z.boolean(),
+});
 export const backendSchema = z.object({
   answer: z.string().max(150000).nullish(), route: label.nullish(), source: label.nullish(),
   citations: z.array(citationSchema).max(100).nullish(), fallback_reason: label.nullish(),
   status: label.nullish(), reason: label.nullish(), row_count: z.number().int().nonnegative().nullish(),
   outcome: outcomeSchema.nullish(), query_executed: z.boolean().nullish(), evidence_complete: z.boolean().nullish(),
   source_kind: label.nullish(), snapshot_freshness: label.nullish(), time_range_applied: timeRangeAppliedSchema.nullish(),
+  presentation: presentationSchema.nullish(),
   evidence: z.array(evidenceSchema).max(100).nullish(),
   analytics_evidence: z.array(analyticsEvidenceSchema).max(100).nullish(),
   claims: z.array(analyticsClaimSchema).max(400).nullish(),

@@ -43,6 +43,7 @@ def _empty_analytics_fields() -> dict[str, Any]:
         "source_kind": "historical_incident_snapshot",
         "snapshot_freshness": None,
         "time_range_applied": None,
+        "presentation": None,
         "evidence_ids": [],
         "analytics_evidence": [],
         "claims": [],

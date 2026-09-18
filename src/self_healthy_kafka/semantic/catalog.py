@@ -138,6 +138,14 @@ SEMANTIC_CATALOG: dict[str, Any] = {
             "last_week": "trong tuần trước theo múi giờ {timezone}",
             "this_month": "trong tháng này theo múi giờ {timezone}",
         },
+        # Presentation limits bound prose only.  They never remove evidence
+        # from the verified-result table.
+        "summary_policy": {
+            "summary_item_limit": 3,
+            "summary_detail_limit": 1,
+            "more_results_vi": "Còn {count} kết quả đã xác minh khác trong bảng chi tiết.",
+            "boundary_tie_vi": "Có thêm {count} kết quả đồng hạng với vị trí thứ {rank}; bảng chi tiết chứa đầy đủ danh sách.",
+        },
     },
     "filters": {
         "time_range": {"type": "relative", "values": ["today", "yesterday", "last_7_days", "this_week", "last_week", "this_month"], "timestamp": "failure_at"},
@@ -175,7 +183,10 @@ SEMANTIC_CATALOG: dict[str, Any] = {
                     "nhieu nhat", "thuong xuyen nhat", "top", "most", "highest", "worst",
                 ],
             },
-            "exact_result_count": ["chinh xac", "exactly", "exact"],
+            "include_ties": [
+                "bao gom dong hang", "ke ca dong hang", "cung hang", "dong hang",
+                "tat ca o hang", "including ties", "with ties",
+            ],
             "time_scopes": {
                 "today": ["hom nay", "today"],
                 "yesterday": ["hom qua", "yesterday"],
@@ -186,9 +197,9 @@ SEMANTIC_CATALOG: dict[str, Any] = {
             },
         },
         "ranking_policy": {
-            "default": "include_ties",
-            "include_ties": "Top N means the first N dense ranks and includes every entity tied at the boundary.",
-            "exact_limit": "Use exactly N rows only when the user explicitly requests an exact count; stable ordering is logical connector name ascending after metric order.",
+            "default": "exact_limit",
+            "include_ties": "Include every entity tied at the Nth dense rank only when the user explicitly asks to include ties.",
+            "exact_limit": "Top N means exactly N rows by default; stable ordering is logical connector name ascending after metric order.",
         },
     },
     "intents": {

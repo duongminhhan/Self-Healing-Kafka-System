@@ -249,6 +249,18 @@ test("verified table can filter, stably sort, reset and open fullscreen",async({
   await expect(fullscreenButton).toBeFocused();
 });
 
+test("compact analytics summaries link to the complete verified table without another request",async({page})=>{
+  await page.goto("/");
+  await sendQuestion(page,"Presentation summary test");
+  const latest=page.locator(".assistant-message").last();
+  await expect(latest).toContainText("Có thêm 1 kết quả đồng hạng");
+  await expect(latest).toContainText("Ba kết quả chính đã được xác minh.");
+  const more=page.getByRole("button",{name:"Xem 1 kết quả đã xác minh khác"});
+  await expect(more).toBeVisible();
+  await more.click();
+  await expect(page.getByRole("region",{name:"Kết quả đã xác minh"}).locator("tbody tr")).toHaveCount(4);
+});
+
 test("shows only a verified read-only executed T-SQL query and copies its display form",async({page})=>{
   await page.goto("/");
   await sendQuestion(page,"Executed query disclosure test");

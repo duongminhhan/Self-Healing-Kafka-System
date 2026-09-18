@@ -472,6 +472,7 @@ class AnalyticsChatService:
             "evidence_ids": [str(row.get("incident_id")) for row in (rows + comparison_rows)[:MAX_LIMIT]],
             "evidence": evidence,
             "claims": claims,
+            "presentation": presentation.summary_metadata(),
             "verified_result": {
                 "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
                 "columns": list(dict.fromkeys(
@@ -565,6 +566,7 @@ class AnalyticsChatService:
             "evidence_ids": evidence_ids,
             "evidence": evidence,
             "claims": claims,
+            "presentation": presentation.summary_metadata(),
             "verified_result": {
                 "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
                 "columns": list(dict.fromkeys(field for fact in facts for field in fact)),

@@ -246,6 +246,23 @@ def test_cue_contract_preserves_an_explicit_top_n_limit():
     assert cues.limit == 3
 
 
+def test_top_n_defaults_to_exact_limit_but_explicit_ties_are_preserved():
+    exact = _connector_ranking_plan()
+    exact["data_request"]["limit"] = 3
+    ties = _connector_ranking_plan()
+    ties["data_request"]["limit"] = 3
+
+    exact_plan, _ = SemanticPlanner(lambda _messages, **_kwargs: exact).plan(
+        "Liệt kê top 3 connector gặp nhiều sự cố nhất"
+    )
+    ties_plan, _ = SemanticPlanner(lambda _messages, **_kwargs: ties).plan(
+        "Liệt kê top 3 connector gặp nhiều sự cố nhất, bao gồm các connector đồng hạng"
+    )
+
+    assert exact_plan.data_request["tie_policy"] == "exact_limit"
+    assert ties_plan.data_request["tie_policy"] == "include_ties"
+
+
 def test_plan_normalizes_dimension_level_subject_aliases_to_the_neutral_contract():
     value = _value(data_request={
         "intent": "top_error_signature",

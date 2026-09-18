@@ -85,10 +85,18 @@ export function ResponseDetails({response,timing,resultId}:{response:ChatRespons
   const metadata=[
     timing&&`Phản hồi trong ${formatElapsedTime(timing.elapsed_ms)}`,
   ].filter(Boolean) as string[];
+  const presentation=response.presentation;
+  const showMore=Boolean(
+    presentation?.has_more_verified_results
+    && presentation.detail_accessible
+    && rows.length
+    && presentation.remaining_count>0
+  );
   return <div className="response-details">
     {!!metadata.length&&<div className="response-meta badges" aria-label="Thông tin phản hồi" aria-live="polite">{metadata.map(item=><span key={item} title={item.startsWith("Phản hồi")?"Thời gian end-to-end quan sát từ trình duyệt":undefined}>{item}</span>)}</div>}
     {warning&&<p className="notice">{warning}</p>}
     {!!response.recommended_runbooks?.length&&<details className="disclosure"><summary>Runbook phù hợp ({response.recommended_runbooks.length})</summary><ul>{response.recommended_runbooks.map((item,index)=><li key={index}>{item.title??item.runbook_id}<small>{item.version?`v${item.version}`:""}</small></li>)}</ul></details>}
+    {showMore&&<Button variant="outline" className="verified-more" onClick={()=>document.getElementById(resultId)?.scrollIntoView({behavior:"smooth",block:"center"})}>Xem {presentation?.remaining_count??0} kết quả đã xác minh khác</Button>}
     {!!rows.length&&<VerifiedTable rows={rows} columns={columns} resultId={resultId}/>}
     {response.executed_query?.executed&&response.executed_query.read_only&&<ExecutedQuery query={response.executed_query}/>}
     {!!response.citations?.length&&<details className="disclosure"><summary><BookOpen size={15}/> Nguồn tham khảo ({response.citations.length}) <ChevronDown size={14}/></summary><ul>{response.citations.map((citation,index)=>{

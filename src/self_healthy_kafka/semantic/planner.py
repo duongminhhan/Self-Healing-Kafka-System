@@ -76,7 +76,7 @@ class SemanticCueContract:
     metric: str | None
     ranking: str | None
     limit: int | None
-    exact_result_count: bool
+    include_ties_requested: bool
     time_scope: dict[str, str] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,7 +85,7 @@ class SemanticCueContract:
             "metric": self.metric,
             "ranking": self.ranking,
             "limit": self.limit,
-            "exact_result_count": self.exact_result_count,
+            "include_ties_requested": self.include_ties_requested,
             "time_scope": dict(self.time_scope) if self.time_scope else None,
             "time_scope_origin": "explicit" if self.time_scope else "unspecified",
         }
@@ -309,7 +309,7 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
     if not isinstance(intent, str) or intent not in _INTENTS:
         raise SemanticPlanError("data_request.intent is unsupported")
     _validate_intent(intent, subject, metric_names, dimensions, filters, limit)
-    tie_policy = value.get("tie_policy", "include_ties")
+    tie_policy = value.get("tie_policy", "exact_limit" if ranking is not None else "include_ties")
     if tie_policy not in {"include_ties", "exact_limit"}:
         raise SemanticPlanError("data_request tie_policy is unsupported")
     if tie_policy == "exact_limit" and not dimensions:
@@ -464,7 +464,7 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         metric=metric,
         ranking=ranking,
         limit=limit,
-        exact_result_count=bool(ranking and _matches_any(normalized, vocabulary.get("exact_result_count", []))),
+        include_ties_requested=bool(ranking and _matches_any(normalized, vocabulary.get("include_ties", []))),
         time_scope=time_scope,
     )
 
@@ -525,11 +525,11 @@ def enforce_semantic_cues(
             "semantic time scope mismatch: the question did not establish a time range"
         )
     # Tie behavior is a deterministic business policy, not an LLM choice.
-    # It is applied after all semantic checks so a model cannot silently turn
-    # a request for top ranks into an arbitrary fixed row count.
+    # Ordinary "top N" means exactly N stable rows.  The broader dense-rank
+    # behavior is reserved for an explicit request to include ties.
     request_with_policy = dict(request)
     if request.get("ranking") is not None:
-        request_with_policy["tie_policy"] = "exact_limit" if cues.exact_result_count else "include_ties"
+        request_with_policy["tie_policy"] = "include_ties" if cues.include_ties_requested else "exact_limit"
     return replace(plan, data_request=request_with_policy, semantic_enforced=True)
 
 
