@@ -89,6 +89,12 @@ describe("chat BFF", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({outcome:"verified_empty",query_executed:true,evidence_complete:true,row_count:0});
   });
+  it("accepts bounded public presentation metadata without exposing internal evidence", async () => {
+    const presentation={summary_item_limit:3,summary_detail_limit:1,result_total_count:19,displayed_count:3,remaining_count:16,ranking:"descending",tie_policy:"include_ties",boundary_tie_count:17,boundary_tie_truncated:true,has_more_verified_results:true,detail_accessible:true};
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có 3 kết quả chính.",presentation})));
+    expect(response.status).toBe(200);
+    expect((await response.json()).presentation).toEqual(presentation);
+  });
   it("rejects an unproven verified-empty outcome before it reaches the browser", async () => {
     const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({
       answer:"Không có connector failed.",outcome:"verified_empty",query_executed:false,evidence_complete:false,row_count:0,

@@ -172,7 +172,7 @@ test("live backend never turns an unverified result into a no-failed conclusion"
       expect(payload.query_executed).toBe(true);
       expect(payload.evidence_complete).toBe(true);
       expect(payload.row_count).toBe(0);
-      await expect(latest).toContainText(/chưa ghi nhận connector nào có trạng thái FAILED/i);
+      await expect(latest).toContainText(/chưa ghi nhận (?:root )?connector nào có trạng thái FAILED/i);
     }else{
       expect(["verified_results","cannot_verify","degraded","needs_clarification"]).toContain(payload.outcome);
       await expect(latest).not.toContainText(/chưa ghi nhận connector nào có trạng thái FAILED/i);
@@ -247,6 +247,18 @@ test("verified table can filter, stably sort, reset and open fullscreen",async({
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(fullscreenButton).toBeFocused();
+});
+
+test("compact analytics summaries link to the complete verified table without another request",async({page})=>{
+  await page.goto("/");
+  await sendQuestion(page,"Presentation summary test");
+  const latest=page.locator(".assistant-message").last();
+  await expect(latest).toContainText("Có thêm 1 kết quả đồng hạng");
+  await expect(latest).toContainText("Ba kết quả chính đã được xác minh.");
+  const more=page.getByRole("button",{name:"Xem 1 kết quả đã xác minh khác"});
+  await expect(more).toBeVisible();
+  await more.click();
+  await expect(page.getByRole("region",{name:"Kết quả đã xác minh"}).locator("tbody tr")).toHaveCount(4);
 });
 
 test("shows only a verified read-only executed T-SQL query and copies its display form",async({page})=>{

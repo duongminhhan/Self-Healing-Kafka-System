@@ -24,6 +24,7 @@ from self_healthy_kafka.rag.models import (
 )
 from self_healthy_kafka.rag.shadow import Retriever
 from self_healthy_kafka.redaction import redact_text
+from self_healthy_kafka.semantic.fact_source import is_incident_evidence_source
 from self_healthy_kafka.semantic.planner import SemanticPlan
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ def _empty_analytics_fields() -> dict[str, Any]:
         "source_kind": "historical_incident_snapshot",
         "snapshot_freshness": None,
         "time_range_applied": None,
+        "presentation": None,
         "evidence_ids": [],
         "analytics_evidence": [],
         "claims": [],
@@ -320,7 +322,7 @@ def _rag_failure_result(analytics_result: dict[str, Any], route: Route, reason: 
 def extract_verified_facts(result: dict[str, Any]) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for source in result.get("sources") or []:
-        if not isinstance(source, dict) or not str(source.get("source", "")).startswith("vConnectorIncidentFacts"):
+        if not isinstance(source, dict) or not is_incident_evidence_source(source.get("source")):
             continue
         items = source.get("items") or []
         if isinstance(items, list):

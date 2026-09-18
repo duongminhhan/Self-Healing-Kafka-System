@@ -12,11 +12,15 @@ import httpx
 
 from self_healthy_kafka.rag.models import Route
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION, SEMANTIC_CATALOG, catalog_for_model
-from self_healthy_kafka.webhook.analytics import QueryPlan, parse_plan
+from self_healthy_kafka.webhook.analytics import QueryPlan, parse_plan, parse_time_range
 
 
 class SemanticPlanError(ValueError):
     """A planner response is malformed or asks for an unsupported capability."""
+
+    def __init__(self, message: str, *, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 _METRICS = {
@@ -76,8 +80,8 @@ class SemanticCueContract:
     metric: str | None
     ranking: str | None
     limit: int | None
-    exact_result_count: bool
-    time_scope: dict[str, str] | None
+    include_ties_requested: bool
+    time_scope: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,7 +89,7 @@ class SemanticCueContract:
             "metric": self.metric,
             "ranking": self.ranking,
             "limit": self.limit,
-            "exact_result_count": self.exact_result_count,
+            "include_ties_requested": self.include_ties_requested,
             "time_scope": dict(self.time_scope) if self.time_scope else None,
             "time_scope_origin": "explicit" if self.time_scope else "unspecified",
         }
@@ -122,6 +126,7 @@ class SemanticPlan:
     conversation_action: str
     inherited_fields: tuple[str, ...] = ()
     semantic_enforced: bool = False
+    time_scope_resolution: dict[str, Any] | None = None
 
     @property
     def route(self) -> Route | None:
@@ -144,6 +149,7 @@ class SemanticPlan:
             "conversation_action": self.conversation_action,
             "inherited_fields": list(self.inherited_fields),
             "derived_route": self.route.value if self.route else None,
+            "time_scope_resolution": self.time_scope_resolution,
         }
 
     def context(self) -> dict[str, Any]:
@@ -227,6 +233,8 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
     }:
         raise SemanticPlanError("data_request.filters contains an unsupported filter")
     _validate_filters(filters)
+    if filters.get("time_range") is not None:
+        filters["time_range"] = _canonical_time_scope(filters["time_range"])
     # Incident-grain analytics always means confirmed failures.  This is a
     # catalog rule, not an interpretation of wording supplied by a user.
     filters.setdefault("event_type", ["HEALTH_FAILED_CONFIRMED"])
@@ -251,6 +259,7 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
     time_scope = value.get("time_scope", filters.get("time_range"))
     if time_scope is not None:
         _validate_filters({"time_range": time_scope})
+        time_scope = _canonical_time_scope(time_scope)
         if filters.get("time_range") is not None and filters["time_range"] != time_scope:
             raise SemanticPlanError("data_request time_scope must match filters.time_range")
         filters["time_range"] = dict(time_scope)
@@ -309,7 +318,7 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
     if not isinstance(intent, str) or intent not in _INTENTS:
         raise SemanticPlanError("data_request.intent is unsupported")
     _validate_intent(intent, subject, metric_names, dimensions, filters, limit)
-    tie_policy = value.get("tie_policy", "include_ties")
+    tie_policy = value.get("tie_policy", "exact_limit" if ranking is not None else "include_ties")
     if tie_policy not in {"include_ties", "exact_limit"}:
         raise SemanticPlanError("data_request tie_policy is unsupported")
     if tie_policy == "exact_limit" and not dimensions:
@@ -394,10 +403,10 @@ def _validate_intent(
 def _validate_filters(filters: dict[str, Any]) -> None:
     time_range = filters.get("time_range")
     if time_range is not None:
-        if not isinstance(time_range, dict) or time_range.get("kind") != "relative" or time_range.get("value") not in {
-            "today", "yesterday", "last_7_days", "this_week", "last_week", "this_month"
-        }:
-            raise SemanticPlanError("data_request time_range is unsupported")
+        try:
+            parse_time_range(time_range)
+        except ValueError as exc:
+            raise SemanticPlanError("data_request time_range is unsupported") from exc
     event_type = filters.get("event_type")
     if event_type is not None and event_type != ["HEALTH_FAILED_CONFIRMED"]:
         raise SemanticPlanError("data_request event_type is unsupported")
@@ -416,6 +425,18 @@ def _validate_filters(filters: dict[str, Any]) -> None:
         item = filters.get(field)
         if item is not None and (not isinstance(item, str) or not item.strip() or len(item) > 255):
             raise SemanticPlanError(f"data_request {field} is unsupported")
+
+
+def _canonical_time_scope(value: object) -> dict[str, Any]:
+    """Return the exact catalog representation accepted by the safe DSL."""
+
+    try:
+        parsed = parse_time_range(value)
+    except ValueError as exc:
+        raise SemanticPlanError("data_request time_range is unsupported") from exc
+    if parsed is None:
+        raise SemanticPlanError("data_request time_range is unsupported")
+    return parsed.to_dict()
 
 
 def semantic_cue_contract(question: str) -> SemanticCueContract:
@@ -450,23 +471,57 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         ranking is not None
         or _matches_any(normalized, vocabulary["metrics"]["incident_count"])
     ) else None
-    matched_time_scopes = [
-        value
-        for value, terms in vocabulary["time_scopes"].items()
-        if _matches_any(normalized, terms)
-    ]
-    time_scope = (
-        {"kind": "relative", "value": matched_time_scopes[0]}
-        if len(matched_time_scopes) == 1 else None
-    )
+    time_scope = _explicit_time_scope(question, normalized, vocabulary["time_scopes"])
     return SemanticCueContract(
         subject=subject,
         metric=metric,
         ranking=ranking,
         limit=limit,
-        exact_result_count=bool(ranking and _matches_any(normalized, vocabulary.get("exact_result_count", []))),
+        include_ties_requested=bool(ranking and _matches_any(normalized, vocabulary.get("include_ties", []))),
         time_scope=time_scope,
     )
+
+
+def _explicit_time_scope(
+    question: str, normalized_question: str, vocabulary: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Extract only unambiguous time semantics from user wording.
+
+    This runs before the model plan is validated. It gives the backend—not the
+    model—ownership of timestamps and of the number in "N days recently".
+    """
+
+    absolute_dates = re.findall(r"\b(20\d{2})[-/](\d{2})[-/](\d{2})\b", question)
+    if len(absolute_dates) == 1:
+        year, month, day = absolute_dates[0]
+        candidate = f"{year}-{month}-{day}"
+        try:
+            _canonical_time_scope({"kind": "absolute_date", "value": candidate})
+        except SemanticPlanError:
+            return None
+        return {"kind": "absolute_date", "value": candidate}
+    if len(absolute_dates) > 1:
+        return None
+
+    recent = re.search(
+        r"\b(?:(\d{1,3})\s+ngay\s+gan\s+day|(?:last|past)\s+(\d{1,3})\s+days?|(\d{1,3})\s+days?\s+(?:recently|ago))\b",
+        normalized_question,
+    )
+    if recent:
+        days = int(next(group for group in recent.groups() if group is not None))
+        if 1 <= days <= 366:
+            if days == 7:
+                return {"kind": "relative", "value": "last_7_days"}
+            return {"kind": "relative", "value": "last_n_days", "days": days}
+
+    matched = [
+        value
+        for value, terms in vocabulary.items()
+        if _matches_any(normalized_question, terms)
+    ]
+    if len(matched) == 1:
+        return {"kind": "relative", "value": matched[0]}
+    return None
 
 
 def enforce_semantic_cues(
@@ -525,11 +580,11 @@ def enforce_semantic_cues(
             "semantic time scope mismatch: the question did not establish a time range"
         )
     # Tie behavior is a deterministic business policy, not an LLM choice.
-    # It is applied after all semantic checks so a model cannot silently turn
-    # a request for top ranks into an arbitrary fixed row count.
+    # Ordinary "top N" means exactly N stable rows.  The broader dense-rank
+    # behavior is reserved for an explicit request to include ties.
     request_with_policy = dict(request)
     if request.get("ranking") is not None:
-        request_with_policy["tie_policy"] = "exact_limit" if cues.exact_result_count else "include_ties"
+        request_with_policy["tie_policy"] = "include_ties" if cues.include_ties_requested else "exact_limit"
     return replace(plan, data_request=request_with_policy, semantic_enforced=True)
 
 
@@ -704,10 +759,13 @@ class SemanticPlanner:
         if self._generate is None:
             raise SemanticPlanError("semantic_planner_not_configured")
         correction: str | None = None
+        diagnostics: dict[str, Any] = {}
         for attempt in range(1, 3):
             messages = _messages(question, context=context, correction=correction)
             try:
                 value = self._generate(messages, max_tokens=self._max_tokens)
+                diagnostics = _time_scope_diagnostics(value, question)
+                value = _apply_explicit_time_scope(value, question)
                 plan = parse_semantic_plan(value)
                 _validate_inheritance(plan, context)
                 if self._enforce_cues:
@@ -716,20 +774,117 @@ class SemanticPlanner:
                     # Dependency-injected planners are used by offline unit
                     # fixtures.  Production construction keeps this guard on.
                     plan = replace(plan, semantic_enforced=True)
-                return plan, attempt
+                diagnostics["validation_reason"] = None
+                return replace(plan, time_scope_resolution=diagnostics), attempt
             except SemanticPlanError as exc:
-                correction = str(exc)
+                diagnostics["validation_reason"] = str(exc)
+                correction = _planner_correction_feedback(str(exc))
             except ValueError as exc:
                 # A JSON boundary that returns malformed content is a model
                 # output problem, not a reason to fall back to phrase rules.
                 correction = f"planner_output_invalid:{exc}"
+                diagnostics["validation_reason"] = correction
             except httpx.TimeoutException as exc:
                 raise SemanticPlanError("semantic_planner_timeout") from exc
             except httpx.HTTPStatusError as exc:
                 raise SemanticPlanError(_http_failure_reason(exc)) from exc
             except Exception as exc:
                 raise SemanticPlanError(f"semantic_planner_service_failure:{type(exc).__name__}") from exc
-        raise SemanticPlanError(f"semantic_planner_invalid_after_correction:{correction}")
+        raise SemanticPlanError(
+            f"semantic_planner_invalid_after_correction:{correction}", diagnostics=diagnostics
+        )
+
+
+def _apply_explicit_time_scope(value: object, question: str) -> object:
+    """Replace a model time shape only when the user supplied an exact scope."""
+
+    cues = semantic_cue_contract(question)
+    if cues.time_scope is None or not isinstance(value, dict):
+        return value
+    request = value.get("data_request")
+    if not isinstance(request, dict):
+        return value
+    filters = request.get("filters")
+    if filters is not None and not isinstance(filters, dict):
+        return value
+    raw_scope = request.get("time_scope")
+    if raw_scope is None and isinstance(filters, dict):
+        raw_scope = filters.get("time_range")
+    # A valid but different semantic period is a meaning error, not a shape
+    # error. Keep it so cue enforcement returns correction feedback instead
+    # of silently changing "yesterday" into "today".
+    if _model_scope_conflicts_with_explicit_scope(raw_scope, cues.time_scope):
+        return value
+    normalized = dict(value)
+    request = dict(request)
+    request["filters"] = dict(filters) if isinstance(filters, dict) else {}
+    request["filters"]["time_range"] = dict(cues.time_scope)
+    request["time_scope"] = dict(cues.time_scope)
+    request["time_scope_origin"] = "explicit"
+    normalized["data_request"] = request
+    return normalized
+
+
+def _model_scope_conflicts_with_explicit_scope(
+    raw_scope: object, expected: dict[str, Any]
+) -> bool:
+    if not isinstance(raw_scope, dict):
+        return False
+    value = raw_scope.get("value")
+    if not isinstance(value, str):
+        return False
+    expected_value = expected.get("value")
+    if value not in {
+        "today", "yesterday", "last_7_days", "this_week", "last_week", "this_month", "last_n_days"
+    } and not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value):
+        return False
+    if value != expected_value:
+        return True
+    if value == "last_n_days":
+        return raw_scope.get("days") != expected.get("days")
+    return False
+
+
+def _time_scope_diagnostics(value: object, question: str) -> dict[str, Any]:
+    """Bounded technical detail; it never retains raw prompts or credentials."""
+
+    request = value.get("data_request") if isinstance(value, dict) else None
+    scope = request.get("time_scope") if isinstance(request, dict) else None
+    if scope is None and isinstance(request, dict) and isinstance(request.get("filters"), dict):
+        scope = request["filters"].get("time_range")
+    expected = semantic_cue_contract(question).time_scope
+    return {
+        "model_time_scope": _safe_time_scope(scope),
+        "canonical_time_scope": dict(expected) if expected else None,
+    }
+
+
+def _safe_time_scope(value: object) -> dict[str, Any] | str | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return "invalid_shape"
+    safe: dict[str, Any] = {}
+    for key in ("kind", "value", "days"):
+        item = value.get(key)
+        if isinstance(item, str) and len(item) <= 80:
+            safe[key] = item
+        elif isinstance(item, int) and not isinstance(item, bool):
+            safe[key] = item
+    return safe or "invalid_shape"
+
+
+def _planner_correction_feedback(reason: str) -> str:
+    if "time_range" in reason:
+        return (
+            "data_request.time_scope and filters.time_range must be identical. "
+            "Use null when no period was requested, or exactly one semantic scope: "
+            '{"kind":"relative","value":"today"}, "yesterday", "last_7_days", '
+            '"this_week", "last_week", "this_month", or '
+            '{"kind":"relative","value":"last_n_days","days":N}. '
+            "Never include from_at, to_at, timezone, or timestamp fields; the backend resolves them."
+        )
+    return reason
 
 
 def _validate_inheritance(plan: SemanticPlan, context: dict[str, Any] | None) -> None:

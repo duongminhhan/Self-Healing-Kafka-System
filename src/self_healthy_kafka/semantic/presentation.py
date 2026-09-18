@@ -62,6 +62,16 @@ class PresentationFacts:
     sort_metric: str | None
     ranking: str | None = None
     time_scope_origin: str = "unspecified"
+    summary_item_limit: int = 3
+    summary_detail_limit: int = 1
+    result_total_count: int = 0
+    displayed_count: int = 0
+    remaining_count: int = 0
+    tie_policy: str | None = None
+    boundary_tie_count: int | None = None
+    boundary_tie_truncated: bool = False
+    has_more_verified_results: bool = False
+    detail_accessible: bool = False
 
     @property
     def condition(self) -> dict[str, str] | None:
@@ -77,6 +87,35 @@ class PresentationFacts:
             and self.evidence_complete
             and self.row_count == 0
         )
+
+    @property
+    def summary_rows(self) -> tuple[dict[str, Any], ...]:
+        """Bounded verified facts that are safe to place in response prose."""
+
+        displayed = self.displayed_count
+        # Keep direct construction backward compatible for focused renderer
+        # tests and trusted internal callers while built contracts always set
+        # an explicit displayed_count.
+        if displayed == 0 and self.rows:
+            displayed = min(len(self.rows), self.summary_item_limit)
+        return self.rows[:displayed]
+
+    def summary_metadata(self) -> dict[str, Any]:
+        """Public-safe UI state without SQL, prompts, or diagnostics."""
+
+        return {
+            "summary_item_limit": self.summary_item_limit,
+            "summary_detail_limit": self.summary_detail_limit,
+            "result_total_count": self.result_total_count,
+            "displayed_count": self.displayed_count,
+            "remaining_count": self.remaining_count,
+            "ranking": self.ranking,
+            "tie_policy": self.tie_policy,
+            "boundary_tie_count": self.boundary_tie_count,
+            "boundary_tie_truncated": self.boundary_tie_truncated,
+            "has_more_verified_results": self.has_more_verified_results,
+            "detail_accessible": self.detail_accessible,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +141,8 @@ class PresentationFacts:
             "sort_metric": self.sort_metric,
             "ranking": self.ranking,
             "time_scope_origin": self.time_scope_origin,
+            "summary_rows": [dict(row) for row in self.summary_rows],
+            "presentation": self.summary_metadata(),
         }
 
 
@@ -134,6 +175,20 @@ def build_presentation_facts(
         sort_metric = str(candidate) if candidate in _METRIC_VALUE_FIELDS else None
     if query_plan is not None and sort_metric is None:
         sort_metric = _semantic_metric_for_query_metric(query_plan.order_by)
+    policy = _PRESENTATION["summary_policy"]
+    summary_item_limit = int(policy["summary_item_limit"])
+    result_total_count = len(evidence)
+    displayed_count = min(result_total_count, summary_item_limit)
+    boundary = evidence[displayed_count - 1] if displayed_count else None
+    boundary_tie_count = boundary.get("tie_count") if isinstance(boundary, dict) else None
+    boundary_tie_truncated = bool(
+        displayed_count < result_total_count
+        and isinstance(boundary_tie_count, int)
+        and boundary_tie_count > sum(
+            1 for item in evidence[:displayed_count]
+            if item.get("rank") == boundary.get("rank")
+        )
+    )
     return PresentationFacts(
         outcome=outcome.outcome,
         subject=_presentation_subject(str(request.get("subject") or "incident"), dimensions),
@@ -156,6 +211,20 @@ def build_presentation_facts(
         sort_metric=sort_metric,
         ranking=request.get("ranking") if isinstance(request.get("ranking"), str) else None,
         time_scope_origin=str(request.get("time_scope_origin") or "unspecified"),
+        summary_item_limit=summary_item_limit,
+        summary_detail_limit=int(policy["summary_detail_limit"]),
+        result_total_count=result_total_count,
+        displayed_count=displayed_count,
+        remaining_count=result_total_count - displayed_count,
+        tie_policy=query_plan.tie_policy if query_plan is not None else None,
+        boundary_tie_count=boundary_tie_count if isinstance(boundary_tie_count, int) else None,
+        boundary_tie_truncated=boundary_tie_truncated,
+        has_more_verified_results=(
+            outcome.outcome == "verified_results"
+            and result_total_count > displayed_count
+            and bool(evidence)
+        ),
+        detail_accessible=outcome.outcome == "verified_results" and bool(evidence),
     )
 
 
@@ -271,7 +340,10 @@ def _time_scope(
     value = time_range.get("value") if isinstance(time_range, dict) else None
     template = _PRESENTATION["time_ranges"].get(value)
     if isinstance(template, str):
-        return template.format(timezone=timezone_name)
+        return template.format(
+            timezone=timezone_name,
+            days=time_range.get("days") if isinstance(time_range, dict) else None,
+        )
     if from_at and to_at:
         return f"từ {from_at.isoformat()} đến {to_at.isoformat()}"
     return "trên toàn bộ snapshot hiện có"

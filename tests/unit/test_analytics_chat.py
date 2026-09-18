@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
+
+import pytest
 
 from self_healthy_kafka.config import AnalyticsChatConfig
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
@@ -10,6 +13,27 @@ from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 
 def _config():
     return AnalyticsChatConfig(enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="")
+
+
+class _ImmediateShadowExecutor:
+    """Execute background work deterministically without adding a test race."""
+
+    def submit(self, callback, *args):
+        callback(*args)
+
+    def shutdown(self, **_kwargs):
+        return None
+
+
+class _HoldingShadowExecutor:
+    """Accept work without running it, so the queue budget remains occupied."""
+
+    def submit(self, callback, *args):
+        self.callback = callback
+        self.args = args
+
+    def shutdown(self, **_kwargs):
+        return None
 
 
 def _plan(*, time="today", details=None, guidance=False, inherited=()):
@@ -198,6 +222,30 @@ def test_verified_empty_is_the_only_outcome_that_may_state_no_failed_connectors(
     assert result["time_range_applied"]["timezone"] == "UTC"
 
 
+def test_failed_connector_today_executes_with_canonical_time_diagnostics():
+    service = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **_kwargs: [{
+            "incident_id": "one", "job_name": "orders", "connector_name": "orders",
+            "failure_at": datetime(2026, 9, 3, 2, tzinfo=timezone.utc),
+            "final_outcome": "FAILED", "event_type": "HEALTH_FAILED_CONFIRMED",
+        }],
+        now=lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
+        semantic_planner=_planner(_failed_connectors_plan()),
+    )
+
+    result = service.ask("Có connector nào có trạng thái FAILED hôm nay không?")
+
+    assert result["outcome"] == "verified_results"
+    assert result["query_executed"] is True
+    assert result["time_range_applied"] == {
+        "kind": "relative", "from_at": "2026-09-03T00:00:00+00:00",
+        "to_at": "2026-09-03T12:00:00+00:00", "timezone": "UTC", "timestamp_field": "failure_at",
+    }
+    assert result["diagnostics"]["time_range"]["canonical_time_scope"] == {"kind": "relative", "value": "today"}
+    assert result["diagnostics"]["time_range"]["validation_reason"] is None
+
+
 def test_incomplete_grouping_never_becomes_a_negative_claim():
     service = AnalyticsChatService(
         _config(),
@@ -263,3 +311,107 @@ def test_recovery_rate_keeps_its_verified_numerator_and_denominator():
         "recovery_rate_denominator": 2,
         "recovery_rate_numerator": 1,
     }]
+
+
+def _compiled_ranking_plan():
+    return {
+        "version": CATALOG_VERSION,
+        "data_request": {
+            "intent": "incidents", "subject": "root_connector", "metric": "incident_count",
+            "ranking": "descending", "time_scope": None, "time_scope_origin": "unspecified",
+            "metrics": ["incident_count"], "dimensions": ["root_connector"],
+            "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
+            "sort": {"metric": "incident_count", "direction": "desc"}, "limit": 3,
+            "comparison": None, "detail_fields": [], "tie_policy": "exact_limit",
+        },
+        "guidance_request": {"needed": False, "purpose": None, "error_codes": [], "connector_class": None},
+        "clarification": None, "conversation_action": "none", "inherited_fields": [],
+    }
+
+
+def test_shadow_mode_returns_legacy_response_when_dbt_shadow_times_out(caplog):
+    caplog.set_level(logging.INFO, logger="self_healthy_kafka.webhook.analytics_chat")
+    calls = []
+
+    def execute(**kwargs):
+        calls.append(kwargs)
+        if "vSemanticConnectorIncidentFacts" in kwargs["statement"]:
+            raise TimeoutError("dbt query exceeded budget")
+        return [{
+            "root_connector_name": "orders", "incident_count": 1,
+            "rank": 1, "tie_count": 1, "row_number": 1, "evidence_ids": "one",
+        }]
+
+    config = AnalyticsChatConfig(
+        enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="",
+        fact_source="shadow", shadow_snapshot_consistent=True,
+    )
+    service = AnalyticsChatService(
+        config,
+        incident_facts=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no fallback")),
+        execute_incident_query=execute,
+        semantic_planner=_planner(_compiled_ranking_plan()),
+    )
+    service._shadow_executor = _ImmediateShadowExecutor()  # type: ignore[assignment]
+
+    result = service.ask("Xếp hạng incident")
+
+    assert result["outcome"] == "verified_results"
+    assert result["fact_source"] == "legacy"
+    assert "[dbo].[vConnectorIncidentFacts]" in result["executed_query"]["statement"]
+    assert any("vSemanticConnectorIncidentFacts" in item["statement"] for item in calls)
+    assert any(
+        getattr(record, "comparison_result", None) == "dbt_query_failed"
+        for record in caplog.records
+    )
+    service.close()
+
+
+def test_dbt_mode_never_silently_falls_back_to_the_legacy_source():
+    calls = []
+    config = AnalyticsChatConfig(
+        enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="", fact_source="dbt",
+    )
+    service = AnalyticsChatService(
+        config,
+        incident_facts=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy fallback")),
+        execute_incident_query=lambda **kwargs: calls.append(kwargs) or (_ for _ in ()).throw(RuntimeError("dbt unavailable")),
+        semantic_planner=_planner(_compiled_ranking_plan()),
+    )
+
+    result = service.ask("Xếp hạng incident")
+
+    assert result["outcome"] == "degraded"
+    assert len(calls) == 1
+    assert "[analytics].[vSemanticConnectorIncidentFacts]" in calls[0]["statement"]
+    assert calls[0]["fact_source"].key == "dbt"
+    service.close()
+
+
+def test_shadow_queue_saturation_never_blocks_the_legacy_response(caplog):
+    caplog.set_level(logging.INFO, logger="self_healthy_kafka.webhook.analytics_chat")
+    config = AnalyticsChatConfig(
+        enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="",
+        fact_source="shadow", shadow_queue_size=1,
+    )
+    service = AnalyticsChatService(
+        config,
+        incident_facts=lambda **_kwargs: pytest.fail("legacy fact fetch must not run"),
+        execute_incident_query=lambda **_kwargs: [{
+            "root_connector_name": "orders", "incident_count": 1,
+            "rank": 1, "tie_count": 1, "row_number": 1, "evidence_ids": "one",
+        }],
+        semantic_planner=_planner(_compiled_ranking_plan(), _compiled_ranking_plan()),
+    )
+    service._shadow_executor.shutdown(wait=False, cancel_futures=True)  # type: ignore[union-attr]
+    service._shadow_executor = _HoldingShadowExecutor()  # type: ignore[assignment]
+
+    first = service.ask("Xếp hạng incident lần một")
+    second = service.ask("Xếp hạng incident lần hai")
+
+    assert first["fact_source"] == second["fact_source"] == "legacy"
+    assert any(
+        getattr(record, "comparison_reason", None) == "shadow_queue_full"
+        for record in caplog.records
+    )
+    service.close()

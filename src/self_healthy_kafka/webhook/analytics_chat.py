@@ -7,12 +7,15 @@ are derived by the backend from the plan's data/guidance requirements.
 
 from __future__ import annotations
 
+import logging
 import re
+from uuid import uuid4
 from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
-from threading import RLock
+from threading import BoundedSemaphore, RLock
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -27,6 +30,12 @@ from self_healthy_kafka.rag.workflow import RunbookRagWorkflow
 from self_healthy_kafka.redaction import redact_text
 from self_healthy_kafka.semantic.catalog import SEMANTIC_CATALOG
 from self_healthy_kafka.semantic.evidence import AnalyticsResponseComposer, build_evidence
+from self_healthy_kafka.semantic.fact_source import (
+    IncidentFactSource,
+    classify_shadow_comparison,
+    incident_fact_source,
+    plan_fingerprint,
+)
 from self_healthy_kafka.semantic.outcome import (
     cannot_verify,
     classify_execution,
@@ -46,9 +55,15 @@ from self_healthy_kafka.semantic.presentation import (
     build_presentation_facts,
 )
 from self_healthy_kafka.storage.common import json_safe
-from self_healthy_kafka.webhook.analytics import MAX_LIMIT, QueryPlan, resolve_time_range
+from self_healthy_kafka.webhook.analytics import (
+    MAX_LIMIT,
+    QueryPlan,
+    ResolvedTimeRange,
+    resolve_canonical_time_range,
+)
 
 CATALOG = SEMANTIC_CATALOG
+logger = logging.getLogger(__name__)
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _MAX_ERROR_MESSAGE_CHARS = 2_000
 _MAX_ANALYTICS_ROWS = 1_000
@@ -104,6 +119,11 @@ class AnalyticsChatService:
         self._config = config
         self._incident_facts = incident_facts
         self._execute_incident_query = execute_incident_query
+        self._legacy_fact_source = incident_fact_source(mode="legacy", dbt_schema=config.dbt_schema)
+        self._selected_fact_source = incident_fact_source(
+            mode=config.fact_source, dbt_schema=config.dbt_schema
+        )
+        self._dbt_fact_source = incident_fact_source(mode="dbt", dbt_schema=config.dbt_schema)
         self._owns_client = client is None
         self._client = client or httpx.Client()
         self._now = now
@@ -120,6 +140,20 @@ class AnalyticsChatService:
         self._closed = False
         self._conversation_states: OrderedDict[str, _ConversationState] = OrderedDict()
         self._conversation_lock = RLock()
+        # Shadow work has a separate, small worker budget. It is never awaited
+        # by the request that produced the legacy response.
+        self._shadow_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="analytics-shadow")
+            if config.fact_source == "shadow" and execute_incident_query is not None
+            else None
+        )
+        # Include the active task in this small budget. A slow dbt source must
+        # never accumulate unbounded comparison work behind legacy requests.
+        self._shadow_slots = (
+            BoundedSemaphore(config.shadow_queue_size)
+            if self._shadow_executor is not None
+            else None
+        )
         if self._rag_workflow is None and rag_config is not None and rag_config.enabled:
             self._rag_workflow = self._build_rag_workflow(rag_config)
 
@@ -219,7 +253,9 @@ class AnalyticsChatService:
                 context=prior.planner_context() if prior else None,
             )
         except SemanticPlanError as exc:
-            result = _planning_failure(str(exc), timezone_name=self._config.timezone)
+            result = _planning_failure(
+                str(exc), timezone_name=self._config.timezone, diagnostics=exc.diagnostics
+            )
             result["model_usage"] = {
                 "planning": self._qwen.calls_since(planning_model_index),
                 "analytics_response": [],
@@ -346,9 +382,10 @@ class AnalyticsChatService:
                 f"semantic_compiler_failed:{exc}", timezone_name=self._config.timezone
             )
         try:
-            from_at, to_at = resolve_time_range(
+            resolved_time_range = resolve_canonical_time_range(
                 plan.time_range, now=self._now(), timezone_name=self._config.timezone
             )
+            from_at, to_at = resolved_time_range.from_at, resolved_time_range.to_at
         except (TypeError, ValueError) as exc:
             return _planning_failure(
                 f"semantic_time_range_failed:{type(exc).__name__}", timezone_name=self._config.timezone
@@ -360,22 +397,50 @@ class AnalyticsChatService:
         # query shapes intentionally not supported by the aggregate compiler.
         if self._execute_incident_query is not None:
             try:
+                primary_source = (
+                    self._legacy_fact_source
+                    if self._config.fact_source == "shadow"
+                    else self._selected_fact_source
+                )
                 compiled = compile_incident_query(
                     plan,
                     from_at=from_at,
                     to_at=to_at,
                     row_limit=_MAX_EXECUTED_RESULT_ROWS + 1,
+                    fact_source=primary_source,
                 )
             except ValueError:
                 compiled = None
             if compiled is not None:
-                return self._execute_compiled_analytics(
+                result = self._execute_compiled_analytics(
                     semantic_plan=semantic_plan,
                     plan=plan,
                     compiled=compiled,
                     from_at=from_at,
                     to_at=to_at,
+                    resolved_time_range=resolved_time_range,
+                    include_shadow_rows=self._config.fact_source == "shadow",
                 )
+                if self._config.fact_source == "shadow":
+                    legacy_rows = result.pop("_shadow_rows", None)
+                    if isinstance(legacy_rows, list):
+                        self._schedule_shadow_comparison(
+                            plan=plan,
+                            legacy_compiled=compiled,
+                            legacy_rows=legacy_rows,
+                            from_at=from_at,
+                            to_at=to_at,
+                            request_id=uuid4().hex[:12],
+                        )
+                return result
+        if self._config.fact_source == "dbt":
+            # dbt mode is deliberately strict: it must never revert to the
+            # legacy stored procedure when its compiler path is unavailable.
+            return _execution_failure(
+                "analytics_dbt_query_not_supported",
+                exception=ValueError("dbt source requires a compiler-supported query"),
+                timezone_name=self._config.timezone,
+            )
         try:
             raw_rows = self._incident_facts(
                 from_at=from_at,
@@ -467,11 +532,13 @@ class AnalyticsChatService:
             "query_plan": plan.to_dict(),
             "from_at": from_at.isoformat() if from_at else None,
             "to_at": to_at.isoformat() if to_at else None,
-            "time_range_applied": _time_range_applied(from_at, to_at, self._config.timezone),
+            "time_range_applied": _time_range_applied(resolved_time_range),
             **outcome.to_dict(),
             "evidence_ids": [str(row.get("incident_id")) for row in (rows + comparison_rows)[:MAX_LIMIT]],
             "evidence": evidence,
             "claims": claims,
+            "presentation": presentation.summary_metadata(),
+            "diagnostics": _time_range_diagnostics(semantic_plan, resolved_time_range),
             "verified_result": {
                 "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
                 "columns": list(dict.fromkeys(
@@ -502,14 +569,13 @@ class AnalyticsChatService:
         compiled: ExecutedTsql,
         from_at: datetime | None,
         to_at: datetime | None,
+        resolved_time_range: ResolvedTimeRange,
+        include_shadow_rows: bool = False,
     ) -> dict[str, Any]:
         """Execute and render one compiler-generated SQL Server aggregation."""
 
         try:
-            database_rows = self._execute_incident_query(
-                statement=compiled.statement,
-                parameters=compiled.parameter_values,
-            )
+            database_rows = self._run_compiled_query(compiled)
         except Exception as exc:
             return _execution_failure(
                 "analytics_source_unavailable", exception=exc, timezone_name=self._config.timezone
@@ -526,6 +592,7 @@ class AnalyticsChatService:
             from_at=from_at,
             to_at=to_at,
             truncated=truncated,
+            source=compiled.fact_source.evidence_source,
         )
         presentation = build_presentation_facts(
             semantic_plan,
@@ -552,19 +619,23 @@ class AnalyticsChatService:
             "answer": answer,
             "source": response_source,
             "sources": [{
-                "source": "vConnectorIncidentFacts",
+                "source": compiled.fact_source.evidence_source,
                 "count": len(facts),
                 "items": [json_safe(row) for row in facts[:MAX_LIMIT]],
             }],
             "query_plan": plan.to_dict(),
             "executed_query": executed_query,
+            "fact_source": compiled.fact_source.key,
+            "source_kind": str(SEMANTIC_CATALOG["source"]["kind"]),
             "from_at": from_at.isoformat() if from_at else None,
             "to_at": to_at.isoformat() if to_at else None,
-            "time_range_applied": _time_range_applied(from_at, to_at, self._config.timezone),
+            "time_range_applied": _time_range_applied(resolved_time_range),
             **outcome.to_dict(),
             "evidence_ids": evidence_ids,
             "evidence": evidence,
             "claims": claims,
+            "presentation": presentation.summary_metadata(),
+            "diagnostics": _time_range_diagnostics(semantic_plan, resolved_time_range),
             "verified_result": {
                 "rows": [_verified_result_row(fact) for fact in facts] if outcome.outcome == "verified_results" else [],
                 "columns": list(dict.fromkeys(field for fact in facts for field in fact)),
@@ -577,7 +648,149 @@ class AnalyticsChatService:
             "response_attempts": response_attempts,
             "_analytics_model_calls": self._qwen.calls_since(response_model_index),
             "_conversation_state": {"plan": plan, "facts": facts},
+            **({"_shadow_rows": database_rows} if include_shadow_rows else {}),
         }
+
+    def _run_compiled_query(
+        self, compiled: ExecutedTsql, *, timeout_seconds: int | None = None
+    ) -> list[dict[str, Any]]:
+        if self._execute_incident_query is None:  # pragma: no cover - caller guards this.
+            raise RuntimeError("compiled analytics executor is unavailable")
+        kwargs: dict[str, Any] = {
+            "statement": compiled.statement,
+            "parameters": compiled.parameter_values,
+        }
+        if timeout_seconds is not None:
+            kwargs["timeout_seconds"] = timeout_seconds
+        if compiled.fact_source.key == "dbt":
+            kwargs["fact_source"] = compiled.fact_source
+        return self._execute_incident_query(**kwargs)
+
+    def _schedule_shadow_comparison(
+        self,
+        *,
+        plan: QueryPlan,
+        legacy_compiled: ExecutedTsql,
+        legacy_rows: list[dict[str, Any]],
+        from_at: datetime | None,
+        to_at: datetime | None,
+        request_id: str,
+    ) -> None:
+        executor = self._shadow_executor
+        slots = self._shadow_slots
+        if executor is None or slots is None or self._closed:
+            return
+        if not slots.acquire(blocking=False):
+            logger.info(
+                "analytics shadow comparison skipped",
+                extra={
+                    "event": "analytics_shadow_comparison",
+                    "comparison_result": "inconclusive",
+                    "comparison_reason": "shadow_queue_full",
+                    "plan_fingerprint": plan_fingerprint(plan.to_dict()),
+                    "request_id": request_id,
+                },
+            )
+            return
+        try:
+            dbt_compiled = compile_incident_query(
+                plan,
+                from_at=from_at,
+                to_at=to_at,
+                row_limit=_MAX_EXECUTED_RESULT_ROWS + 1,
+                fact_source=self._dbt_fact_source,
+            )
+        except ValueError:
+            slots.release()
+            logger.info(
+                "analytics shadow comparison skipped",
+                extra={
+                    "event": "analytics_shadow_comparison",
+                    "comparison_result": "inconclusive",
+                    "plan_fingerprint": plan_fingerprint(plan.to_dict()),
+                    "request_id": request_id,
+                },
+            )
+            return
+        try:
+            executor.submit(
+                self._run_shadow_comparison,
+                plan,
+                legacy_compiled,
+                dbt_compiled,
+                [dict(row) for row in legacy_rows],
+                request_id,
+            )
+        except RuntimeError:
+            # A concurrent service shutdown can reject background work. The
+            # legacy response is already complete, so report it only as a
+            # bounded internal comparison outcome.
+            slots.release()
+            logger.info(
+                "analytics shadow comparison skipped",
+                extra={
+                    "event": "analytics_shadow_comparison",
+                    "comparison_result": "inconclusive",
+                    "comparison_reason": "shadow_executor_unavailable",
+                    "plan_fingerprint": plan_fingerprint(plan.to_dict()),
+                    "request_id": request_id,
+                },
+            )
+
+    def _run_shadow_comparison(
+        self,
+        plan: QueryPlan,
+        legacy_compiled: ExecutedTsql,
+        dbt_compiled: ExecutedTsql,
+        legacy_rows: list[dict[str, Any]],
+        request_id: str,
+    ) -> None:
+        """Run bounded shadow queries without exposing their result to a user."""
+
+        try:
+            dbt_rows: list[dict[str, Any]] | None = None
+            legacy_rows_after: list[dict[str, Any]] | None = None
+            try:
+                dbt_rows = self._run_compiled_query(
+                    dbt_compiled, timeout_seconds=self._config.shadow_timeout_seconds
+                )
+            except Exception:
+                dbt_rows = None
+            if dbt_rows is not None:
+                try:
+                    legacy_rows_after = self._run_compiled_query(
+                        legacy_compiled, timeout_seconds=self._config.shadow_timeout_seconds
+                    )
+                except Exception:
+                    legacy_rows_after = None
+            comparison = classify_shadow_comparison(
+                legacy_rows=legacy_rows,
+                dbt_rows=dbt_rows,
+                legacy_rows_after=legacy_rows_after,
+                result_shape=legacy_compiled.result_shape,
+                snapshot_consistent=self._config.shadow_snapshot_consistent,
+            )
+            # This event contains only bounded counts and hashes; never include
+            # SQL, source rows, raw exception messages, or user input.
+            logger.info(
+                "analytics shadow comparison completed",
+                extra={
+                    "event": "analytics_shadow_comparison",
+                    "comparison_result": comparison,
+                    "request_id": request_id,
+                    "plan_fingerprint": plan_fingerprint(plan.to_dict()),
+                    "legacy_row_count": len(legacy_rows),
+                    "dbt_row_count": len(dbt_rows) if dbt_rows is not None else None,
+                    "legacy_recheck_row_count": (
+                        len(legacy_rows_after) if legacy_rows_after is not None else None
+                    ),
+                    "legacy_source": legacy_compiled.fact_source.key,
+                    "dbt_source": dbt_compiled.fact_source.key,
+                },
+            )
+        finally:
+            if self._shadow_slots is not None:
+                self._shadow_slots.release()
 
     def _with_conversation(
         self,
@@ -646,11 +859,18 @@ class AnalyticsChatService:
             if callable(close):
                 close()
         finally:
+            if self._shadow_executor is not None:
+                self._shadow_executor.shutdown(wait=False, cancel_futures=True)
             if self._owns_client:
                 self._client.close()
 
 
-def _planning_failure(reason: str, *, timezone_name: str = "Asia/Ho_Chi_Minh") -> dict[str, Any]:
+def _planning_failure(
+    reason: str,
+    *,
+    timezone_name: str = "Asia/Ho_Chi_Minh",
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     outcome = cannot_verify(reason=reason)
     presentation = build_fallback_presentation(outcome, timezone_name=timezone_name)
     return {
@@ -669,6 +889,7 @@ def _planning_failure(reason: str, *, timezone_name: str = "Asia/Ho_Chi_Minh") -
         "query_plan": None,
         "semantic_plan": None,
         "evidence_ids": [],
+        "diagnostics": {"planning": diagnostics or {"validation_reason": reason}},
     }
 
 
@@ -702,14 +923,22 @@ def _execution_failure(
     }
 
 
-def _time_range_applied(
-    from_at: datetime | None, to_at: datetime | None, timezone_name: str
-) -> dict[str, str | None]:
+def _time_range_applied(resolved: ResolvedTimeRange) -> dict[str, str | None]:
+    return resolved.to_dict()
+
+
+def _time_range_diagnostics(
+    semantic_plan: SemanticPlan, resolved: ResolvedTimeRange
+) -> dict[str, Any]:
+    request = semantic_plan.data_request or {}
+    planning = semantic_plan.time_scope_resolution or {}
     return {
-        "from_at": from_at.isoformat() if from_at else None,
-        "to_at": to_at.isoformat() if to_at else None,
-        "timezone": timezone_name,
-        "timestamp": "failure_at",
+        "time_range": {
+            "model_time_scope": planning.get("model_time_scope", request.get("time_scope")),
+            "canonical_time_scope": planning.get("canonical_time_scope", request.get("time_scope")),
+            "canonical_range": resolved.to_dict(),
+            "validation_reason": planning.get("validation_reason"),
+        }
     }
 
 

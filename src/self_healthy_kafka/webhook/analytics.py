@@ -48,8 +48,37 @@ ALLOWED_OUTCOMES = {"RECOVERED", "FAILED", "ESCALATED", "OPEN"}
 
 @dataclass(frozen=True)
 class TimeRange:
+    """A bounded semantic time scope; it never contains model timestamps."""
+
     kind: str
     value: str
+    days: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"kind": self.kind, "value": self.value}
+        if self.days is not None:
+            result["days"] = self.days
+        return result
+
+
+@dataclass(frozen=True)
+class ResolvedTimeRange:
+    """Canonical boundary derived by the backend from one semantic scope."""
+
+    kind: str
+    from_at: datetime | None
+    to_at: datetime | None
+    timezone: str
+    timestamp_field: str = "failure_at"
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "kind": self.kind,
+            "from_at": self.from_at.isoformat() if self.from_at else None,
+            "to_at": self.to_at.isoformat() if self.to_at else None,
+            "timezone": self.timezone,
+            "timestamp_field": self.timestamp_field,
+        }
 
 
 @dataclass(frozen=True)
@@ -80,6 +109,8 @@ class QueryPlan:
     def to_dict(self) -> dict:
         result = asdict(self)
         result["metrics"] = [asdict(metric) for metric in self.metrics]
+        if isinstance(result.get("time_range"), dict) and result["time_range"].get("days") is None:
+            result["time_range"].pop("days")
         return result
 
 
@@ -119,7 +150,7 @@ def parse_plan(value: object) -> QueryPlan:
         "error_code",
     }:
         raise ValueError("filters contain an unsupported field")
-    time_range = _parse_time_range(filters.get("time_range"))
+    time_range = parse_time_range(filters.get("time_range"))
     event_types = _enum_values(filters.get("event_type"), ALLOWED_EVENT_TYPES, "event_type")
     outcomes = _enum_values(filters.get("final_outcome"), ALLOWED_OUTCOMES, "final_outcome")
     connector_name = _optional_text(filters.get("connector_name"), "connector_name")
@@ -164,43 +195,82 @@ def parse_plan(value: object) -> QueryPlan:
 
 
 def resolve_time_range(time_range: TimeRange | None, *, now: datetime, timezone_name: str) -> tuple[datetime | None, datetime | None]:
-    if time_range is None:
-        return None, None
+    """Backward-compatible tuple form for repository callers."""
+
+    resolved = resolve_canonical_time_range(time_range, now=now, timezone_name=timezone_name)
+    return resolved.from_at, resolved.to_at
+
+
+def resolve_canonical_time_range(
+    time_range: TimeRange | None, *, now: datetime, timezone_name: str
+) -> ResolvedTimeRange:
+    """Resolve one catalogued semantic scope in the configured business zone."""
+
     try:
         zone = ZoneInfo(timezone_name)
     except Exception as exc:
         raise ValueError("chat timezone is invalid") from exc
+    if time_range is None:
+        return ResolvedTimeRange("all_snapshot", None, None, timezone_name)
     local_now = now.astimezone(zone)
     today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     value = time_range.value
     if value == "today":
         # "Today" is the elapsed business day, not the entire calendar day
         # including future rows that could be inserted later.
-        return today, local_now
+        return ResolvedTimeRange(time_range.kind, today, local_now, timezone_name)
     if value == "yesterday":
-        return today - timedelta(days=1), today
+        return ResolvedTimeRange(time_range.kind, today - timedelta(days=1), today, timezone_name)
     if value == "last_7_days":
-        return today - timedelta(days=6), today + timedelta(days=1)
+        return ResolvedTimeRange(time_range.kind, today - timedelta(days=6), today + timedelta(days=1), timezone_name)
+    if value == "last_n_days" and time_range.days is not None:
+        return ResolvedTimeRange(time_range.kind, today - timedelta(days=time_range.days - 1), local_now, timezone_name)
     if value == "this_month":
-        return today.replace(day=1), today + timedelta(days=1)
+        return ResolvedTimeRange(time_range.kind, today.replace(day=1), today + timedelta(days=1), timezone_name)
     if value == "last_week":
         start = today - timedelta(days=today.weekday() + 7)
-        return start, start + timedelta(days=7)
+        return ResolvedTimeRange(time_range.kind, start, start + timedelta(days=7), timezone_name)
     if value == "this_week":
         start = today - timedelta(days=today.weekday())
-        return start, start + timedelta(days=7)
+        return ResolvedTimeRange(time_range.kind, start, start + timedelta(days=7), timezone_name)
+    if time_range.kind == "absolute_date":
+        try:
+            start = datetime.fromisoformat(time_range.value).replace(tzinfo=zone)
+        except ValueError as exc:
+            raise ValueError("absolute date is not allowed") from exc
+        return ResolvedTimeRange(time_range.kind, start, start + timedelta(days=1), timezone_name)
     raise ValueError("time range is not allowed")
 
 
-def _parse_time_range(value: object) -> TimeRange | None:
+def parse_time_range(value: object) -> TimeRange | None:
+    """Validate the sole semantic time-range schema accepted from a plan."""
+
     if value is None:
         return None
-    if not isinstance(value, dict) or value.get("kind") != "relative":
+    if not isinstance(value, dict):
         raise ValueError("time_range is not allowed")
-    raw = str(value.get("value") or "")
-    if raw not in {"today", "yesterday", "last_7_days", "this_month", "last_week", "this_week"}:
+    kind = value.get("kind")
+    raw = value.get("value")
+    if not isinstance(raw, str):
         raise ValueError("time_range is not allowed")
-    return TimeRange("relative", raw)
+    if kind == "relative":
+        if raw in {"today", "yesterday", "last_7_days", "this_month", "last_week", "this_week"}:
+            if set(value) != {"kind", "value"}:
+                raise ValueError("time_range is not allowed")
+            return TimeRange("relative", raw)
+        if raw == "last_n_days":
+            days = value.get("days")
+            if set(value) != {"kind", "value", "days"} or not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_RANGE_DAYS:
+                raise ValueError("time_range is not allowed")
+            return TimeRange("relative", raw, days=days)
+    if kind == "absolute_date" and set(value) == {"kind", "value"}:
+        try:
+            datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise ValueError("time_range is not allowed") from exc
+        if len(raw) == 10:
+            return TimeRange("absolute_date", raw)
+    raise ValueError("time_range is not allowed")
 
 
 def _enum_values(value: object, allowed: set[str], name: str) -> tuple[str, ...]:

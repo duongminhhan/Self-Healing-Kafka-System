@@ -110,9 +110,12 @@ def classify_execution(*, row_count: int, fact_count: int, truncated: bool) -> A
             reason="analytics_evidence_truncated", query_executed=True, row_count=row_count
         )
     if row_count == 0:
-        return verified_empty(snapshot_freshness="historical_incident_snapshot")
+        # A completed query proves the result set, not how current its source
+        # is.  The source classification lives in ``source_kind``; freshness
+        # stays explicit until an approved watermark and SLA exist.
+        return verified_empty(snapshot_freshness="unknown")
     if fact_count == 0:
         return cannot_verify(
             reason="incomplete_result_coverage", query_executed=True, row_count=row_count
         )
-    return verified_results(row_count=row_count, snapshot_freshness="historical_incident_snapshot")
+    return verified_results(row_count=row_count, snapshot_freshness="unknown")

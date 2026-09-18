@@ -78,17 +78,25 @@ export function ResponseDetails({response,timing,resultId}:{response:ChatRespons
   const outcomeHandled=response.outcome==="verified_empty"||response.outcome==="cannot_verify";
   const responseFallback=/^(?:grounding_failure|response_model_not_configured)/.test(response.fallback_reason??"");
   const warning=statusMessage(response.status)??(outcomeHandled||responseFallback?null:fallbackMessage(response.fallback_reason));
-  const technical={outcome:response.outcome,query_executed:response.query_executed,evidence_complete:response.evidence_complete,status:response.status,reason:response.reason,fallback_reason:response.fallback_reason,row_count:response.row_count,query_plan:response.query_plan,sql_evidence:response.sql_evidence,evidence:response.evidence,analytics_evidence:response.analytics_evidence,claims:response.claims,runbook_claims:response.runbook_claims,model_usage:response.model_usage,evidence_ids:response.evidence_ids,diagnostics:response.diagnostics};
+  const technical={outcome:response.outcome,query_executed:response.query_executed,evidence_complete:response.evidence_complete,status:response.status,reason:response.reason,fallback_reason:response.fallback_reason,row_count:response.row_count,time_range_applied:response.time_range_applied,semantic_plan:response.semantic_plan,query_plan:response.query_plan,sql_evidence:response.sql_evidence,evidence:response.evidence,analytics_evidence:response.analytics_evidence,claims:response.claims,runbook_claims:response.runbook_claims,model_usage:response.model_usage,evidence_ids:response.evidence_ids,diagnostics:response.diagnostics};
   const hasTechnical=Object.values(technical).some(value=>value!==undefined&&value!==null);
   const rows=response.verified_result?.rows??[];
   const columns=Array.from(new Set([...(response.verified_result?.columns??[]),...rows.flatMap(row=>Object.keys(row))]));
   const metadata=[
     timing&&`Phản hồi trong ${formatElapsedTime(timing.elapsed_ms)}`,
   ].filter(Boolean) as string[];
+  const presentation=response.presentation;
+  const showMore=Boolean(
+    presentation?.has_more_verified_results
+    && presentation.detail_accessible
+    && rows.length
+    && presentation.remaining_count>0
+  );
   return <div className="response-details">
     {!!metadata.length&&<div className="response-meta badges" aria-label="Thông tin phản hồi" aria-live="polite">{metadata.map(item=><span key={item} title={item.startsWith("Phản hồi")?"Thời gian end-to-end quan sát từ trình duyệt":undefined}>{item}</span>)}</div>}
     {warning&&<p className="notice">{warning}</p>}
     {!!response.recommended_runbooks?.length&&<details className="disclosure"><summary>Runbook phù hợp ({response.recommended_runbooks.length})</summary><ul>{response.recommended_runbooks.map((item,index)=><li key={index}>{item.title??item.runbook_id}<small>{item.version?`v${item.version}`:""}</small></li>)}</ul></details>}
+    {showMore&&<Button variant="outline" className="verified-more" onClick={()=>document.getElementById(resultId)?.scrollIntoView({behavior:"smooth",block:"center"})}>Xem {presentation?.remaining_count??0} kết quả đã xác minh khác</Button>}
     {!!rows.length&&<VerifiedTable rows={rows} columns={columns} resultId={resultId}/>}
     {response.executed_query?.executed&&response.executed_query.read_only&&<ExecutedQuery query={response.executed_query}/>}
     {!!response.citations?.length&&<details className="disclosure"><summary><BookOpen size={15}/> Nguồn tham khảo ({response.citations.length}) <ChevronDown size={14}/></summary><ul>{response.citations.map((citation,index)=>{

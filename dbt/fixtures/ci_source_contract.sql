@@ -1,0 +1,108 @@
+-- Deterministic source rows make the CI parity tests non-vacuous.
+INSERT INTO [dbo].[ConnectorHealingQueue] (
+    [QueueId],
+    [RootConnectorName],
+    [CurrentConnectorName],
+    [ConnectorClass],
+    [HealingMode],
+    [QueueStatus],
+    [FinalOutcome],
+    [ReceivedAt],
+    [CompletedAt]
+)
+VALUES
+    (
+        '10000000-0000-0000-0000-000000000001',
+        'ci-oracle-orders',
+        'ci-oracle-orders',
+        'io.debezium.connector.oracle.OracleConnector',
+        'RECOVERY',
+        'COMPLETED',
+        'RECOVERED',
+        '2026-01-01T00:00:00+00:00',
+        '2026-01-01T00:05:00+00:00'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000002',
+        'ci-jdbc-orders',
+        'ci-jdbc-orders',
+        'io.confluent.connect.jdbc.JdbcSourceConnector',
+        'RESTART_ONLY',
+        'ESCALATED',
+        'ESCALATED',
+        '2026-01-01T01:00:00+00:00',
+        '2026-01-01T01:10:00+00:00'
+    ),
+    (
+        '10000000-0000-0000-0000-000000000003',
+        'ci-postgres-orders',
+        'ci-postgres-orders',
+        'io.debezium.connector.postgresql.PostgresConnector',
+        'RECOVERY',
+        'PROCESSING',
+        NULL,
+        '2026-01-01T02:00:00+00:00',
+        NULL
+    );
+
+INSERT INTO [dbo].[ConnectorHealingLogs] (
+    [Id],
+    [QueueId],
+    [ConnectorName],
+    [EventType],
+    [AttemptNo],
+    [HealingStep],
+    [Severity],
+    [Message],
+    [Details],
+    [CreatedAt]
+)
+VALUES
+    (
+        '20000000-0000-0000-0000-000000000001',
+        '10000000-0000-0000-0000-000000000001',
+        'ci-oracle-orders',
+        'HEALTH_FAILED_CONFIRMED',
+        1,
+        1,
+        'ERROR',
+        N'ORA-01013: user requested cancel of current operation',
+        N'{}',
+        '2026-01-01T00:01:00+00:00'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000002',
+        '10000000-0000-0000-0000-000000000001',
+        'ci-oracle-orders',
+        'HEALTH_FAILED_CONFIRMED',
+        2,
+        1,
+        'ERROR',
+        N'ORA-01555: snapshot too old',
+        N'{}',
+        '2026-01-01T00:02:00+00:00'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000003',
+        '10000000-0000-0000-0000-000000000002',
+        'ci-jdbc-orders',
+        'HEALTH_FAILED_CONFIRMED',
+        1,
+        1,
+        'ERROR',
+        N'Connection refused by dependency',
+        N'{}',
+        '2026-01-01T01:01:00+00:00'
+    ),
+    (
+        '20000000-0000-0000-0000-000000000004',
+        '10000000-0000-0000-0000-000000000003',
+        'ci-postgres-orders',
+        'HEALTH_FAILED_CONFIRMED',
+        1,
+        1,
+        'ERROR',
+        N'could not establish replication connection',
+        N'{}',
+        '2026-01-01T02:01:00+00:00'
+    );

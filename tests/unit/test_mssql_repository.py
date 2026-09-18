@@ -3,6 +3,7 @@ import json
 import pytest
 
 from self_healthy_kafka.storage.mssql import HealingRepository
+from self_healthy_kafka.semantic.fact_source import IncidentFactSource, incident_fact_source
 from self_healthy_kafka.semantic.tsql import compile_incident_query
 from self_healthy_kafka.webhook.analytics import parse_plan
 
@@ -164,6 +165,38 @@ def test_compiled_incident_query_rejects_non_select_input_at_repository_boundary
         _repository(_Connection()).execute_compiled_incident_query(
             statement="DELETE FROM [dbo].[ConnectorHealingLogs]", parameters=()
         )
+
+
+def test_compiled_incident_query_rejects_an_unapproved_dbt_source_at_repository_boundary():
+    source = IncidentFactSource(
+        key="dbt",
+        qualified_name="[analytics].[vSemanticConnectorIncidentFacts]; DROP TABLE x;--",
+        evidence_source="vSemanticConnectorIncidentFacts",
+    )
+    with pytest.raises(ValueError, match="source is not approved"):
+        _repository(_Connection()).execute_compiled_incident_query(
+            statement="SELECT 1", parameters=(), fact_source=source
+        )
+
+
+def test_compiled_incident_query_accepts_the_allowlisted_dbt_compatibility_view():
+    connection = _Connection(results=[[{"root_connector_name": "orders", "incident_count": 3}]])
+    source = incident_fact_source(mode="dbt", dbt_schema="analytics")
+    query = compile_incident_query(parse_plan({
+        "dataset": "connector_incidents",
+        "metrics": [{"name": "failure_count", "aggregation": "count_distinct_incident"}],
+        "group_by": ["job_name"],
+        "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
+        "order_by": [{"field": "failure_count", "direction": "desc"}],
+        "limit": 3,
+    }), from_at=None, to_at=None, row_limit=501, fact_source=source)
+
+    rows = _repository(connection).execute_compiled_incident_query(
+        statement=query.statement, parameters=query.parameter_values, fact_source=source
+    )
+
+    assert rows == [{"root_connector_name": "orders", "incident_count": 3}]
+    assert "[analytics].[vSemanticConnectorIncidentFacts]" in connection.cursor_obj.executed[-1][0]
 
 
 def test_list_connectors_reads_only_due_open_queue_items():

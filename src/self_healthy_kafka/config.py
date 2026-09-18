@@ -159,6 +159,25 @@ class AnalyticsChatConfig:
     hf_response_max_tokens: int = int(os.getenv("HF_CHAT_RESPONSE_MAX_TOKENS", "900"))
     conversation_ttl_seconds: int = int(os.getenv("CHAT_CONVERSATION_TTL_SECONDS", "1800"))
     conversation_max_entries: int = int(os.getenv("CHAT_CONVERSATION_MAX_ENTRIES", "500"))
+    # ``legacy`` remains the safe default until shadow parity is explicitly reviewed.
+    fact_source: str = os.getenv("CHAT_ANALYTICS_FACT_SOURCE", "legacy").strip().lower()
+    dbt_schema: str = os.getenv("CHAT_ANALYTICS_DBT_SCHEMA", "analytics").strip()
+    shadow_timeout_seconds: int = int(os.getenv("CHAT_ANALYTICS_SHADOW_TIMEOUT_SECONDS", "5"))
+    shadow_queue_size: int = int(os.getenv("CHAT_ANALYTICS_SHADOW_QUEUE_SIZE", "32"))
+    shadow_snapshot_consistent: bool = os.getenv(
+        "CHAT_ANALYTICS_SHADOW_SNAPSHOT_CONSISTENT", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+
+    def __post_init__(self) -> None:
+        from self_healthy_kafka.semantic.fact_source import incident_fact_source, normalize_fact_source_mode
+
+        self.fact_source = normalize_fact_source_mode(self.fact_source)
+        # Resolve dbt as well so an invalid schema cannot remain dormant until cutover.
+        incident_fact_source(mode="dbt", dbt_schema=self.dbt_schema)
+        if not 1 <= self.shadow_timeout_seconds <= 30:
+            raise ValueError("CHAT_ANALYTICS_SHADOW_TIMEOUT_SECONDS must be between 1 and 30")
+        if not 1 <= self.shadow_queue_size <= 1_000:
+            raise ValueError("CHAT_ANALYTICS_SHADOW_QUEUE_SIZE must be between 1 and 1000")
 
 
 @dataclass

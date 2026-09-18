@@ -246,6 +246,23 @@ def test_cue_contract_preserves_an_explicit_top_n_limit():
     assert cues.limit == 3
 
 
+def test_top_n_defaults_to_exact_limit_but_explicit_ties_are_preserved():
+    exact = _connector_ranking_plan()
+    exact["data_request"]["limit"] = 3
+    ties = _connector_ranking_plan()
+    ties["data_request"]["limit"] = 3
+
+    exact_plan, _ = SemanticPlanner(lambda _messages, **_kwargs: exact).plan(
+        "Liệt kê top 3 connector gặp nhiều sự cố nhất"
+    )
+    ties_plan, _ = SemanticPlanner(lambda _messages, **_kwargs: ties).plan(
+        "Liệt kê top 3 connector gặp nhiều sự cố nhất, bao gồm các connector đồng hạng"
+    )
+
+    assert exact_plan.data_request["tie_policy"] == "exact_limit"
+    assert ties_plan.data_request["tie_policy"] == "include_ties"
+
+
 def test_plan_normalizes_dimension_level_subject_aliases_to_the_neutral_contract():
     value = _value(data_request={
         "intent": "top_error_signature",
@@ -339,6 +356,70 @@ def test_planner_preserves_explicit_error_code_time_scope_without_connector_conv
     assert plan.data_request["subject"] == "error_signature"
     assert plan.data_request["time_scope"] == {"kind": "relative", "value": "today"}
     assert plan.data_request["time_scope_origin"] == "explicit"
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Có connector nào FAILED hôm nay không?", {"kind": "relative", "value": "today"}),
+        ("Có connector nào FAILED hôm qua không?", {"kind": "relative", "value": "yesterday"}),
+        ("Có connector nào FAILED trong 3 ngày gần đây không?", {"kind": "relative", "value": "last_n_days", "days": 3}),
+        ("Which connectors FAILED in the last 3 days?", {"kind": "relative", "value": "last_n_days", "days": 3}),
+        ("Có connector nào FAILED vào 2026-09-03 không?", {"kind": "absolute_date", "value": "2026-09-03"}),
+    ],
+)
+def test_cue_contract_extracts_canonical_time_scope(question, expected):
+    assert semantic_cue_contract(question).time_scope == expected
+
+
+def test_planner_canonicalizes_unsupported_model_time_shape_from_explicit_question_scope():
+    raw = _connector_ranking_plan()
+    raw["data_request"].update({
+        "intent": "failed_connectors",
+        "subject": "root_connector",
+        "filters": {"outcome": ["FAILED"], "time_range": {
+            "kind": "calendar", "from_at": "2026-09-15T00:00:00+07:00", "to_at": "2026-09-15T10:00:00+07:00",
+        }},
+        "time_scope": {"kind": "calendar", "from_at": "2026-09-15T00:00:00+07:00"},
+        "time_scope_origin": "explicit",
+    })
+
+    plan, attempts = SemanticPlanner(lambda _messages, **_kwargs: raw).plan(
+        "Có connector nào có trạng thái FAILED hôm nay không?"
+    )
+
+    assert attempts == 1
+    assert plan.data_request["time_scope"] == {"kind": "relative", "value": "today"}
+    assert plan.data_request["filters"]["time_range"] == {"kind": "relative", "value": "today"}
+    assert plan.time_scope_resolution == {
+        "model_time_scope": {"kind": "calendar"},
+        "canonical_time_scope": {"kind": "relative", "value": "today"},
+        "validation_reason": None,
+    }
+
+
+def test_planner_corrects_conflicting_semantic_time_scope_instead_of_overwriting_it():
+    wrong = _connector_ranking_plan(time_range="yesterday", origin="explicit")
+    wrong["data_request"].update({
+        "intent": "failed_connectors", "subject": "root_connector",
+        "filters": {"outcome": ["FAILED"], "time_range": {"kind": "relative", "value": "yesterday"}},
+    })
+    correct = _connector_ranking_plan(time_range="today", origin="explicit")
+    correct["data_request"].update({
+        "intent": "failed_connectors", "subject": "root_connector",
+        "filters": {"outcome": ["FAILED"], "time_range": {"kind": "relative", "value": "today"}},
+    })
+    calls = []
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return wrong if len(calls) == 1 else correct
+
+    plan, attempts = SemanticPlanner(generate).plan("Có connector nào FAILED hôm nay không?")
+
+    assert attempts == 2
+    assert plan.data_request["time_scope"] == {"kind": "relative", "value": "today"}
+    assert "time scope mismatch" in calls[1][1]["content"]
 
 
 def test_planner_allows_a_declared_time_scope_inherited_from_valid_context():

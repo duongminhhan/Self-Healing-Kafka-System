@@ -34,3 +34,17 @@ Format cho mỗi goal: bối cảnh → rủi ro → hướng triển khai/kỹ 
 - Hướng triển khai: semantic subject mặc định là root connector, T-SQL compiler allowlist chạy aggregate/rank trực tiếp, top-N dùng dense rank và chỉ cắt deterministic khi yêu cầu chính xác N.
 - Kỹ thuật: parameter binding, read-only CTE guard tại repository, canonical rank/tie coverage và deterministic renderer khi lớp diễn đạt không grounded.
 - Quyết định: chỉ hiển thị disclosure truy vấn khi backend đã chạy đúng query đó; log-grain vẫn là capability riêng, không suy diễn từ incident snapshot.
+
+## 2026-09-15 — Tóm tắt evidence nhiều dòng
+
+- Bối cảnh: top-N có đồng hạng hợp lệ làm lớp diễn đạt liệt kê mọi fact trong một đoạn dài, dù bảng xác minh đã có dữ liệu đầy đủ.
+- Rủi ro: người dùng khó thấy kết luận chính; model có thể lặp thông tin đã có ở bảng chi tiết.
+- Hướng triển khai: policy tổng quát tách preview giới hạn, evidence đầy đủ và CTA mở bảng; top-N mặc định là đúng N dòng ổn định.
+- Kỹ thuật: planner quyết định tie policy từ ý nghĩa rõ ràng; renderer/model chỉ nhận summary rows đã xác minh và thêm notice deterministic khi còn kết quả.
+
+## 2026-09-15 — Chuẩn hóa phạm vi thời gian semantic
+
+- Bối cảnh: model đôi khi tạo `time_range` có timestamp hoặc kind không thuộc DSL, làm câu hỏi “hôm nay” dừng ở `cannot_verify` dù nghiệp vụ đã rõ.
+- Rủi ro: bỏ filter để query chạy sẽ thay đổi nghĩa; để model tự tính timestamp gây lệch múi giờ và làm contract khó kiểm soát.
+- Hướng triển khai: planner chỉ giữ semantic scope; backend resolve một canonical range theo timezone và timestamp business đã catalog.
+- Kỹ thuật: shared `TimeRange` parser, resolver có `kind/from_at/to_at/timezone/timestamp_field`, canonicalization cho time scope rõ ràng và feedback correction có schema mẫu.

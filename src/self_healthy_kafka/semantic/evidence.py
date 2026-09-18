@@ -60,6 +60,7 @@ def build_evidence(
     from_at: datetime | None,
     to_at: datetime | None,
     truncated: bool,
+    source: str = "vConnectorIncidentFacts",
 ) -> list[dict[str, Any]]:
     """Attach stable fact identifiers and their exact semantic scope."""
 
@@ -126,7 +127,7 @@ def build_evidence(
                 },
                 "status": _status(fact),
                 "grain": "aggregated connector incident facts" if query_plan.group_by else "aggregated connector incidents",
-                "source": "vConnectorIncidentFacts",
+                "source": source,
                 "evidence_ids": list(fact.get("evidence_ids") or []),
                 "complete": not truncated,
                 "semantic_catalog_version": semantic_plan.version,
@@ -142,26 +143,26 @@ def render_evidence(presentation: PresentationFacts) -> str:
     directly from the evidence packet.
     """
 
-    evidence = [dict(item) for item in presentation.rows]
+    evidence = [dict(item) for item in presentation.summary_rows]
     if not presentation.query_executed or not presentation.evidence_complete or not evidence:
         raise ValueError("render_evidence requires complete, non-empty evidence")
     source = _PRESENTATION["sources"].get(presentation.source, presentation.source)
     scope = f"Trong {source} {presentation.time_scope},"
-    first = evidence[0]
-    first_text = _fact_text(first)
+    first_text = _fact_text(
+        evidence[0], include_rank=len(evidence) == 1, include_tie=False,
+        details_limit=presentation.summary_detail_limit,
+    )
     if len(evidence) == 1:
         lead = f"{scope} {first_text}."
-    elif presentation.sort_metric:
-        label = _PRESENTATION["metrics"][presentation.sort_metric]["label_vi"]
-        lead = f"{scope} Kết quả đứng đầu theo {label} là {first_text}."
     else:
-        lead = f"{scope} {first_text}."
-    remainder = [_fact_text(item) for item in evidence[1:]]
-    if remainder:
-        lead += " Các kết quả tiếp theo: " + "; ".join(remainder) + "."
-    detail_lines = _detail_lines(evidence)
-    if detail_lines:
-        lead += " " + " ".join(detail_lines)
+        lines = [
+            f"{index}. {_fact_text(item, include_rank=False, include_tie=False, details_limit=presentation.summary_detail_limit)}."
+            for index, item in enumerate(evidence, start=1)
+        ]
+        lead = f"{scope}\n\n" + "\n".join(lines)
+    notice = _summary_notice(presentation)
+    if notice:
+        lead += f"\n\n{notice}"
     return lead
 
 
@@ -185,21 +186,25 @@ class AnalyticsResponseComposer:
             # The caller must create ``cannot_verify`` rather than ask this
             # renderer to infer an empty answer from absent evidence.
             raise ValueError("verified results require complete evidence")
+        summary_evidence = [dict(item) for item in presentation.summary_rows]
         if self._generate is None:
             answer = render_evidence(presentation)
-            return answer, "deterministic_evidence_renderer", "response_model_not_configured", 0, _deterministic_claims(evidence)
+            return answer, "deterministic_evidence_renderer", "response_model_not_configured", 0, _deterministic_claims(summary_evidence)
         correction: str | None = None
         for attempt in range(1, 3):
             try:
                 candidate = self._generate(
                     _messages(presentation, correction), max_tokens=self._max_tokens
                 )
-                answer, claims = _validate_response(candidate, evidence)
+                answer, claims = _validate_response(candidate, summary_evidence)
+                notice = _summary_notice(presentation)
+                if notice:
+                    answer = f"{answer.rstrip()}\n\n{notice}"
                 return answer, "huggingface", None, attempt, claims
             except Exception as exc:
                 correction = _error_label(exc)
         answer = render_evidence(presentation)
-        return answer, "deterministic_evidence_renderer", f"grounding_failure:{correction}", 2, _deterministic_claims(evidence)
+        return answer, "deterministic_evidence_renderer", f"grounding_failure:{correction}", 2, _deterministic_claims(summary_evidence)
 
 
 def _messages(
@@ -207,13 +212,14 @@ def _messages(
     correction: str | None,
 ) -> list[dict[str, str]]:
     system = (
-        "Return only JSON with keys answer and claims. Write concise natural Vietnamese in answer. "
+        "Return only JSON with keys answer and claims. Write concise natural Vietnamese in answer, using at most three short facts. "
         "Do not use SQL, raw logs, credentials, or hidden diagnostics. Each factual statement about an entity, "
         "metric, value, time, status, error code, or message must have one matching claim. A claim has exactly "
         "fact_id, entity, metric, value, time_range, status, and text. metric is either a metric name or "
         "detail:<field>. Copy entity, metric, value, time_range, and status from one evidence item exactly. "
         "claim.text must include the entity name where present, the Vietnamese metric/detail label, and the exact "
         "value. It may not negate a positive value. "
+        "Use only presentation_facts.summary_rows; do not enumerate hidden rows or invent totals/ties. "
         "Do not state live connector health from historical data. Do not add remediation because this response "
         "stage is analytics only."
     )
@@ -358,7 +364,10 @@ def _validate_answer_identifiers(answer: str, evidence: list[dict[str, Any]]) ->
             raise ValueError("answer has an unsupported technical identifier")
 
 
-def _fact_text(fact: dict[str, Any]) -> str:
+def _fact_text(
+    fact: dict[str, Any], *, include_rank: bool = True, include_tie: bool = True,
+    details_limit: int = 0,
+) -> str:
     entity = fact["entity"]
     entity_text = ", ".join(f"{label} {value}" for label, value in entity.items())
     metrics = []
@@ -373,12 +382,36 @@ def _fact_text(fact: dict[str, Any]) -> str:
     prefix = entity_text or "Toàn bộ phạm vi"
     rank = fact.get("rank")
     tie_count = fact.get("tie_count")
-    rank_prefix = f"Hạng {rank}: " if isinstance(rank, int) and rank > 0 else ""
+    rank_prefix = f"Hạng {rank}: " if include_rank and isinstance(rank, int) and rank > 0 else ""
     tie_suffix = (
         f" (đồng hạng với {tie_count - 1} kết quả khác)"
-        if isinstance(tie_count, int) and tie_count > 1 else ""
+        if include_tie and isinstance(tie_count, int) and tie_count > 1 else ""
     )
-    return f"{rank_prefix}{prefix} có {', '.join(metrics)}{tie_suffix}"
+    details = [
+        f"{label}: {_display_value(value)}"
+        for label, value in fact.get("details", {}).items()
+    ][:max(0, details_limit)]
+    detail_suffix = f"; {'; '.join(details)}" if details else ""
+    return f"{rank_prefix}{prefix} có {', '.join(metrics)}{tie_suffix}{detail_suffix}"
+
+
+def _summary_notice(presentation: PresentationFacts) -> str | None:
+    if not presentation.has_more_verified_results or not presentation.detail_accessible:
+        return None
+    policy = _PRESENTATION["summary_policy"]
+    if presentation.boundary_tie_truncated and presentation.boundary_tie_count:
+        summary_rows = presentation.summary_rows
+        if summary_rows:
+            shown_at_boundary = sum(
+                1 for item in summary_rows
+                if item.get("rank") == summary_rows[-1].get("rank")
+            )
+            tied_remaining = presentation.boundary_tie_count - shown_at_boundary
+            if tied_remaining > 0:
+                return str(policy["boundary_tie_vi"]).format(
+                    count=tied_remaining, rank=summary_rows[-1].get("rank")
+                )
+    return str(policy["more_results_vi"]).format(count=presentation.remaining_count)
 
 
 def _detail_lines(evidence: list[dict[str, Any]]) -> list[str]:

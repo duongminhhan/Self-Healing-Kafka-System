@@ -31,7 +31,7 @@ def _semantic_plan():
             "metrics": ["incident_count"], "dimensions": ["root_connector"],
             "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
             "sort": {"metric": "incident_count", "direction": "desc"}, "limit": 3,
-            "comparison": None, "detail_fields": [],
+            "comparison": None, "detail_fields": [], "tie_policy": "include_ties",
         },
         "guidance_request": {"needed": False, "purpose": None, "error_codes": [], "connector_class": None},
         "clarification": None, "conversation_action": "none", "inherited_fields": [],
@@ -96,6 +96,15 @@ def test_compiled_execution_is_used_for_root_ranking_and_keeps_boundary_ties():
     ]
     assert result["evidence"][2]["rank"] == 3
     assert result["evidence"][2]["tie_count"] == 2
+    assert result["presentation"] == {
+        "summary_item_limit": 3, "summary_detail_limit": 1, "result_total_count": 4,
+        "displayed_count": 3, "remaining_count": 1, "ranking": "descending",
+        "tie_policy": "include_ties", "boundary_tie_count": 2,
+        "boundary_tie_truncated": True, "has_more_verified_results": True,
+        "detail_accessible": True,
+    }
+    assert "sample-oracle-redo" not in result["answer"]
+    assert "Có thêm 1 kết quả đồng hạng" in result["answer"]
     assert result["executed_query"]["executed"] is True
     assert result["executed_query"]["read_only"] is True
     assert "sample-oracle-orders" in result["answer"]

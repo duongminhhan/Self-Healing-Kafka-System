@@ -199,3 +199,42 @@ def test_evidence_renderer_formats_verified_metric_values(name, label, value, un
     answer = render_evidence(presentation)
 
     assert expected in answer
+
+
+def test_evidence_renderer_previews_verified_rows_and_summarizes_boundary_ties():
+    def fact(name: str, value: int, rank: int, tie_count: int) -> dict:
+        return {
+            "rank": rank,
+            "tie_count": tie_count,
+            "entity": {"root connector": name},
+            "metrics": [{"name": "failure_count", "label": "số incident", "value": value, "unit": "incident"}],
+            "details": {},
+        }
+
+    presentation = PresentationFacts(
+        outcome="verified_results", subject="root_connector", conditions=(), metric="incident_count",
+        metric_value=None, result_count=5,
+        rows=(
+            fact("orders", 4, 1, 1), fact("payments", 3, 2, 1),
+            fact("auth", 1, 3, 3), fact("oracle", 1, 3, 3), fact("s3", 1, 3, 3),
+        ),
+        row_count=5, time_scope="trên toàn bộ snapshot hiện có", from_at=None, to_at=None,
+        timezone="Asia/Ho_Chi_Minh", source="historical_incident_snapshot", snapshot_freshness=None,
+        evidence_complete=True, query_executed=True, clarification_question=None, safe_failure_reason=None,
+        sort_metric="incident_count", ranking="descending", summary_item_limit=3, result_total_count=5,
+        displayed_count=3, remaining_count=2, tie_policy="include_ties", boundary_tie_count=3,
+        boundary_tie_truncated=True, has_more_verified_results=True, detail_accessible=True,
+    )
+
+    answer = render_evidence(presentation)
+
+    assert answer.count("root connector") == 3
+    assert "oracle" not in answer and "s3" not in answer
+    assert "Có thêm 2 kết quả đồng hạng với vị trí thứ 3" in answer
+    assert presentation.summary_metadata() == {
+        "summary_item_limit": 3, "summary_detail_limit": 1, "result_total_count": 5,
+        "displayed_count": 3, "remaining_count": 2, "ranking": "descending",
+        "tie_policy": "include_ties", "boundary_tie_count": 3,
+        "boundary_tie_truncated": True, "has_more_verified_results": True,
+        "detail_accessible": True,
+    }

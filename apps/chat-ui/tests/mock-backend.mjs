@@ -71,6 +71,12 @@ http.createServer(async (req, res) => {
       {connector:"s3-sink",incident_count:null,last_seen:null},
     ]},conversation:{id:conversation_id,context_used:false,action:"start"}})); return;
   }
+  if(question === "Presentation summary test") {
+    res.setHeader("Content-Type","application/json");
+    res.end(JSON.stringify({answer:"Ba kết quả chính đã được xác minh.\n\nCó thêm 1 kết quả đồng hạng với vị trí thứ 3; bảng chi tiết chứa đầy đủ danh sách.",route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",query_executed:true,evidence_complete:true,row_count:4,presentation:{summary_item_limit:3,summary_detail_limit:1,result_total_count:4,displayed_count:3,remaining_count:1,ranking:"descending",tie_policy:"include_ties",boundary_tie_count:2,boundary_tie_truncated:true,has_more_verified_results:true,detail_accessible:true},verified_result:{rows:[
+      {connector:"orders",incident_count:4},{connector:"payments",incident_count:3},{connector:"auth",incident_count:1},{connector:"oracle",incident_count:1},
+    ]},conversation:{id:conversation_id,context_used:false,action:"start"}})); return;
+  }
   if(question === "Executed query disclosure test") {
     res.setHeader("Content-Type","application/json");
     res.end(JSON.stringify({answer:"Đã xác minh 3 incident.",route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",query_executed:true,evidence_complete:true,row_count:1,executed_query:{kind:"tsql_select",dialect:"tsql",statement:"SELECT ? AS [incident_count];",display_statement:"DECLARE @rank_limit int = 3;\n\nSELECT @rank_limit AS [incident_count];",parameters:[{name:"@rank_limit",type:"int",value:3}],executed:true,read_only:true,result_shape:["incident_count"]},conversation:{id:conversation_id,context_used:false,action:"start"}})); return;

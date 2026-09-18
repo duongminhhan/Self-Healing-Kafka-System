@@ -16,12 +16,6 @@ else:
 
 bootstrap_repo_src()
 
-from qdrant_client import QdrantClient, models
-
-from self_healthy_kafka.config import RagConfig
-from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--alias", required=True)
@@ -57,6 +51,14 @@ def main() -> int:
         "on",
     }:
         parser.error("--apply requires QDRANT_ALIAS_CUTOVER=true")
+
+    # Alias changes are the only path that needs the Qdrant SDK.  Keeping
+    # these imports here makes ``--help`` and the dry-run path local, fast,
+    # and independent of optional client initialization side effects.
+    from qdrant_client import QdrantClient, models
+
+    from self_healthy_kafka.config import RagConfig
+    from self_healthy_kafka.rag.qdrant_store import QdrantRunbookStore
 
     config = replace(RagConfig(), collection=args.collection)
     config.validate()
