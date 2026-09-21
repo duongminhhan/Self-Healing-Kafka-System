@@ -1,0 +1,28 @@
+{
+  "format_version": "2026-09-16.1",
+  "purpose": "Redacted immutable execution reference for SHK-AnalyticsBench baseline scoring.",
+  "required_fields": [
+    "snapshot_id",
+    "captured_at",
+    "timezone",
+    "source",
+    "benchmark_version",
+    "status",
+    "review",
+    "cases",
+    "integrity"
+  ],
+  "source_classifications": ["mssql_historical_incident_snapshot"],
+  "source_identity_rule": "identity_sha256 is a SHA-256 digest of a non-sensitive logical source alias; the alias itself is never stored.",
+  "redaction": "canonical_identifier_hash_v1",
+  "approval_rule": "Only status=approved with reviewer and reviewed_at may contribute execution or outcome accuracy.",
+  "integrity_rule": "content_sha256 hashes every manifest field except integrity itself.",
+  "prohibited_content": [
+    "SQL statement",
+    "bound parameter values",
+    "raw source row",
+    "raw log",
+    "credential",
+    "personal data"
+  ]
+}

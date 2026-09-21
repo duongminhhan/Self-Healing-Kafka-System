@@ -56,7 +56,14 @@ const outcomeSchema = z.enum([
 ]);
 const timeRangeAppliedSchema = z.object({
   from_at: z.string().max(80).nullish(), to_at: z.string().max(80).nullish(),
-  timezone: label, timestamp: label,
+  timezone: label, timestamp: label.optional(), kind: label.optional(), timestamp_field: label.optional(),
+});
+const presentationSchema = z.object({
+  summary_item_limit:z.number().int().positive(), summary_detail_limit:z.number().int().positive(),
+  result_total_count:z.number().int().nonnegative(), displayed_count:z.number().int().nonnegative(),
+  remaining_count:z.number().int().nonnegative(), ranking:label.nullish(),
+  tie_policy:z.enum(["exact_limit","include_ties"]).nullish(), boundary_tie_count:z.number().int().positive().nullish(),
+  boundary_tie_truncated:z.boolean(), has_more_verified_results:z.boolean(), detail_accessible:z.boolean(),
 });
 const presentationSchema = z.object({
   summary_item_limit:z.number().int().positive(), summary_detail_limit:z.number().int().positive(),
@@ -83,6 +90,7 @@ export const backendSchema = z.object({
   verified_result: z.object({rows, columns:z.array(label).optional()}).nullish(),
   diagnostics: z.record(z.string(), z.unknown()).nullish(),
   query_plan: z.record(z.string(), z.unknown()).nullish(),
+  semantic_plan: z.record(z.string(), z.unknown()).nullish(),
   executed_query: executedQuerySchema.nullish(),
   sql_evidence: z.unknown().optional(), evidence_ids: z.array(label).max(500).nullish(),
   conversation: z.object({

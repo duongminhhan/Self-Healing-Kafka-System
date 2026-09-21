@@ -13,6 +13,13 @@ fi
 
 cd "${PROJECT_ROOT}"
 
+# An identity-only check does not load configuration.  In clean worktrees the
+# real env file is deliberately absent, so let this mode validate imports with
+# the tracked template without relaxing the requirement for an actual run.
+if [[ "${RUN_MODE}" == "--check-only" && ! -f "${ENV_FILE}" && -f "${ENV_FILE}.example" ]]; then
+  ENV_FILE="${ENV_FILE}.example"
+fi
+
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Missing environment file: ${ENV_FILE}" >&2
   exit 1

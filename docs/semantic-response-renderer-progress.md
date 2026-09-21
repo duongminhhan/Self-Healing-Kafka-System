@@ -41,3 +41,10 @@ Format cho mỗi goal: bối cảnh → rủi ro → hướng triển khai/kỹ 
 - Rủi ro: người dùng khó thấy kết luận chính; model có thể lặp thông tin đã có ở bảng chi tiết.
 - Hướng triển khai: policy tổng quát tách preview giới hạn, evidence đầy đủ và CTA mở bảng; top-N mặc định là đúng N dòng ổn định.
 - Kỹ thuật: planner quyết định tie policy từ ý nghĩa rõ ràng; renderer/model chỉ nhận summary rows đã xác minh và thêm notice deterministic khi còn kết quả.
+
+## 2026-09-15 — Chuẩn hóa phạm vi thời gian semantic
+
+- Bối cảnh: model đôi khi tạo `time_range` có timestamp hoặc kind không thuộc DSL, làm câu hỏi “hôm nay” dừng ở `cannot_verify` dù nghiệp vụ đã rõ.
+- Rủi ro: bỏ filter để query chạy sẽ thay đổi nghĩa; để model tự tính timestamp gây lệch múi giờ và làm contract khó kiểm soát.
+- Hướng triển khai: planner chỉ giữ semantic scope; backend resolve một canonical range theo timezone và timestamp business đã catalog.
+- Kỹ thuật: shared `TimeRange` parser, resolver có `kind/from_at/to_at/timezone/timestamp_field`, canonicalization cho time scope rõ ràng và feedback correction có schema mẫu.

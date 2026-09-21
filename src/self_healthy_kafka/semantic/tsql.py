@@ -14,10 +14,10 @@ from datetime import datetime
 import re
 from typing import Any
 
+from self_healthy_kafka.semantic.fact_source import IncidentFactSource, incident_fact_source
 from self_healthy_kafka.webhook.analytics import QueryPlan
 
 
-_SOURCE = "[dbo].[vConnectorIncidentFacts]"
 _MAX_ROWS = 500
 _DIMENSION_COLUMNS = {
     "job_name": ("[JobName]", "root_connector_name"),
@@ -55,6 +55,7 @@ class ExecutedTsql:
     statement: str
     parameters: tuple[QueryParameter, ...]
     result_shape: tuple[str, ...]
+    fact_source: IncidentFactSource
 
     @property
     def parameter_values(self) -> tuple[str | int | None, ...]:
@@ -78,6 +79,7 @@ class ExecutedTsql:
             "executed": executed,
             "read_only": True,
             "result_shape": list(self.result_shape),
+            "fact_source": self.fact_source.key,
         }
 
 
@@ -87,6 +89,7 @@ def compile_incident_query(
     from_at: datetime | None,
     to_at: datetime | None,
     row_limit: int = _MAX_ROWS,
+    fact_source: IncidentFactSource | None = None,
 ) -> ExecutedTsql:
     """Compile a validated analytics plan into one parameterized CTE SELECT.
 
@@ -97,6 +100,7 @@ def compile_incident_query(
 
     if not 1 <= row_limit <= _MAX_ROWS + 1:
         raise ValueError("row_limit is outside the approved analytics bound")
+    source = fact_source or incident_fact_source(mode="legacy", dbt_schema="analytics")
     if plan.details:
         raise ValueError("details require an unsupported non-aggregated projection")
     if plan.comparison:
@@ -188,7 +192,7 @@ def compile_incident_query(
     statement = f"""WITH [filtered] AS (
     SELECT [IncidentId], [JobName], [ConnectorName], [FailureAt], [RecoveredAt],
            [FinalOutcome], [EventType], [QueueStatus], [ErrorCode]
-    FROM {_SOURCE}
+    FROM {source.qualified_name}
     WHERE {where}
 ), [grouped] AS (
     SELECT
@@ -202,12 +206,19 @@ SELECT TOP ({transport_limit}) {projection}
 FROM [ranked]
 {rank_filter}
 ORDER BY [{public_order}] {direction}, {tie_order};"""
-    if not is_read_only_incident_query(statement):
+    if not is_read_only_incident_query(statement, fact_source=source):
         raise ValueError("compiled SQL did not pass the read-only guard")
-    return ExecutedTsql(statement=statement, parameters=tuple(parameters), result_shape=tuple(result_shape))
+    return ExecutedTsql(
+        statement=statement,
+        parameters=tuple(parameters),
+        result_shape=tuple(result_shape),
+        fact_source=source,
+    )
 
 
-def is_read_only_incident_query(statement: str) -> bool:
+def is_read_only_incident_query(
+    statement: str, *, fact_source: IncidentFactSource | None = None
+) -> bool:
     """Defence in depth for the repository boundary.
 
     This intentionally recognizes the single compiler-generated CTE shape;
@@ -215,6 +226,11 @@ def is_read_only_incident_query(statement: str) -> bool:
     """
 
     normalized = " ".join(statement.upper().split())
+    approved_source = (
+        fact_source.qualified_name.upper()
+        if fact_source is not None
+        else "[DBO].[VCONNECTORINCIDENTFACTS]"
+    )
     # Do not mistake the semicolon used as the bounded evidence-id delimiter
     # for a second SQL statement.  The compiler always escapes string values,
     # and this guard only accepts its fixed CTE source shape.
@@ -222,7 +238,7 @@ def is_read_only_incident_query(statement: str) -> bool:
     banned = (" INSERT ", " UPDATE ", " DELETE ", " MERGE ", " DROP ", " ALTER ", " CREATE ", " EXEC ", " TRUNCATE ")
     return (
         normalized.startswith("WITH [FILTERED] AS")
-        and "FROM [DBO].[VCONNECTORINCIDENTFACTS]" in normalized
+        and f"FROM {approved_source}" in normalized
         and all(word not in normalized for word in banned)
         and without_literals.count(";") == 1
     )

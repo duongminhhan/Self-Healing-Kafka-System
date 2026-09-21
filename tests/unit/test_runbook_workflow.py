@@ -171,3 +171,14 @@ def test_only_verified_incident_sources_become_combined_facts():
     })
 
     assert facts == [{"incident_id": "one", "connector_name": "orders"}]
+
+
+def test_dbt_compatibility_view_is_an_allowlisted_verified_incident_source():
+    facts = extract_verified_facts({
+        "sources": [{
+            "source": "vSemanticConnectorIncidentFacts",
+            "items": [{"incident_id": "one", "connector_name": "orders"}],
+        }],
+    })
+
+    assert facts == [{"incident_id": "one", "connector_name": "orders"}]

@@ -1,0 +1,130 @@
+name: dbt analytics
+
+on:
+  pull_request:
+    paths:
+      - "dbt/**"
+      - "dbt_project.yml"
+      - ".github/workflows/dbt-analytics.yml"
+  push:
+    branches: [main]
+    paths:
+      - "dbt/**"
+      - "dbt_project.yml"
+      - ".github/workflows/dbt-analytics.yml"
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
+
+jobs:
+  parse:
+    name: Parse dbt project without a database
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the pinned SQL Server adapter
+        run: python -m pip install "dbt-core==1.12.5" "dbt-sqlserver==1.11.1"
+      - name: Create an ephemeral parse-only profile
+        shell: pwsh
+        run: |
+          $profileDir = Join-Path $env:RUNNER_TEMP "dbt-profile"
+          New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+          @'
+          self_healthy_kafka:
+            target: ci
+            outputs:
+              ci:
+                type: sqlserver
+                driver: "ODBC Driver 18 for SQL Server"
+                server: "127.0.0.1"
+                port: 1433
+                database: "dbt_parse_placeholder"
+                schema: "dbt_ci"
+                user: "dbt_ci"
+                password: "{{ env_var('DBT_CI_PARSE_PASSWORD', '') }}"
+                authentication: sql
+                encrypt: false
+                trust_cert: true
+          '@ | Set-Content -Encoding utf8 (Join-Path $profileDir "profiles.yml")
+          "DBT_PROFILES_DIR=$profileDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Parse dbt project
+        run: dbt parse --project-dir . --target ci
+
+  integration:
+    name: Build dbt against isolated SQL Server
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the SQL Server ODBC driver and dbt adapter
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/microsoft-prod.list > /dev/null
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 unixodbc-dev
+          python -m pip install "dbt-core==1.12.5" "dbt-sqlserver==1.11.1"
+      - name: Start an isolated SQL Server
+        shell: bash
+        run: |
+          sql_password="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 28)Aa1!"
+          echo "::add-mask::$sql_password"
+          echo "DBT_CI_SQL_PASSWORD=$sql_password" >> "$GITHUB_ENV"
+          docker run --detach --name shk-dbt-sqlserver \
+            --env ACCEPT_EULA=Y \
+            --env MSSQL_SA_PASSWORD="$sql_password" \
+            --publish 1433:1433 \
+            mcr.microsoft.com/mssql/server:2022-latest
+
+          for attempt in {1..30}; do
+            if /opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P "$sql_password" -Q "SELECT 1" > /dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Initialize the isolated source contract
+        shell: bash
+        run: |
+          sqlcmd=(/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P "$DBT_CI_SQL_PASSWORD")
+          "${sqlcmd[@]}" -Q "CREATE DATABASE [ingest_reference]"
+          "${sqlcmd[@]}" -d ingest_reference -i sql/init-table/ConnectorHealingQueue.sql
+          "${sqlcmd[@]}" -d ingest_reference -i sql/init-table/ConnectorHealingLogs.sql
+          "${sqlcmd[@]}" -d ingest_reference -i sql/ingest_reference/views/vConnectorIncidentFacts.sql
+          "${sqlcmd[@]}" -d ingest_reference -i dbt/fixtures/ci_source_contract.sql
+      - name: Create an ephemeral integration profile
+        shell: bash
+        run: |
+          profile_dir="$RUNNER_TEMP/dbt-profile"
+          mkdir -p "$profile_dir"
+          cat > "$profile_dir/profiles.yml" <<'EOF'
+          self_healthy_kafka:
+            target: ci
+            outputs:
+              ci:
+                type: sqlserver
+                driver: "ODBC Driver 18 for SQL Server"
+                server: "127.0.0.1"
+                port: 1433
+                database: "ingest_reference"
+                schema: "dbt_ci"
+                user: "sa"
+                password: "{{ env_var('DBT_CI_SQL_PASSWORD') }}"
+                authentication: sql
+                encrypt: false
+                trust_cert: true
+          EOF
+          echo "DBT_PROFILES_DIR=$profile_dir" >> "$GITHUB_ENV"
+      - name: Build and test the isolated analytics layer
+        run: |
+          dbt debug --project-dir . --target ci
+          dbt build --project-dir . --target ci
+          dbt test --project-dir . --target ci
+      - name: Stop the isolated SQL Server
+        if: always()
+        run: docker rm --force shk-dbt-sqlserver

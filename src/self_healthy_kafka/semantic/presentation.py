@@ -340,7 +340,10 @@ def _time_scope(
     value = time_range.get("value") if isinstance(time_range, dict) else None
     template = _PRESENTATION["time_ranges"].get(value)
     if isinstance(template, str):
-        return template.format(timezone=timezone_name)
+        return template.format(
+            timezone=timezone_name,
+            days=time_range.get("days") if isinstance(time_range, dict) else None,
+        )
     if from_at and to_at:
         return f"từ {from_at.isoformat()} đến {to_at.isoformat()}"
     return "trên toàn bộ snapshot hiện có"

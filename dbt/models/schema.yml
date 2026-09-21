@@ -1,0 +1,171 @@
+version: 2
+
+sources:
+  - name: ingest_reference
+    description: >
+      Read-only SQL Server healing audit sources. Source freshness is not
+      configured because no reviewed SLA exists for these persisted records.
+    database: "{{ env_var('DBT_ANALYTICS_SOURCE_DATABASE', target.database) }}"
+    schema: dbo
+    tables:
+      - name: connector_healing_queue
+        identifier: ConnectorHealingQueue
+        description: One queue record per healing incident.
+        columns:
+          - name: QueueId
+            data_tests:
+              - not_null
+              - unique
+          - name: RootConnectorName
+            data_tests:
+              - not_null
+          - name: CurrentConnectorName
+            data_tests:
+              - not_null
+          - name: QueueStatus
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["PENDING", "PROCESSING", "WAITING", "COMPLETED", "ESCALATED"]
+          - name: FinalOutcome
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ["RECOVERED", "FAILED", "ESCALATED"]
+      - name: connector_healing_logs
+        identifier: ConnectorHealingLogs
+        description: Append-only healing-log events belonging to a queue incident.
+        columns:
+          - name: Id
+            data_tests:
+              - not_null
+              - unique
+          - name: QueueId
+            data_tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source("ingest_reference", "connector_healing_queue")
+                    field: QueueId
+          - name: EventType
+            data_tests:
+              - not_null
+          - name: CreatedAt
+            data_tests:
+              - not_null
+      - name: connector_incident_facts
+        identifier: vConnectorIncidentFacts
+        description: Legacy incident view retained solely as the read-only parity reference.
+
+models:
+  - name: stg_connector_healing_queue
+    description: Source-aligned queue records with stable analytics column names.
+    columns:
+      - name: incident_id
+        data_tests:
+          - not_null
+          - unique
+      - name: root_connector_name
+        data_tests:
+          - not_null
+      - name: current_connector_name
+        data_tests:
+          - not_null
+      - name: healing_mode
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["RESTART_ONLY", "RECOVERY"]
+      - name: queue_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["PENDING", "PROCESSING", "WAITING", "COMPLETED", "ESCALATED"]
+      - name: final_outcome
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["RECOVERED", "FAILED", "ESCALATED"]
+  - name: stg_connector_healing_logs
+    description: Source-aligned healing-log events with stable analytics column names.
+    columns:
+      - name: log_id
+        data_tests:
+          - not_null
+          - unique
+      - name: incident_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref("stg_connector_healing_queue")
+                field: incident_id
+      - name: event_type
+        data_tests:
+          - not_null
+      - name: created_at
+        data_tests:
+          - not_null
+  - name: fct_connector_incidents
+    description: >
+      Canonical, confirmed-incident mart. It selects the earliest confirmed
+      failure event per queue to match dbo.vConnectorIncidentFacts exactly.
+    columns:
+      - name: incident_id
+        data_tests:
+          - not_null
+          - unique
+      - name: root_connector_name
+        data_tests:
+          - not_null
+      - name: current_connector_name
+        data_tests:
+          - not_null
+      - name: failure_at
+        data_tests:
+          - not_null
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["HEALTH_FAILED_CONFIRMED"]
+      - name: queue_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["PENDING", "PROCESSING", "WAITING", "COMPLETED", "ESCALATED"]
+      - name: final_outcome
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["RECOVERED", "FAILED", "ESCALATED", "OPEN"]
+  - name: v_semantic_connector_incident_facts
+    description: >
+      Stable compatibility view for the semantic runtime. It preserves the
+      PascalCase legacy-view contract while reading the dbt canonical mart.
+      Error messages are bounded and redacted here and then redacted again at
+      the Python presentation boundary before response construction.
+    columns:
+      - name: IncidentId
+        data_tests:
+          - not_null
+          - unique
+      - name: JobName
+        data_tests:
+          - not_null
+      - name: ConnectorName
+        data_tests:
+          - not_null
+      - name: FailureAt
+        data_tests:
+          - not_null
+      - name: EventType
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["HEALTH_FAILED_CONFIRMED"]

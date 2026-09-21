@@ -1,0 +1,35 @@
+{
+  "benchmark_name": "SHK-AnalyticsBench",
+  "benchmark_version": "2026-09-16.1",
+  "purpose": "Evaluate semantic planning and grounded analytics safety without training on runtime answers or SQL.",
+  "splits": ["train", "validation", "hidden_test"],
+  "required_case_fields": [
+    "id",
+    "split",
+    "family_id",
+    "question",
+    "conversation",
+    "tags",
+    "expected_plan",
+    "expected_route",
+    "expected_outcome",
+    "reference_execution",
+    "safety_assertions",
+    "review"
+  ],
+  "optional_case_fields": {
+    "evaluation_scope": ["adapter", "offline_contract"]
+  },
+  "reference_execution_kinds": [
+    "executed",
+    "evidence_incomplete",
+    "planner_invalid",
+    "source_unavailable",
+    "needs_clarification"
+  ],
+  "reference_classifications": ["synthetic_fixture", "immutable_snapshot"],
+  "snapshot_rule": "Only a separately approved immutable snapshot with matching snapshot ID, integrity hash, timezone, and canonical time boundary may score outcome or execution accuracy.",
+  "review_statuses": ["seed", "approved", "rejected"],
+  "training_rule": "Only approved train cases with a semantic plan may be exported by default. Outputs contain question/context and semantic plan only.",
+  "security_rule": "Do not store raw SQL, answers, production logs, credentials, personal data, or unredacted production snapshot rows."
+}

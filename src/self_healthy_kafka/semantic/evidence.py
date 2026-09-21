@@ -60,6 +60,7 @@ def build_evidence(
     from_at: datetime | None,
     to_at: datetime | None,
     truncated: bool,
+    source: str = "vConnectorIncidentFacts",
 ) -> list[dict[str, Any]]:
     """Attach stable fact identifiers and their exact semantic scope."""
 
@@ -126,7 +127,7 @@ def build_evidence(
                 },
                 "status": _status(fact),
                 "grain": "aggregated connector incident facts" if query_plan.group_by else "aggregated connector incidents",
-                "source": "vConnectorIncidentFacts",
+                "source": source,
                 "evidence_ids": list(fact.get("evidence_ids") or []),
                 "complete": not truncated,
                 "semantic_catalog_version": semantic_plan.version,

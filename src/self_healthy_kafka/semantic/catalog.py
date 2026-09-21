@@ -134,9 +134,19 @@ SEMANTIC_CATALOG: dict[str, Any] = {
             "today": "trong ngày hôm nay theo múi giờ {timezone}",
             "yesterday": "trong ngày hôm qua theo múi giờ {timezone}",
             "last_7_days": "trong 7 ngày gần đây theo múi giờ {timezone}",
+            "last_n_days": "trong {days} ngày gần đây theo múi giờ {timezone}",
             "this_week": "trong tuần này theo múi giờ {timezone}",
             "last_week": "trong tuần trước theo múi giờ {timezone}",
             "this_month": "trong tháng này theo múi giờ {timezone}",
+            "absolute_date": "trong ngày đã chỉ định theo múi giờ {timezone}",
+        },
+        # Presentation limits bound prose only.  They never remove evidence
+        # from the verified-result table.
+        "summary_policy": {
+            "summary_item_limit": 3,
+            "summary_detail_limit": 1,
+            "more_results_vi": "Còn {count} kết quả đã xác minh khác trong bảng chi tiết.",
+            "boundary_tie_vi": "Có thêm {count} kết quả đồng hạng với vị trí thứ {rank}; bảng chi tiết chứa đầy đủ danh sách.",
         },
         # Presentation limits bound prose only.  They never remove evidence
         # from the verified-result table.
@@ -148,7 +158,12 @@ SEMANTIC_CATALOG: dict[str, Any] = {
         },
     },
     "filters": {
-        "time_range": {"type": "relative", "values": ["today", "yesterday", "last_7_days", "this_week", "last_week", "this_month"], "timestamp": "failure_at"},
+        "time_range": {
+            "model_contract": "The model selects only kind/value (and days for last_n_days). It must never emit timestamps, timezone, or timestamp_field.",
+            "relative_values": ["today", "yesterday", "last_7_days", "last_n_days", "this_week", "last_week", "this_month"],
+            "absolute_values": ["absolute_date"],
+            "timestamp_field": "failure_at",
+        },
         "connector": {"operator": "exact"},
         "error_code": {"operator": "exact"},
         "outcome": {"operator": "in", "values": ["RECOVERED", "FAILED", "ESCALATED", "OPEN"]},

@@ -172,7 +172,7 @@ test("live backend never turns an unverified result into a no-failed conclusion"
       expect(payload.query_executed).toBe(true);
       expect(payload.evidence_complete).toBe(true);
       expect(payload.row_count).toBe(0);
-      await expect(latest).toContainText(/chưa ghi nhận connector nào có trạng thái FAILED/i);
+      await expect(latest).toContainText(/chưa ghi nhận (?:root )?connector nào có trạng thái FAILED/i);
     }else{
       expect(["verified_results","cannot_verify","degraded","needs_clarification"]).toContain(payload.outcome);
       await expect(latest).not.toContainText(/chưa ghi nhận connector nào có trạng thái FAILED/i);

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from self_healthy_kafka.domain.healing import ConnectorJob
+from self_healthy_kafka.semantic.fact_source import IncidentFactSource
 from self_healthy_kafka.storage.common import MssqlConnection
 from self_healthy_kafka.storage.connector_repository import MssqlConnectorRepository
 from self_healthy_kafka.storage.log_repository import MssqlConnectorLogRepository
@@ -113,10 +114,14 @@ class HealingRepository:
         *,
         statement: str,
         parameters: tuple[str | int | None, ...],
+        timeout_seconds: int | None = None,
+        fact_source: IncidentFactSource | None = None,
     ) -> list[dict[str, Any]]:
         return self._logs.execute_compiled_incident_query(
             statement=statement,
             parameters=parameters,
+            timeout_seconds=timeout_seconds,
+            fact_source=fact_source,
         )
 
     def update_queue_fields(self, queue_id: Any, **fields: Any) -> None:

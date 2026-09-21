@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from self_healthy_kafka.redaction import redact, redact_text
+from self_healthy_kafka.semantic.fact_source import IncidentFactSource, is_valid_incident_fact_source
 from self_healthy_kafka.semantic.tsql import is_read_only_incident_query
 from self_healthy_kafka.storage.common import json_value, rows_to_dicts
 
@@ -147,6 +148,8 @@ class MssqlConnectorLogRepository:
         *,
         statement: str,
         parameters: tuple[str | int | None, ...],
+        timeout_seconds: int | None = None,
+        fact_source: IncidentFactSource | None = None,
     ) -> list[dict[str, Any]]:
         """Execute only the compiler's bounded analytics SELECT shape.
 
@@ -155,15 +158,21 @@ class MssqlConnectorLogRepository:
         different database object at the last boundary before SQL Server.
         """
 
-        if not isinstance(statement, str) or not is_read_only_incident_query(statement):
+        if fact_source is not None and not is_valid_incident_fact_source(fact_source):
+            raise ValueError("compiled incident SQL source is not approved")
+        if not isinstance(statement, str) or not is_read_only_incident_query(
+            statement, fact_source=fact_source
+        ):
             raise ValueError("compiled incident SQL is not an approved read-only query")
         if not isinstance(parameters, tuple) or len(parameters) > 12:
             raise ValueError("compiled incident SQL parameters are invalid")
+        if timeout_seconds is not None and not 1 <= timeout_seconds <= _COMPILED_ANALYTICS_QUERY_TIMEOUT_SECONDS:
+            raise ValueError("compiled incident SQL timeout is invalid")
         with self._get_conn() as conn:
             # pyodbc exposes the statement timeout on Connection, not Cursor.
             # Assigning it here makes the bound apply to the following cursor
             # execution without relying on a driver-specific cursor attribute.
-            conn.timeout = _COMPILED_ANALYTICS_QUERY_TIMEOUT_SECONDS
+            conn.timeout = timeout_seconds or _COMPILED_ANALYTICS_QUERY_TIMEOUT_SECONDS
             with conn.cursor() as cur:
                 cur.execute(statement, parameters)
                 return rows_to_dicts(cur)
