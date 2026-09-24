@@ -147,6 +147,57 @@ def test_planner_retries_once_with_local_validation_feedback():
     assert "validation_feedback" in calls[1][1]["content"]
 
 
+def test_planner_correction_keeps_error_codes_in_their_bounded_request_fields():
+    calls = []
+    invalid = _value()
+    invalid["data_request"]["error_code"] = "ORA-01013"
+    corrected = _value(
+        data_request=None,
+        guidance_request={
+            "needed": True,
+            "purpose": "remediation",
+            "error_codes": ["ORA-01013"],
+            "connector_class": "oracle",
+        },
+    )
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return invalid if len(calls) == 1 else corrected
+
+    plan, attempts = SemanticPlanner(generate).plan("Cách xử lý lỗi đã nêu?")
+
+    assert plan.route is Route.RUNBOOK
+    assert attempts == 2
+    correction = calls[1][1]["content"]
+    assert "data_request.filters.error_code" in correction
+    assert "guidance_request.error_codes" in correction
+
+
+def test_planner_prompt_distinguishes_analytics_and_runbook_error_code_fields():
+    calls = []
+    planned = _value(
+        data_request=None,
+        guidance_request={
+            "needed": True,
+            "purpose": "meaning",
+            "error_codes": ["ORA-01013"],
+            "connector_class": "oracle",
+        },
+    )
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return planned
+
+    SemanticPlanner(generate).plan("ORA-01013 nghĩa là gì?")
+
+    prompt = calls[0][0]["content"]
+    assert "data_request.filters.error_code" in prompt
+    assert "guidance_request.error_codes" in prompt
+    assert "guidance_request.purpose must be exactly remediation, diagnosis, or meaning" in prompt
+
+
 def test_planner_does_not_retry_service_failure_indefinitely():
     calls = 0
 
@@ -246,6 +297,76 @@ def test_cue_contract_preserves_an_explicit_top_n_limit():
     assert cues.limit == 3
 
 
+def test_cue_contract_treats_error_for_a_named_connector_as_incident_scope():
+    cues = semantic_cue_contract(
+        "Lỗi của connector root connector test-connector-ora-01013-20260921 ngày hôm nay là gì?"
+    )
+
+    assert cues.subject == "incident"
+    assert cues.metric == "incident_count"
+    assert cues.time_scope == {"kind": "relative", "value": "today"}
+
+
+def test_cue_contract_treats_recorded_error_content_as_analytics_detail():
+    cues = semantic_cue_contract(
+        "nội dung lỗi connector test-connector-ora-01013-20260921 gặp phải gì?"
+    )
+
+    assert cues.subject == "incident"
+    assert cues.detail_fields == ("error_message",)
+
+
+def test_cue_contract_treats_vague_severity_follow_up_as_a_detail_request():
+    cues = semantic_cue_contract("Lỗi này có nghiêm trọng không?")
+
+    assert cues.subject is None
+    assert cues.detail_fields == ("severity",)
+
+
+def test_planner_corrects_runbook_only_plan_for_recorded_error_content():
+    calls = []
+    runbook_only = _value(
+        data_request=None,
+        guidance_request={
+            "needed": True,
+            "purpose": "meaning",
+            "error_codes": ["ORA-01013"],
+            "connector_class": "test-connector-ora-01013-20260921",
+        },
+    )
+    analytics_detail = _value(data_request={
+        **_value()["data_request"],
+        "intent": "incidents",
+        "subject": "incident",
+        "metric": "incident_count",
+        "ranking": None,
+        "time_scope": None,
+        "time_scope_origin": "unspecified",
+        "dimensions": ["error"],
+        "filters": {"connector": "test-connector-ora-01013-20260921"},
+        "detail_fields": ["error_message"],
+    })
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return runbook_only if len(calls) == 1 else analytics_detail
+
+    plan, attempts = SemanticPlanner(generate).plan(
+        "nội dung lỗi connector test-connector-ora-01013-20260921 gặp phải gì?"
+    )
+
+    assert attempts == 2
+    assert plan.data_request["detail_fields"] == ["error_message"]
+    assert "semantic detail request requires" in calls[1][1]["content"]
+
+
+def test_cue_contract_keeps_connector_error_ranking_as_connector_scope():
+    cues = semantic_cue_contract("Liệt kê connector gặp nhiều lỗi nhất")
+
+    assert cues.subject == "root_connector"
+    assert cues.ranking == "descending"
+
+
 def test_top_n_defaults_to_exact_limit_but_explicit_ties_are_preserved():
     exact = _connector_ranking_plan()
     exact["data_request"]["limit"] = 3
@@ -283,6 +404,33 @@ def test_plan_normalizes_dimension_level_subject_aliases_to_the_neutral_contract
     plan = parse_semantic_plan(value)
 
     assert plan.data_request["subject"] == "error_signature"
+
+
+def test_plan_normalizes_connector_filter_alias_and_combined_error_subject():
+    value = _value(data_request={
+        "intent": "incidents",
+        "subject": "root_connector",
+        "metric": "incident_count",
+        "ranking": None,
+        "time_scope": {"kind": "relative", "value": "today"},
+        "time_scope_origin": "explicit",
+        "metrics": ["incident_count"],
+        "dimensions": ["error"],
+        "filters": {
+            "root_connector": ["test-connector-ora-01013-20260921"],
+            "time_range": {"kind": "relative", "value": "today"},
+        },
+        "sort": {"metric": "incident_count", "direction": "desc"},
+        "limit": 20,
+        "comparison": None,
+        "detail_fields": [],
+    })
+
+    plan = parse_semantic_plan(value)
+
+    assert plan.data_request["subject"] == "incident"
+    assert plan.data_request["filters"]["connector"] == "test-connector-ora-01013-20260921"
+    assert "root_connector" not in plan.data_request["filters"]
 
 
 def test_planner_corrects_error_ranking_and_invented_today_for_connector_ranking():

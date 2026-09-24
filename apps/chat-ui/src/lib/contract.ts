@@ -10,6 +10,10 @@ export const citationSchema = z.object({
   runbook_id: label.optional(), version: z.number().optional(), section: label.optional(),
   source: z.string().max(2000).optional(), url: z.string().max(2000).optional(), title: label.optional(),
 });
+const publicCitationSchema = z.object({
+  runbook_id: label.optional(), version: z.number().optional(), section: label.optional(),
+  url: z.string().max(2000).optional(), title: label.optional(),
+}).strict();
 const cell = z.union([z.string().max(8000), z.number().finite(), z.boolean(), z.null()]);
 const rows = z.array(z.record(z.string().max(160), cell)).max(500);
 const evidenceValue = z.union([cell, z.array(cell).max(10)]);
@@ -52,7 +56,7 @@ const modelCallSchema = z.object({
   transport_attempts: z.number().int().positive(),
 });
 const outcomeSchema = z.enum([
-  "verified_results", "verified_empty", "cannot_verify", "needs_clarification", "degraded",
+  "verified_results", "verified_empty", "cannot_verify", "needs_clarification", "out_of_scope", "degraded",
 ]);
 const timeRangeAppliedSchema = z.object({
   from_at: z.string().max(80).nullish(), to_at: z.string().max(80).nullish(),
@@ -65,14 +69,10 @@ const presentationSchema = z.object({
   tie_policy:z.enum(["exact_limit","include_ties"]).nullish(), boundary_tie_count:z.number().int().positive().nullish(),
   boundary_tie_truncated:z.boolean(), has_more_verified_results:z.boolean(), detail_accessible:z.boolean(),
 });
-const presentationSchema = z.object({
-  summary_item_limit:z.number().int().positive(), summary_detail_limit:z.number().int().positive(),
-  result_total_count:z.number().int().nonnegative(), displayed_count:z.number().int().nonnegative(),
-  remaining_count:z.number().int().nonnegative(), ranking:label.nullish(),
-  tie_policy:z.enum(["exact_limit","include_ties"]).nullish(), boundary_tie_count:z.number().int().positive().nullish(),
-  boundary_tie_truncated:z.boolean(), has_more_verified_results:z.boolean(), detail_accessible:z.boolean(),
-});
-export const backendSchema = z.object({
+// The backend may carry richer internal fields, but they must never become a
+// browser contract. The BFF parses this schema and projects an allowlisted
+// public response below.
+export const upstreamBackendSchema = z.object({
   answer: z.string().max(150000).nullish(), route: label.nullish(), source: label.nullish(),
   citations: z.array(citationSchema).max(100).nullish(), fallback_reason: label.nullish(),
   status: label.nullish(), reason: label.nullish(), row_count: z.number().int().nonnegative().nullish(),
@@ -111,8 +111,51 @@ export const backendSchema = z.object({
   if (value.outcome === "needs_clarification" && (
     value.query_executed === true || value.evidence_complete === true
   )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"clarification cannot claim executed evidence"});
+  if (value.outcome === "out_of_scope" && (
+    value.query_executed === true || value.evidence_complete === true || value.executed_query
+  )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"out_of_scope cannot claim executed evidence"});
 });
-export type ChatResponse = z.infer<typeof backendSchema> & {request_id?: string};
+
+const publicStatusSchema = z.enum(["ok", "verified_results", "verified_empty", "cannot_verify", "needs_clarification", "out_of_scope", "degraded", "no_answer"]);
+const publicRouteSchema = z.enum(["analytics", "runbook", "combined", "clarification", "out_of_scope", "fallback", "no_answer", "conversation", "unsupported"]);
+
+export const backendSchema = z.object({
+  request_id: label.nullish(),
+  answer: z.string().max(150000).nullish(),
+  route: publicRouteSchema.nullish(),
+  citations: z.array(publicCitationSchema).max(100).nullish(),
+  notice: z.string().max(500).nullish(),
+  status: publicStatusSchema.nullish(),
+  row_count: z.number().int().nonnegative().nullish(),
+  outcome: outcomeSchema.nullish(),
+  query_executed: z.boolean().nullish(),
+  evidence_complete: z.boolean().nullish(),
+  source_kind: z.literal("historical_incident_snapshot").nullish(),
+  snapshot_freshness: label.nullish(),
+  time_range_applied: timeRangeAppliedSchema.nullish(),
+  presentation: presentationSchema.nullish(),
+  recommended_runbooks: z.array(publicCitationSchema).max(100).nullish(),
+  verified_result: z.object({rows, columns:z.array(label).optional()}).nullish(),
+  conversation: z.object({
+    id: conversationIdSchema,
+    context_used: z.boolean(),
+    action: label,
+  }).strict().nullish(),
+}).strict().superRefine((value, context) => {
+  if (value.outcome === "verified_empty" && !(
+    value.query_executed === true && value.evidence_complete === true && value.row_count === 0
+  )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"verified_empty requires completed zero-row evidence"});
+  if (value.outcome === "verified_results" && !(
+    value.query_executed === true && value.evidence_complete === true && typeof value.row_count === "number" && value.row_count > 0
+  )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"verified_results requires complete evidence"});
+  if (value.outcome === "needs_clarification" && (
+    value.query_executed === true || value.evidence_complete === true
+  )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"clarification cannot claim executed evidence"});
+  if (value.outcome === "out_of_scope" && (
+    value.query_executed === true || value.evidence_complete === true
+  )) context.addIssue({code:z.ZodIssueCode.custom,path:["outcome"],message:"out_of_scope cannot claim executed evidence"});
+});
+export type ChatResponse = z.infer<typeof backendSchema>;
 export const errors: Record<string, string> = {
   invalid_input: "Vui lòng nhập câu hỏi từ 1 đến 4.000 ký tự.",
   unauthorized: "Phiên truy cập chưa được xác thực. Vui lòng liên hệ quản trị viên.",
@@ -135,6 +178,7 @@ export function statusMessage(status?: string | null) {
   if(status==="verified_empty") return null;
   if(status==="no_answer") return "Chưa có đủ thông tin phù hợp để đưa ra hướng xử lý.";
   if(status==="needs_clarification") return "Hãy bổ sung thông tin được hỏi; câu tiếp theo có thể kế thừa ngữ cảnh đã kiểm chứng trong cuộc trò chuyện này.";
+  if(status==="out_of_scope") return "Câu hỏi này nằm ngoài phạm vi hỗ trợ của chatbot Self Healthy Kafka.";
   if(status==="degraded") return "Một phần dịch vụ đang gián đoạn. Kết quả hiện tại có thể chưa đầy đủ.";
   return null;
 }
@@ -148,7 +192,7 @@ export function timeRangeLabel(value?: z.infer<typeof timeRangeAppliedSchema> | 
 }
 const routeLabels: Record<string,string> = {
   analytics: "Phân tích dữ liệu", runbook: "Hướng dẫn xử lý", combined: "Phân tích + hướng dẫn",
-  clarification: "Cần làm rõ", fallback: "Dữ liệu kiểm chứng", no_answer: "Không có kết quả",
+  clarification: "Cần làm rõ", out_of_scope: "Ngoài phạm vi", fallback: "Dữ liệu kiểm chứng", no_answer: "Không có kết quả",
 };
 export function routeLabel(value?: string | null) {
   if (!value) return undefined;

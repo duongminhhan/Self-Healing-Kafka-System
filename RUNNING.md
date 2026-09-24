@@ -118,10 +118,15 @@ bounded conversation ID, never raw chat history. Natural
 answers, citations, route/source badges and closed technical details are separate.
 The default UI binds to loopback; end-user authentication is required before
 shared deployment. The backend retains only structured, verified semantic state
-(resolved plan, filters, selected connector and bounded evidence references).
+(normalized plan/filter state plus bounded connector, error, time-scope and
+evidence-reference metadata). It never retains raw chat history, incident rows,
+logs, SQL, prompts or credentials for a follow-up.
 Set `CHAT_CONVERSATION_TTL_SECONDS` and `CHAT_CONVERSATION_MAX_ENTRIES` to bound
-the in-memory TTL/LRU store; restarting the backend clears it. Keep
-diagnostics disabled for ordinary users and never expose backend credentials.
+the in-memory TTL/LRU store; restarting the backend clears it. This is a
+single-process state store, not shared storage or HA: use one backend replica
+or add a reviewed shared store and session affinity before a multi-replica
+deployment. Keep diagnostics disabled for ordinary users and never expose
+backend credentials.
 
 ## Optional Hugging Face analytics planner
 
@@ -134,6 +139,29 @@ To use a Hugging Face Dedicated Endpoint, set `HF_CHAT_ENDPOINT_URL`,
 are never returned to the browser. The planner can return only a validated JSON
 query plan; the app calls the fixed read-only procedure with bound parameters.
 UAT/Prod DBAs must apply both SQL scripts manually before enabling the flag.
+
+## JEV relevance gate
+
+JEV runs before `SemanticPlanner` only as a scope classifier. It receives the
+current question plus bounded verified incident metadata for a follow-up, and
+can return only `in_scope`, `out_of_scope`, or `needs_clarification`. It never
+creates SQL, a semantic plan, an impact/severity conclusion, or a business
+answer. `CHAT_JEV_MODE` defaults to `enforce`; setting `off` is an explicit
+local/test bypass, not a fallback when configuration is missing.
+
+Set `JEV_ENDPOINT_URL`, `JEV_TOKEN`, and `JEV_MODEL_ID` together whenever
+analytics chat is enabled and the mode is `shadow` or `enforce`. Keep the token
+only in the private environment file or secret store. `enforce` blocks the
+planner, SQL compiler, and database for out-of-scope, clarification, timeout,
+transport, or malformed-provider results. `shadow` records only safe outcome
+metadata and preserves the existing planner/database path. `off` makes no JEV
+request. Provider prompts, responses, tokens, SQL, and raw logs are never
+returned to the UI or written to normal application logs.
+
+`GET /health` is process liveness only. It does not prove that SQL Server,
+Kafka Connect, JEV, Hugging Face, or Qdrant is reachable. Do not expose the UI
+or Chat API publicly until end-user authentication, authorization, HTTPS, rate
+limits, network restriction, and tenant/environment isolation are in place.
 
 ## Optional approved-runbook RAG with Qdrant Cloud
 

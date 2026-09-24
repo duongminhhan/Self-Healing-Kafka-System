@@ -6,7 +6,10 @@ from datetime import datetime
 from typing import Any
 
 from self_healthy_kafka.redaction import redact, redact_text
-from self_healthy_kafka.semantic.fact_source import IncidentFactSource, is_valid_incident_fact_source
+from self_healthy_kafka.semantic.fact_source import (
+    IncidentFactSource,
+    is_valid_incident_fact_source,
+)
 from self_healthy_kafka.semantic.tsql import is_read_only_incident_query
 from self_healthy_kafka.storage.common import json_value, rows_to_dicts
 

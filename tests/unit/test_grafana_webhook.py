@@ -342,6 +342,7 @@ def test_existing_chat_endpoint_returns_rag_metadata_without_exposing_credential
         chat_api_config=_chat_config(),
         analytics_chat_config=AnalyticsChatConfig(
             enabled=False,
+            jev_mode="off",
             timezone="UTC",
             hf_endpoint_url="https://hf.example",
             hf_token="hf-private",
@@ -422,6 +423,7 @@ def test_chat_endpoint_distinguishes_input_errors_from_planner_failures(
         chat_api_config=_chat_config(),
         analytics_chat_config=AnalyticsChatConfig(
             enabled=True,
+            jev_mode="off",
             timezone="UTC",
             hf_endpoint_url="https://hf.example",
             hf_token="hf-private",

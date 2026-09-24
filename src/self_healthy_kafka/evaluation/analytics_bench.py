@@ -268,9 +268,8 @@ def evaluate_adapter(
             else result.semantic_plan is None
         )
         route_match = result.route == case.raw["expected_route"]
-        expected_plan_hash = (
-            plan_hash(_canonical_plan(expected_plan.to_dict())) if expected_plan else None
-        )
+        expected_canonical = _canonical_plan(expected_plan.to_dict()) if expected_plan else None
+        expected_plan_hash = plan_hash(expected_canonical) if expected_canonical is not None else None
         actual_plan_hash = plan_hash(actual_plan) if actual_plan is not None else None
         baseline_match = match_snapshot_reference(
             case_id=case.id,

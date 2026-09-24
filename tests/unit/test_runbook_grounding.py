@@ -7,12 +7,12 @@ from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer, QwenJ
 from self_healthy_kafka.rag.models import RetrievedChunk, Route
 
 
-def _chunk(text="- Verify the account.\n- Rotate the approved secret.", section="recovery_steps"):
+def _chunk(text="- Verify the account.\n- Rotate the approved secret.", section="recovery_steps", *, error_codes=("ORA-01017",), exception_classes=()):
     return RetrievedChunk(
         point_id="one", score=0.9, runbook_id="RB-ORACLE-001", title="Auth",
         version=1, section=section, section_title=section,
         source="runbooks/oracle/invalid-credentials.md", connector_class="oracle",
-        error_codes=("ORA-01017",), text=text,
+        error_codes=error_codes, exception_classes=exception_classes, text=text,
     )
 
 
@@ -241,6 +241,7 @@ def test_qwen_generator_retries_one_transient_http_failure():
     client = Client()
     generator = QwenJsonGenerator(
         AnalyticsChatConfig(
+            jev_mode="off",
             hf_endpoint_url="https://hf.example",
             hf_token="test-token",
             hf_model_id="qwen-test",
@@ -270,6 +271,7 @@ def test_qwen_generator_rejects_a_json_fragment_when_provider_reports_output_tru
 
     generator = QwenJsonGenerator(
         AnalyticsChatConfig(
+            jev_mode="off",
             hf_endpoint_url="https://hf.example",
             hf_token="test-token",
             hf_model_id="qwen-test",
@@ -316,7 +318,61 @@ def test_grounding_retries_once_then_accepts_a_corrected_claim_contract():
     assert result.source == "runbook"
     assert result.generation_attempts == 2
     assert "validation_feedback" in calls[1][1]["content"]
+    assert "claim.citation must be an object" in calls[1][1]["content"]
     assert result.claims[0]["citation"]["section"] == "recovery_steps"
+
+
+def test_grounded_identifier_may_come_from_retrieved_metadata():
+    response = _grounded_response(
+        answer="Có thể kiểm tra OracleException theo hướng dẫn.",
+        excerpt="Verify the account.",
+        text="Có thể kiểm tra OracleException theo hướng dẫn.",
+    )
+    result = GroundedAnswerComposer(lambda _messages: response).compose(
+        question="Cách xử lý?",
+        route=Route.RUNBOOK,
+        analytics_facts=[],
+        chunks=[_chunk(exception_classes=("OracleException",))],
+    )
+
+    assert result.source == "runbook"
+
+
+def test_grounding_retry_feedback_mentions_omitted_claim():
+    responses = iter([
+        {
+            **_grounded_response(answer="Chỉ hướng dẫn chung.", text="Hãy xác minh tài khoản."),
+        },
+        _grounded_response(),
+    ])
+    calls = []
+
+    def generate(messages):
+        calls.append(messages)
+        return next(responses)
+
+    result = GroundedAnswerComposer(generate).compose(
+        question="Cách xử lý?", route=Route.RUNBOOK, analytics_facts=[], chunks=[_chunk()]
+    )
+
+    assert result.generation_attempts == 2
+    assert "Include the exact claim.text verbatim in answer." in calls[1][1]["content"]
+
+
+def test_prompt_requires_one_object_citation_and_claim():
+    messages = []
+
+    def generate(value):
+        messages.extend(value)
+        return _grounded_response()
+
+    GroundedAnswerComposer(generate).compose(
+        question="Cách xử lý?", route=Route.RUNBOOK, analytics_facts=[], chunks=[_chunk()]
+    )
+
+    instruction = messages[0]["content"]
+    assert "exactly one citation and exactly one claim" in instruction
+    assert "citation is an object, never a string" in instruction
 
 
 def test_claim_cannot_cite_one_section_but_quote_another_section():

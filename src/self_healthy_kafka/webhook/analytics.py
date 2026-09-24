@@ -23,6 +23,7 @@ ALLOWED_GROUP_BY = {
 }
 ALLOWED_DETAILS = {
     "error_message",
+    "severity",
     "connector_name",
     "job_name",
     "final_outcome",
