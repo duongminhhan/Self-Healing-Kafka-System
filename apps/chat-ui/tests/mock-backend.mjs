@@ -9,6 +9,15 @@ http.createServer(async (req, res) => {
   if(typeof conversation_id!=="string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(conversation_id)) { res.writeHead(400); res.end(); return; }
   if(question === "Empty test") { res.setHeader("Content-Type","application/json"); res.end(JSON.stringify({answer:""})); return; }
   if(question === "Invalid JSON test") { res.end("private invalid JSON"); return; }
+  if(question === "Out of scope test") {
+    res.setHeader("Content-Type","application/json");
+    res.end(JSON.stringify({
+      answer:"Câu hỏi này nằm ngoài phạm vi hỗ trợ của chatbot Self Healthy Kafka.",
+      route:"out_of_scope",source:"jev_relevance_gate",outcome:"out_of_scope",
+      query_executed:false,evidence_complete:false,row_count:null,
+      conversation:{id:conversation_id,context_used:false,action:"out_of_scope"},
+    })); return;
+  }
   if(question === "Verified empty outcome test") {
     res.setHeader("Content-Type","application/json");
     res.end(JSON.stringify({
@@ -57,7 +66,7 @@ http.createServer(async (req, res) => {
   }
   if(question === "Fallback test") {
     res.setHeader("Content-Type","application/json");
-    res.end(JSON.stringify({answer:"",verified_result:{rows:[{incident_count:75,healing_log_count:75}]},fallback_reason:"unsupported_numeric_claim"})); return;
+    res.end(JSON.stringify({answer:"",verified_result:{rows:[{incident_count:75}]},fallback_reason:"unsupported_numeric_claim"})); return;
   }
   if(question === "Long test") {
     res.setHeader("Content-Type","application/json");
@@ -89,7 +98,7 @@ http.createServer(async (req, res) => {
   if (question === "Retry test" && count === 1) { res.writeHead(503); res.end("private backend failure"); return; }
   const timer = setTimeout(() => {
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ answer: "Connector orders có 2 incident trong dữ liệu thử nghiệm.", route: "analytics", source: "verified_sql", row_count:1, request_id:"request-e2e-123456", citations: [{ runbook_id: "connection-failure", version: 1, section: "recovery", source: "https://example.org/runbook" }], diagnostics: { row_count: 1 }, conversation:{id:conversation_id,context_used:false,action:"start"} }));
+    res.end(JSON.stringify({ answer: "Connector orders có 2 incident trong dữ liệu thử nghiệm.", route: "analytics", source: "verified_sql", row_count:1, request_id:"request-e2e-123456", citations: [{ runbook_id: "connection-failure", version: 1, section: "recovery", url: "https://example.org/runbook" }], diagnostics: { row_count: 1 }, conversation:{id:conversation_id,context_used:false,action:"start"} }));
   }, question === "Cancel test" ? 8000 : question === "Connector nào lỗi?" ? 1500 : 700);
   res.on("close", () => clearTimeout(timer));
 }).listen(Number(process.env.MOCK_BACKEND_PORT??"18080"), "127.0.0.1");

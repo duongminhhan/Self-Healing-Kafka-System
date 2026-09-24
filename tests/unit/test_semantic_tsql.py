@@ -4,13 +4,13 @@ import pytest
 
 from self_healthy_kafka.config import AnalyticsChatConfig
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
-from self_healthy_kafka.semantic.planner import SemanticPlanner, parse_semantic_plan
+from self_healthy_kafka.semantic.planner import SemanticPlanner
 from self_healthy_kafka.semantic.tsql import compile_incident_query, is_read_only_incident_query
 from self_healthy_kafka.webhook.analytics import parse_plan
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 
 
-def _query_plan(*, tie_policy="include_ties"):
+def _query_plan(*, tie_policy="include_ties", details=None):
     return parse_plan({
         "dataset": "connector_incidents",
         "metrics": [{"name": "failure_count", "aggregation": "count_distinct_incident"}],
@@ -18,6 +18,7 @@ def _query_plan(*, tie_policy="include_ties"):
         "filters": {"event_type": ["HEALTH_FAILED_CONFIRMED"]},
         "order_by": [{"field": "failure_count", "direction": "desc"}],
         "limit": 3,
+        "details": details or [],
         "tie_policy": tie_policy,
     })
 
@@ -65,6 +66,45 @@ def test_exact_top_n_uses_stable_row_number_only_when_explicitly_requested():
     assert "[root_connector_name] ASC" in query.statement
 
 
+def test_compiler_supports_bounded_detail_projection_for_dbt_source():
+    from self_healthy_kafka.semantic.fact_source import incident_fact_source
+
+    source = incident_fact_source(mode="dbt", dbt_schema="analytics")
+    query = compile_incident_query(
+        _query_plan(details=["error_message"]),
+        from_at=None,
+        to_at=None,
+        row_limit=501,
+        fact_source=source,
+    )
+
+    assert "[ErrorMessage]" in query.statement.split("FROM [analytics]", 1)[0]
+    assert "MIN(CONVERT(nvarchar(4000), [ErrorMessage])) AS [error_message]" in query.statement
+    assert query.result_shape == (
+        "root_connector_name", "incident_count", "error_message", "rank", "tie_count"
+    )
+    assert is_read_only_incident_query(query.statement, fact_source=source)
+
+
+def test_compiler_returns_severity_only_when_every_row_agrees():
+    query = compile_incident_query(
+        _query_plan(details=["severity"]),
+        from_at=None,
+        to_at=None,
+        row_limit=501,
+    )
+
+    assert "[Severity]" in query.statement.split("FROM [dbo]", 1)[0]
+    assert (
+        "CASE WHEN COUNT([Severity]) = COUNT(*) "
+        "AND MIN(CONVERT(nvarchar(4000), [Severity])) = MAX(CONVERT(nvarchar(4000), [Severity])) "
+        "THEN MIN(CONVERT(nvarchar(4000), [Severity])) END AS [severity]"
+    ) in query.statement
+    assert query.result_shape == (
+        "root_connector_name", "incident_count", "severity", "rank", "tie_count"
+    )
+
+
 def test_compiled_execution_is_used_for_root_ranking_and_keeps_boundary_ties():
     calls = []
 
@@ -79,7 +119,15 @@ def test_compiled_execution_is_used_for_root_ranking_and_keeps_boundary_ties():
 
     planner = SemanticPlanner(lambda _messages, **_kwargs: _semantic_plan(), enforce_cues=False)
     service = AnalyticsChatService(
-        AnalyticsChatConfig(enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id=""),
+        AnalyticsChatConfig(
+            enabled=True,
+            timezone="UTC",
+            hf_endpoint_url="",
+            hf_token="",
+            hf_model_id="",
+            jev_mode="off",
+            fact_source="legacy",
+        ),
         incident_facts=lambda **_kwargs: pytest.fail("legacy fact fetch must not run"),
         execute_incident_query=execute,
         semantic_planner=planner,

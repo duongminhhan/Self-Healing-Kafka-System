@@ -5,8 +5,10 @@ import path from "node:path";
 async function sendQuestion(page: Page, question: string) {
   const input = page.getByRole("textbox", { name: "Câu hỏi" });
   const send = page.getByRole("button", { name: "Gửi câu hỏi" });
-  await input.fill(question);
-  await expect(send).toBeEnabled();
+  await expect(async () => {
+    await input.fill(question);
+    await expect(send).toBeEnabled({ timeout: 500 });
+  }).toPass();
   await send.click();
 }
 
@@ -22,8 +24,8 @@ test("send, loading, answer, citations, details, retry and cancellation", async 
   await expect(page.locator("details[open]")).toHaveCount(0);
   await page.getByText("Nguồn tham khảo (1)").click();
   await expect(page.getByRole("link", { name: "connection-failure" })).toBeVisible();
-  await page.getByText("Chi tiết kỹ thuật").click();
-  await expect(page.locator("details pre")).toContainText("row_count");
+  await expect(page.getByText("Chi tiết kỹ thuật")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("DECLARE @");
   await page.screenshot({path:"test-results/desktop-answer.png"});
   await expect(page.locator("body")).not.toContainText("ui-e2e-server-only-secret");
   await sendQuestion(page, "Retry test");
@@ -135,6 +137,18 @@ test("outcome contract only renders a negative conclusion after verified empty e
   const latest=page.locator(".assistant-message").last();
   await expect(latest).toContainText("chưa thể xác minh đủ dữ liệu");
   await expect(latest).not.toContainText("chưa ghi nhận connector nào có trạng thái FAILED");
+});
+
+test("out-of-scope relevance gate does not create a SQL request", async ({page}) => {
+  const sqlRequests: string[] = [];
+  page.on("request", request => {
+    if (/sql/i.test(request.url())) sqlRequests.push(request.url());
+  });
+  await page.goto("/");
+  await sendQuestion(page, "Out of scope test");
+  await expect(page.locator(".assistant-message").last()).toContainText("ngoài phạm vi hỗ trợ");
+  await expect(page.locator(".assistant-message").last()).not.toContainText("Truy vấn đã chạy");
+  expect(sqlRequests).toEqual([]);
 });
 
 test("semantic ranking responses retain the verified entity and unspecified time scope",async({page})=>{
@@ -261,15 +275,13 @@ test("compact analytics summaries link to the complete verified table without an
   await expect(page.getByRole("region",{name:"Kết quả đã xác minh"}).locator("tbody tr")).toHaveCount(4);
 });
 
-test("shows only a verified read-only executed T-SQL query and copies its display form",async({page})=>{
+test("does not expose executed T-SQL or internal query details",async({page})=>{
   await page.goto("/");
   await sendQuestion(page,"Executed query disclosure test");
-  const disclosure=page.getByText("Truy vấn đã chạy");
-  await expect(disclosure).toBeVisible();
-  await disclosure.click();
-  await expect(page.getByText("T-SQL · chỉ đọc",{exact:true})).toBeVisible();
-  await expect(page.locator(".executed-query pre")).toContainText("DECLARE @rank_limit int = 3");
-  await expect(page.getByRole("button",{name:"Sao chép truy vấn"})).toBeVisible();
+  await expect(page.getByText("Truy vấn đã chạy")).toHaveCount(0);
+  await expect(page.getByText("Chi tiết kỹ thuật")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("DECLARE @rank_limit");
+  await expect(page.locator("body")).not.toContainText("SELECT ? AS");
 });
 
 test("HTML and all client assets contain no server credential",async({request})=>{

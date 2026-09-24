@@ -8,14 +8,13 @@ so diagnostics cannot contain raw error messages or credentials.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from hashlib import sha256
 import json
 import re
+from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Iterable
 
 from self_healthy_kafka.storage.common import json_safe
-
 
 _SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _FACT_SOURCE_MODES = frozenset({"legacy", "shadow", "dbt"})

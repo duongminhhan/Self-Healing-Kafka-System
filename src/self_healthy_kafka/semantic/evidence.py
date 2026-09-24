@@ -38,6 +38,7 @@ _DIMENSION_LABELS = {
 }
 _DETAIL_FIELDS = {
     "error_message": "error_message",
+    "severity": "severity",
     "connector_name": "connector",
     "job_name": "root_connector",
     "final_outcome": "outcome",
@@ -109,11 +110,13 @@ def build_evidence(
         digest = hashlib.sha256(
             json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:20]
+        rank_value: object = fact.get("rank")
+        tie_count_value: object = fact.get("tie_count")
         evidence.append(
             {
                 "fact_id": f"analytics:{digest}",
-                "rank": int(fact.get("rank")) if isinstance(fact.get("rank"), int) and fact["rank"] > 0 else (position if query_plan.group_by else None),
-                "tie_count": int(fact.get("tie_count")) if isinstance(fact.get("tie_count"), int) else None,
+                "rank": int(rank_value) if isinstance(rank_value, int) and rank_value > 0 else (position if query_plan.group_by else None),
+                "tie_count": int(tie_count_value) if isinstance(tie_count_value, int) else None,
                 "coverage": "boundary_tie_truncated" if fact.get("tie_truncated") else ("incomplete" if truncated else "complete"),
                 "dimension": list(query_plan.group_by),
                 "entity": dimensions,

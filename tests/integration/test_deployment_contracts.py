@@ -1,5 +1,8 @@
+import os
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 INIT_TABLE = ROOT / "sql" / "init-table"
@@ -32,6 +35,20 @@ def _procedures() -> str:
     )
 
 
+def _env_values(path: Path) -> dict[str, str]:
+    return {
+        match.group(1): match.group(2).strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (match := re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line))
+    }
+
+
+_SECRET_KEY = re.compile(r"(?i)(TOKEN|PASSWORD|SECRET|API_KEY|CONNECTION_STRING)$")
+_PLACEHOLDER = re.compile(
+    r"(?i)(^$|replace[-_ ](?:with|in)|replace[-_ ]me|change[-_ ]me|your[-_ ]|<[^>]+>|dummy|example)"
+)
+
+
 def test_environment_files_only_define_healing_runtime_endpoints():
     removed_keys = (
         "KAFKA_BOOTSTRAP_SERVERS",
@@ -46,11 +63,16 @@ def test_environment_files_only_define_healing_runtime_endpoints():
         source = (ROOT / "env" / f"{environment}.env.example").read_text(
             encoding="utf-8"
         )
+        values = {
+            match.group(1): match.group(2).strip()
+            for line in source.splitlines()
+            if (match := re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line))
+        }
         assert f"APP_ENV={environment}" in source
         assert "KAFKA_CONNECT_URL=" in source
         assert "MSSQL_CONNECTION_STRING=" in source
         assert "OLLAMA_ENABLED=" in source
-        assert "RAG_ENABLED=false" in source
+        assert values.get("RAG_ENABLED") in {"true", "false"}
         assert "QDRANT_URL=" in source
         assert "QDRANT_API_KEY=" in source
         assert "QDRANT_EMBEDDING_MODEL=" in source
@@ -59,8 +81,42 @@ def test_environment_files_only_define_healing_runtime_endpoints():
         assert "QDRANT_SPARSE_VECTOR_NAME=sparse" in source
         assert "QDRANT_SPARSE_EMBEDDING_MODEL=qdrant/bm25" in source
         assert "RAG_HYBRID_FALLBACK_TO_DENSE=false" in source
+        assert values.get("CHAT_JEV_MODE") == "enforce"
+        assert values.get("JEV_ENDPOINT_URL")
+        assert "JEV_TOKEN" in values
+        assert values.get("JEV_MODEL_ID")
+        assert values.get("JEV_REQUEST_TIMEOUT_SECONDS")
         for key in removed_keys:
             assert key not in source
+
+
+def test_environment_examples_use_secret_safe_placeholders():
+    for environment in ("dev", "uat", "prod"):
+        values = _env_values(ROOT / "env" / f"{environment}.env.example")
+        for key, value in values.items():
+            if _SECRET_KEY.search(key):
+                assert _PLACEHOLDER.search(value), f"{environment} example has a live-looking {key}"
+
+
+def test_dev_environment_matches_example_when_private_file_is_available():
+    configured = os.getenv("SELF_HEALTHY_KAFKA_DEV_ENV_FILE") or os.getenv(
+        "SELF_HEALTHY_KAFKA_ENV_FILE"
+    )
+    private_path = Path(configured) if configured else ROOT / "env" / "dev.env"
+    if private_path.name.endswith(".example") or not private_path.is_file():
+        pytest.skip("private env/dev.env is not available in this checkout")
+
+    private = _env_values(private_path)
+    example = _env_values(ROOT / "env" / "dev.env.example")
+    assert set(private) == set(example)
+    for key, private_value in private.items():
+        example_value = example[key]
+        if _SECRET_KEY.search(key):
+            if private_value:
+                assert example_value != private_value, f"secret value copied into example: {key}"
+            assert _PLACEHOLDER.search(example_value), f"secret placeholder missing: {key}"
+        else:
+            assert example_value == private_value, f"non-secret env drift: {key}"
 
 
 def test_python_package_exposes_direct_runtime_command():

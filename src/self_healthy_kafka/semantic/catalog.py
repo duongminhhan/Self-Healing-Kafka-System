@@ -123,6 +123,7 @@ SEMANTIC_CATALOG: dict[str, Any] = {
         },
         "detail_fields": {
             "error_message": "Nội dung lỗi đã ghi nhận",
+            "severity": "Mức độ nghiêm trọng đã ghi nhận; không phải đánh giá tác động hiện tại hoặc nguyên nhân gốc",
             "connector": "Connector",
             "root_connector": "Root connector",
             "outcome": "Kết quả cuối",
@@ -139,14 +140,6 @@ SEMANTIC_CATALOG: dict[str, Any] = {
             "last_week": "trong tuần trước theo múi giờ {timezone}",
             "this_month": "trong tháng này theo múi giờ {timezone}",
             "absolute_date": "trong ngày đã chỉ định theo múi giờ {timezone}",
-        },
-        # Presentation limits bound prose only.  They never remove evidence
-        # from the verified-result table.
-        "summary_policy": {
-            "summary_item_limit": 3,
-            "summary_detail_limit": 1,
-            "more_results_vi": "Còn {count} kết quả đã xác minh khác trong bảng chi tiết.",
-            "boundary_tie_vi": "Có thêm {count} kết quả đồng hạng với vị trí thứ {rank}; bảng chi tiết chứa đầy đủ danh sách.",
         },
         # Presentation limits bound prose only.  They never remove evidence
         # from the verified-result table.
@@ -192,6 +185,11 @@ SEMANTIC_CATALOG: dict[str, Any] = {
             "metrics": {
                 "incident_count": ["incident", "su co", "loi", "failure"],
                 "healing_log_count": ["healing log", "event log", "retry log", "log healing"],
+            },
+            "details": {
+                "severity": [
+                    "severity", "muc do nghiem trong", "nghiem trong", "serious", "mức độ nghiêm trọng",
+                ],
             },
             "ranking": {
                 "descending": [
@@ -253,6 +251,7 @@ SEMANTIC_CATALOG: dict[str, Any] = {
     },
     "detail_fields": {
         "error_message": "Redacted confirmed-failure message. It may be unavailable for an incident.",
+        "severity": "Recorded severity on the confirmed failure event. It is not a live impact assessment or root-cause conclusion.",
         "connector": "Current connector name",
         "root_connector": "Original/root connector name",
         "outcome": "Historical incident outcome, not current live connector health",

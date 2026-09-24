@@ -16,6 +16,7 @@ OutcomeKind = Literal[
     "verified_empty",
     "cannot_verify",
     "needs_clarification",
+    "out_of_scope",
     "degraded",
 ]
 
@@ -85,6 +86,18 @@ def cannot_verify(*, reason: str, query_executed: bool = False, row_count: int |
 def needs_clarification(*, reason: str = "material_ambiguity") -> AnalyticsOutcome:
     return AnalyticsOutcome(
         outcome="needs_clarification",
+        query_executed=False,
+        evidence_complete=False,
+        row_count=None,
+        reason=reason,
+    )
+
+
+def out_of_scope(*, reason: str = "jev_out_of_scope") -> AnalyticsOutcome:
+    """A relevance-gate decision; no planner or source query was executed."""
+
+    return AnalyticsOutcome(
+        outcome="out_of_scope",
         query_executed=False,
         evidence_complete=False,
         row_count=None,

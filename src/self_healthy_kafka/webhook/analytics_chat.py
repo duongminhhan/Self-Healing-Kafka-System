@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from uuid import uuid4
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +17,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from threading import BoundedSemaphore, RLock
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -31,28 +32,39 @@ from self_healthy_kafka.redaction import redact_text
 from self_healthy_kafka.semantic.catalog import SEMANTIC_CATALOG
 from self_healthy_kafka.semantic.evidence import AnalyticsResponseComposer, build_evidence
 from self_healthy_kafka.semantic.fact_source import (
-    IncidentFactSource,
     classify_shadow_comparison,
     incident_fact_source,
     plan_fingerprint,
+)
+from self_healthy_kafka.semantic.jev import (
+    HttpJEVAdapter,
+    JEVAdapter,
+    JEVDecision,
+    sanitize_jev_context,
 )
 from self_healthy_kafka.semantic.outcome import (
     cannot_verify,
     classify_execution,
     degraded,
     needs_clarification,
+    out_of_scope,
 )
 from self_healthy_kafka.semantic.planner import (
     SemanticPlan,
     SemanticPlanError,
     SemanticPlanner,
     compile_analytics_request,
+    semantic_cue_contract,
 )
-from self_healthy_kafka.semantic.tsql import ExecutedTsql, compile_incident_query
 from self_healthy_kafka.semantic.presentation import (
     SemanticResponseRenderer,
     build_fallback_presentation,
     build_presentation_facts,
+)
+from self_healthy_kafka.semantic.tsql import (
+    DETAIL_RESULT_COLUMNS,
+    ExecutedTsql,
+    compile_incident_query,
 )
 from self_healthy_kafka.storage.common import json_safe
 from self_healthy_kafka.webhook.analytics import (
@@ -74,6 +86,16 @@ _TECHNICAL_CODE = re.compile(
     re.IGNORECASE,
 )
 _EXCEPTION_CLASS = re.compile(r"(?:[A-Za-z_$][\w$]*\.)*([A-Z][A-Za-z0-9_$]*(?:Exception|Error))\b")
+_CONVERSATION_METADATA_FIELDS = {
+    "connector": ("connector_name", "current_connector", "current_connector_name", "connector"),
+    "root_connector": (
+        "job_name",
+        "root_connector",
+        "root_connector_name",
+    ),
+    "error_code": ("error_code", "failure_code", "error_signature", "error", "lỗi"),
+    "exception_class": ("exception_class", "exception"),
+}
 
 
 class ChatInputError(ValueError):
@@ -89,16 +111,82 @@ class _ConversationState:
     expires_at: datetime
     semantic_plan: SemanticPlan
     query_plan: QueryPlan | None
-    facts: tuple[dict[str, Any], ...]
+    fact_count: int
     evidence_ids: tuple[str, ...]
+    route: str | None
+    outcome: str
+    source_kind: str | None
+    connector: str | None
+    root_connector: str | None
+    error_code: str | None
+    exception_class: str | None
 
     def planner_context(self) -> dict[str, Any]:
-        return {
+        context = {
             **self.semantic_plan.context(),
             "previous_query_plan": self.query_plan.to_dict() if self.query_plan else None,
             "available_evidence_ids": list(self.evidence_ids[:20]),
-            "available_fact_count": len(self.facts),
+            "available_fact_count": self.fact_count,
         }
+        if self.outcome in {"verified_results", "verified_empty"}:
+            context["verified_incident_context"] = self.jev_context()
+        return context
+
+    def jev_context(self) -> dict[str, Any]:
+        """Return only bounded incident metadata, never plans, SQL, or raw facts."""
+
+        context: dict[str, Any] = {
+            "previous_route": self.route,
+            "previous_outcome": self.outcome,
+            "source_kind": self.source_kind,
+            "verified": self.outcome in {"verified_results", "verified_empty"},
+            "evidence_ids": list(self.evidence_ids[:20]),
+            "connector": self.connector,
+            "root_connector": self.root_connector,
+            "error_code": self.error_code,
+            "exception_class": self.exception_class,
+        }
+        if self.query_plan is not None:
+            context["connector"] = self.query_plan.connector_name or self.connector
+            context["error_code"] = self.query_plan.error_code or self.error_code
+            context["time_scope"] = self.query_plan.time_range.to_dict() if self.query_plan.time_range else None
+        return sanitize_jev_context(context)
+
+
+def _uses_conversation_context(
+    question: str,
+    plan: SemanticPlan,
+    prior: _ConversationState,
+) -> bool:
+    if plan.inherited_fields:
+        return True
+    cues = semantic_cue_contract(question)
+    request = plan.data_request
+    if (
+        prior.outcome not in {"verified_results", "verified_empty"}
+        or request is None
+        or not cues.detail_fields
+        or cues.subject is not None
+    ):
+        return False
+    filters = request.get("filters") or {}
+    connector = filters.get("connector")
+    if isinstance(connector, str) and connector.casefold() in {
+        value.casefold() for value in (prior.connector, prior.root_connector) if value
+    }:
+        return True
+    error_code = filters.get("error_code")
+    if (
+        isinstance(error_code, str)
+        and prior.error_code
+        and error_code.casefold() == prior.error_code.casefold()
+    ):
+        return True
+    return bool(
+        prior.query_plan
+        and prior.query_plan.time_range
+        and request.get("time_scope") == prior.query_plan.time_range.to_dict()
+    )
 
 
 class AnalyticsChatService:
@@ -115,6 +203,7 @@ class AnalyticsChatService:
         rag_config: RagConfig | None = None,
         rag_workflow: RunbookRagWorkflow | None = None,
         semantic_planner: SemanticPlanner | None = None,
+        jev_adapter: JEVAdapter | None = None,
     ):
         self._config = config
         self._incident_facts = incident_facts
@@ -133,6 +222,15 @@ class AnalyticsChatService:
         self._planner = semantic_planner or SemanticPlanner(
             generator, max_tokens=config.hf_planner_max_tokens
         )
+        self._jev = jev_adapter
+        if self._jev is None and config.jev_mode != "off" and config.jev_endpoint_url:
+            self._jev = HttpJEVAdapter(
+                config.jev_endpoint_url,
+                token=config.jev_token,
+                model_id=config.jev_model_id,
+                timeout_seconds=config.jev_request_timeout_seconds,
+                client=self._client,
+            )
         self._response_composer = AnalyticsResponseComposer(
             generator, max_tokens=config.hf_response_max_tokens
         )
@@ -220,6 +318,8 @@ class AnalyticsChatService:
             raise ValueError("HF_CHAT_ENDPOINT_URL and HF_CHAT_TOKEN must be configured together")
         if self._config.hf_endpoint_url and not self._config.hf_model_id:
             raise ValueError("HF_CHAT_MODEL_ID is required with Hugging Face endpoint")
+        if self._config.jev_mode == "enforce" and self._jev is None:
+            raise ValueError("JEV enforce mode requires a configured adapter")
         if not 1 <= self._config.conversation_ttl_seconds <= 86_400:
             raise ValueError("CHAT_CONVERSATION_TTL_SECONDS must be between 1 and 86400")
         if not 1 <= self._config.conversation_max_entries <= 10_000:
@@ -246,6 +346,15 @@ class AnalyticsChatService:
             raise ChatInputError("question must contain between 1 and 4000 characters")
         conversation_id = _validate_conversation_id(conversation_id)
         prior = self._get_conversation(conversation_id) if conversation_id else None
+        relevance = self._classify_relevance(question, prior=prior)
+        if relevance is not None:
+            decision, error = relevance
+            if self._config.jev_mode == "shadow":
+                # Shadow mode is observational and must not change planner or DB behavior.
+                if error:
+                    logger.info("JEV shadow classification unavailable", extra={"event": "jev_shadow_unavailable"})
+            elif error or decision.classification != "in_scope":
+                return self._relevance_result(decision, error=error, conversation_id=conversation_id)
         planning_model_index = self._qwen.call_count
         try:
             semantic_plan, planning_attempts = self._planner.plan(
@@ -335,13 +444,96 @@ class AnalyticsChatService:
         }
         internal = result.pop("_conversation_state", None)
         if conversation_id and isinstance(internal, dict):
-            self._remember_conversation(conversation_id, semantic_plan, internal)
+            self._remember_conversation(conversation_id, semantic_plan, internal, result=result)
         return self._with_conversation(
             result,
             conversation_id,
-            context_used=prior is not None and bool(semantic_plan.inherited_fields),
+            context_used=prior is not None and _uses_conversation_context(
+                question, semantic_plan, prior
+            ),
             action="semantic_plan",
         )
+
+    def _classify_relevance(
+        self, question: str, *, prior: _ConversationState | None
+    ) -> tuple[JEVDecision, str | None] | None:
+        if self._config.jev_mode == "off":
+            return None
+        if self._jev is None:
+            logger.warning(
+                "JEV relevance gate is unavailable",
+                extra={"event": "jev_gate_error", "error_type": "RuntimeError", "count": 1},
+            )
+            return JEVDecision("in_scope"), "RuntimeError"
+        context = prior.jev_context() if prior else {}
+        started = time.perf_counter()
+        try:
+            decision = self._jev.classify(question, context=context)
+            logger.info(
+                "JEV relevance classification completed",
+                extra={
+                    "event": "jev_gate_classification",
+                    "classification": decision.classification,
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "mode": self._config.jev_mode,
+                    "count": 1,
+                    "has_verified_context": bool(context.get("verified")),
+                },
+            )
+            return decision, None
+        except Exception as exc:
+            # Provider details are intentionally reduced to a type-only reason.
+            logger.warning(
+                "JEV relevance classification failed",
+                extra={
+                    "event": "jev_gate_error",
+                    "error_type": type(exc).__name__,
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "mode": self._config.jev_mode,
+                    "count": 1,
+                },
+            )
+            return JEVDecision("in_scope"), type(exc).__name__
+
+    def _relevance_result(
+        self,
+        decision: JEVDecision,
+        *,
+        error: str | None,
+        conversation_id: str | None,
+    ) -> dict[str, Any]:
+        if error:
+            outcome = cannot_verify(reason="jev_unavailable")
+            route = "unsupported"
+            answer = "Mình chưa thể xác định phạm vi câu hỏi này do bộ lọc liên quan hiện không khả dụng."
+            action = "relevance_gate_unavailable"
+        elif decision.classification == "out_of_scope":
+            outcome = out_of_scope()
+            route = "out_of_scope"
+            answer = "Câu hỏi này nằm ngoài phạm vi hỗ trợ của chatbot Self Healthy Kafka."
+            action = "out_of_scope"
+        else:
+            outcome = needs_clarification(reason="jev_needs_clarification")
+            route = "clarification"
+            answer = "Mình cần thêm thông tin để xác định câu hỏi có thuộc phạm vi Self Healthy Kafka hay không."
+            action = "relevance_clarification"
+        result = {
+            "answer": answer,
+            "route": route,
+            "source": "jev_relevance_gate",
+            **outcome.to_dict(),
+            "status": outcome.outcome,
+            "fallback_reason": outcome.reason,
+            "citations": [],
+            "sources": [],
+            "evidence": [],
+            "recommended_runbooks": [],
+            "candidates": [],
+            "query_plan": None,
+            "semantic_plan": None,
+            "evidence_ids": [],
+        }
+        return self._with_conversation(result, conversation_id, context_used=False, action=action)
 
     def _without_rag(self, plan: SemanticPlan, *, question: str) -> dict[str, Any]:
         route = plan.route
@@ -459,6 +651,9 @@ class AnalyticsChatService:
         rows = _prepare_incident_rows(raw_rows[:_MAX_ANALYTICS_ROWS])
         if _database_error_filter(plan.error_code) is None:
             rows = _filter_failure_code(rows, plan.error_code)
+        # Capture only bounded, allowlisted incident metadata before aggregation
+        # drops dimensions that were not requested by the current answer.
+        conversation_context = _conversation_metadata(rows)
         facts = _aggregate(rows, plan)
         comparison_facts: list[dict[str, Any]] = []
         comparison_rows: list[dict[str, Any]] = []
@@ -530,6 +725,7 @@ class AnalyticsChatService:
             "source": response_source,
             "sources": sources,
             "query_plan": plan.to_dict(),
+            "source_kind": str(SEMANTIC_CATALOG["source"]["kind"]),
             "from_at": from_at.isoformat() if from_at else None,
             "to_at": to_at.isoformat() if to_at else None,
             "time_range_applied": _time_range_applied(resolved_time_range),
@@ -558,7 +754,11 @@ class AnalyticsChatService:
                 truncated=truncated,
             ) if comparison_facts else [],
             "_analytics_model_calls": self._qwen.calls_since(response_model_index),
-            "_conversation_state": {"plan": plan, "facts": facts},
+            "_conversation_state": {
+                "plan": plan,
+                "fact_count": len(facts),
+                "context": conversation_context,
+            },
         }
 
     def _execute_compiled_analytics(
@@ -647,7 +847,11 @@ class AnalyticsChatService:
             "fallback_reason": outcome.reason or fallback_reason,
             "response_attempts": response_attempts,
             "_analytics_model_calls": self._qwen.calls_since(response_model_index),
-            "_conversation_state": {"plan": plan, "facts": facts},
+            "_conversation_state": {
+                "plan": plan,
+                "fact_count": len(facts),
+                "context": _conversation_metadata(database_rows),
+            },
             **({"_shadow_rows": database_rows} if include_shadow_rows else {}),
         }
 
@@ -823,21 +1027,43 @@ class AnalyticsChatService:
         conversation_id: str,
         semantic_plan: SemanticPlan,
         internal: dict[str, Any],
+        *,
+        result: dict[str, Any],
     ) -> None:
         query_plan = internal.get("plan")
-        facts = internal.get("facts")
-        if not isinstance(query_plan, QueryPlan) or not isinstance(facts, list):
+        if query_plan is not None and not isinstance(query_plan, QueryPlan):
             return
+        fact_count = internal.get("fact_count")
+        if type(fact_count) is not int or fact_count < 0:
+            return
+        stored_context = internal.get("context")
+        context = sanitize_jev_context(stored_context) if isinstance(stored_context, dict) else {}
+        if query_plan is not None:
+            context["connector"] = query_plan.connector_name or context.get("connector")
+            context["error_code"] = query_plan.error_code or context.get("error_code")
+            context["time_scope"] = (
+                query_plan.time_range.to_dict() if query_plan.time_range else context.get("time_scope")
+            )
+        if not context.get("evidence_ids"):
+            context["evidence_ids"] = []
+        if isinstance(stored_context, dict):
+            # The producer has already reduced raw rows to the JEV allowlist;
+            # sanitize again at this boundary before retaining any state.
+            context = sanitize_jev_context(context)
+        context = sanitize_jev_context(context)
         state = _ConversationState(
             expires_at=self._now() + timedelta(seconds=self._config.conversation_ttl_seconds),
             semantic_plan=semantic_plan,
             query_plan=query_plan,
-            facts=tuple(dict(item) for item in facts[:MAX_LIMIT]),
-            evidence_ids=tuple(
-                str(identifier)
-                for fact in facts[:MAX_LIMIT]
-                for identifier in fact.get("evidence_ids") or []
-            )[:MAX_LIMIT],
+            fact_count=min(fact_count, MAX_LIMIT),
+            evidence_ids=tuple(context.get("evidence_ids", [])),
+            route=result.get("route") if isinstance(result.get("route"), str) else None,
+            outcome=str(result.get("outcome") or "cannot_verify"),
+            source_kind=result.get("source_kind") if isinstance(result.get("source_kind"), str) else None,
+            connector=context.get("connector"),
+            root_connector=context.get("root_connector"),
+            error_code=context.get("error_code"),
+            exception_class=context.get("exception_class"),
         )
         with self._conversation_lock:
             self._evict_expired_conversations(self._now())
@@ -995,12 +1221,16 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
         "average_recovery_minutes": "average_recovery_minutes",
         "recovery_rate_percent": "recovery_rate_percent",
     }
+    detail_aliases = {
+        field: alias for field, (_, alias) in DETAIL_RESULT_COLUMNS.items()
+    }
     facts: list[dict[str, Any]] = []
     for source in rows:
         row = dict(source)
         required = [dimensions[field] for field in plan.group_by] + [
             metrics[metric.name] for metric in plan.metrics
         ]
+        required.extend(detail_aliases[field] for field in plan.details)
         if plan.group_by:
             required.extend(["rank", "tie_count", "row_number"])
         if any(field not in row for field in required):
@@ -1022,9 +1252,19 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
             value = row.get(metrics[metric.name])
             # pyodbc may return Decimal.  Convert at the boundary so evidence
             # and the JSON response remain scalar and deterministic.
-            if hasattr(value, "as_tuple"):
-                value = float(value)
+            if value is not None and hasattr(value, "as_tuple"):
+                value = float(str(value))
             fact[metric.name] = value
+        for field in plan.details:
+            value = row.get(detail_aliases[field])
+            if field == "error_message" and isinstance(value, str):
+                value = redact_text(value.strip())[:_MAX_ERROR_MESSAGE_CHARS]
+            if field == "severity" and isinstance(value, str):
+                value = value.strip()[:20]
+            if value not in {None, ""}:
+                fact[field] = value
+            elif field == "severity":
+                return []
         for field in ("recovery_rate_numerator", "recovery_rate_denominator", "rank", "tie_count", "row_number"):
             value = row.get(field)
             if value is not None:
@@ -1052,9 +1292,31 @@ def _prepare_incident_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row["error_message"] = redact_text(message.strip())[:_MAX_ERROR_MESSAGE_CHARS]
         else:
             row.pop("error_message", None)
+        severity = row.get("severity")
+        if isinstance(severity, str) and severity.strip():
+            row["severity"] = severity.strip()[:20]
+        else:
+            row.pop("severity", None)
         row["failure_code"] = _failure_signature(row)
         prepared.append(row)
     return prepared
+
+
+def _conversation_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Extract bounded JEV context before a result aggregation drops it."""
+
+    context: dict[str, Any] = {"evidence_ids": []}
+    for row in rows[:MAX_LIMIT]:
+        for field in ("incident_id", "evidence_ids"):
+            value = row.get(field)
+            if isinstance(value, str):
+                context["evidence_ids"].extend(value.split(";") if field == "evidence_ids" else [value])
+            elif isinstance(value, (list, tuple)):
+                context["evidence_ids"].extend(value)
+        for target, field_names in _CONVERSATION_METADATA_FIELDS.items():
+            if context.get(target) is None:
+                context[target] = next((row.get(field) for field in field_names if row.get(field)), None)
+    return sanitize_jev_context(context)
 
 
 def _failure_signature(row: dict[str, Any]) -> str | None:
@@ -1118,6 +1380,8 @@ def _aggregate(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, An
                 fact["recovery_rate_numerator"] = numerator
         for detail in plan.details:
             values = _unique_values(items, detail)
+            if detail == "severity" and len(values) != 1:
+                return []
             if values:
                 fact[detail] = values[0] if len(values) == 1 else values[:3]
         facts.append(fact)

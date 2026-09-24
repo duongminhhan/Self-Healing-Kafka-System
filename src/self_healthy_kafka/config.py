@@ -43,6 +43,7 @@ else:
     load_dotenv(_project_root / "env" / f"{_app_env}.env", override=False)
 
 T = TypeVar("T")
+DEFAULT_JEV_MODE = "enforce"
 
 
 @overload
@@ -157,6 +158,14 @@ class AnalyticsChatConfig:
     hf_request_timeout_seconds: float = float(os.getenv("HF_CHAT_REQUEST_TIMEOUT_SECONDS", "30"))
     hf_planner_max_tokens: int = int(os.getenv("HF_CHAT_PLANNER_MAX_TOKENS", "900"))
     hf_response_max_tokens: int = int(os.getenv("HF_CHAT_RESPONSE_MAX_TOKENS", "900"))
+    # JEV is a relevance gate only; it never owns planning or answer generation.
+    # Fail closed when chat analytics is enabled; disabling the gate must be
+    # an explicit ``CHAT_JEV_MODE=off`` choice in the environment.
+    jev_mode: str = os.getenv("CHAT_JEV_MODE", DEFAULT_JEV_MODE).strip().lower()
+    jev_endpoint_url: str = os.getenv("JEV_ENDPOINT_URL", "")
+    jev_token: str = os.getenv("JEV_TOKEN", "")
+    jev_model_id: str = os.getenv("JEV_MODEL_ID", "")
+    jev_request_timeout_seconds: float = float(os.getenv("JEV_REQUEST_TIMEOUT_SECONDS", "5"))
     conversation_ttl_seconds: int = int(os.getenv("CHAT_CONVERSATION_TTL_SECONDS", "1800"))
     conversation_max_entries: int = int(os.getenv("CHAT_CONVERSATION_MAX_ENTRIES", "500"))
     # ``legacy`` remains the safe default until shadow parity is explicitly reviewed.
@@ -169,7 +178,10 @@ class AnalyticsChatConfig:
     ).lower() in {"1", "true", "yes", "on"}
 
     def __post_init__(self) -> None:
-        from self_healthy_kafka.semantic.fact_source import incident_fact_source, normalize_fact_source_mode
+        from self_healthy_kafka.semantic.fact_source import (
+            incident_fact_source,
+            normalize_fact_source_mode,
+        )
 
         self.fact_source = normalize_fact_source_mode(self.fact_source)
         # Resolve dbt as well so an invalid schema cannot remain dormant until cutover.
@@ -178,6 +190,19 @@ class AnalyticsChatConfig:
             raise ValueError("CHAT_ANALYTICS_SHADOW_TIMEOUT_SECONDS must be between 1 and 30")
         if not 1 <= self.shadow_queue_size <= 1_000:
             raise ValueError("CHAT_ANALYTICS_SHADOW_QUEUE_SIZE must be between 1 and 1000")
+        if self.jev_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError("CHAT_JEV_MODE must be off, shadow, or enforce")
+        if self.jev_request_timeout_seconds <= 0 or self.jev_request_timeout_seconds > 60:
+            raise ValueError("JEV_REQUEST_TIMEOUT_SECONDS must be between 0 and 60")
+        if bool(self.jev_endpoint_url) != bool(self.jev_token):
+            raise ValueError("JEV_ENDPOINT_URL and JEV_TOKEN must be configured together")
+        if self.enabled and self.jev_mode != "off":
+            if not self.jev_model_id.strip():
+                raise ValueError("JEV_MODEL_ID is required when CHAT_JEV_MODE is enabled")
+            if not self.jev_endpoint_url or not self.jev_token:
+                raise ValueError(
+                    "JEV_ENDPOINT_URL and JEV_TOKEN are required when CHAT_JEV_MODE is enabled"
+                )
 
 
 @dataclass

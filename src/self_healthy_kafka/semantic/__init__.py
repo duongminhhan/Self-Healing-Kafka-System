@@ -6,6 +6,14 @@ evidence construction, and conversation context.
 """
 
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION, SEMANTIC_CATALOG
+from self_healthy_kafka.semantic.jev import (
+    HttpJEVAdapter,
+    JEVDecision,
+    JEVResponseError,
+    MockJEVProvider,
+    parse_jev_response,
+    parse_typesafe_response,
+)
 from self_healthy_kafka.semantic.planner import (
     SemanticPlan,
     SemanticPlanError,
@@ -20,4 +28,10 @@ __all__ = [
     "SemanticPlanError",
     "SemanticPlanner",
     "compile_analytics_request",
+    "HttpJEVAdapter",
+    "JEVDecision",
+    "JEVResponseError",
+    "MockJEVProvider",
+    "parse_jev_response",
+    "parse_typesafe_response",
 ]

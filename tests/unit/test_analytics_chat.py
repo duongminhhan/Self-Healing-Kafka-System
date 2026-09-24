@@ -12,7 +12,16 @@ from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 
 
 def _config():
-    return AnalyticsChatConfig(enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="")
+    # Unit tests must not inherit live dev.env provider or source-selection state.
+    return AnalyticsChatConfig(
+        enabled=True,
+        timezone="UTC",
+        hf_endpoint_url="",
+        hf_token="",
+        hf_model_id="",
+        jev_mode="off",
+        fact_source="legacy",
+    )
 
 
 class _ImmediateShadowExecutor:
@@ -124,6 +133,65 @@ def test_detail_field_uses_redacted_verified_message_not_question_template():
     assert "Nội dung lỗi đã ghi nhận" in result["answer"]
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"incident_id": "one", "connector_name": "orders", "error_code": "ORA-01013"}],
+        [
+            {"incident_id": "one", "connector_name": "orders", "error_code": "ORA-01013", "severity": "WARNING"},
+            {"incident_id": "two", "connector_name": "orders", "error_code": "ORA-01013", "severity": "CRITICAL"},
+        ],
+    ],
+)
+def test_missing_or_mixed_severity_cannot_be_presented_as_verified(rows):
+    service = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **_kwargs: rows,
+        semantic_planner=_planner(_plan(details=["severity"])),
+    )
+
+    result = service.ask("Mức độ nghiêm trọng đã ghi nhận là gì?")
+
+    assert result["outcome"] == "cannot_verify"
+    assert result["verified_result"]["rows"] == []
+    assert "WARNING" not in result["answer"]
+    assert "CRITICAL" not in result["answer"]
+
+
+def test_dbt_compiled_detail_is_redacted_before_evidence_and_ui_output():
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(
+            enabled=True,
+            timezone="UTC",
+            hf_endpoint_url="",
+            hf_token="",
+            hf_model_id="",
+            jev_mode="off",
+            fact_source="dbt",
+        ),
+        incident_facts=lambda **_kwargs: pytest.fail("dbt mode must not use legacy facts"),
+        execute_incident_query=lambda **_kwargs: [{
+            "current_connector_name": "orders",
+            "error_signature": "ORA-01013",
+            "incident_count": 1,
+            "error_message": "ORA-01013: password=must-not-leak",
+            "rank": 1,
+            "tie_count": 1,
+            "row_number": 1,
+            "evidence_ids": "one",
+        }],
+        semantic_planner=_planner(_plan(details=["error_message"])),
+    )
+
+    result = service.ask("Chi tiết lỗi dbt")
+
+    assert result["outcome"] == "verified_results"
+    details = result["evidence"][0]["details"]
+    assert "password=must-not-leak" not in str(details)
+    assert "[REDACTED]" in str(details)
+    assert result["executed_query"]["fact_source"] == "dbt"
+
+
 def test_response_model_failure_uses_generic_evidence_renderer_without_question_specific_branch():
     service = AnalyticsChatService(
         _config(),
@@ -171,6 +239,61 @@ def test_multi_turn_sends_bounded_semantic_context_and_reexecutes_new_request():
     assert calls[1]["from_at"] == datetime(2026, 9, 2, tzinfo=timezone.utc)
     assert result["conversation"] == {"id": "a", "context_used": True, "action": "semantic_plan"}
     assert "previous_plan" in planner.calls[1][1]["content"]
+
+
+def test_follow_up_for_returned_root_connector_queries_error_without_cannot_verify():
+    first = _failed_connectors_plan()
+    first["data_request"]["time_scope"] = {"kind": "relative", "value": "today"}
+    second = _plan(time="today", details=["error_message"])
+    second["data_request"].update({
+        "intent": "incidents",
+        "subject": "incident",
+        "metric": "incident_count",
+        "ranking": None,
+        "dimensions": ["error"],
+        "filters": {
+            "time_range": {"kind": "relative", "value": "today"},
+            "connector": "test-connector-ora-01013-20260921",
+        },
+        "sort": {"metric": "incident_count", "direction": "desc"},
+        "limit": 20,
+    })
+    second["data_request"]["time_scope_origin"] = "explicit"
+    planned = iter([first, second])
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(
+            enabled=True,
+            timezone="UTC",
+            hf_endpoint_url="",
+            hf_token="",
+            hf_model_id="",
+            jev_mode="off",
+            fact_source="legacy",
+        ),
+        incident_facts=lambda **_kwargs: [{
+            "incident_id": "one",
+            "job_name": "test-connector-ora-01013-20260921",
+            "connector_name": "test-connector-ora-01013-20260921.001",
+            "error_code": "ORA-01013",
+            "error_message": "ORA-01013: user requested cancel",
+            "failure_at": datetime(2026, 9, 3, 2, tzinfo=timezone.utc),
+            "final_outcome": "FAILED",
+            "event_type": "HEALTH_FAILED_CONFIRMED",
+        }],
+        now=lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
+        semantic_planner=SemanticPlanner(lambda _messages, **_kwargs: next(planned)),
+    )
+
+    service.ask("Hôm nay có connector nào có trạng thái FAILED không?", conversation_id="root-follow-up")
+    result = service.ask(
+        "Lỗi của connector root connector test-connector-ora-01013-20260921 ngày hôm nay là gì?",
+        conversation_id="root-follow-up",
+    )
+
+    assert result["outcome"] == "verified_results"
+    assert result["query_executed"] is True
+    assert result["query_plan"]["connector_name"] == "test-connector-ora-01013-20260921"
+    assert result["evidence"][0]["entity"]["lỗi"] == "ORA-01013"
 
 
 def test_clear_context_is_a_model_plan_action_not_phrase_dispatch():
@@ -344,6 +467,7 @@ def test_shadow_mode_returns_legacy_response_when_dbt_shadow_times_out(caplog):
 
     config = AnalyticsChatConfig(
         enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="",
+        jev_mode="off",
         fact_source="shadow", shadow_snapshot_consistent=True,
     )
     service = AnalyticsChatService(
@@ -370,7 +494,8 @@ def test_shadow_mode_returns_legacy_response_when_dbt_shadow_times_out(caplog):
 def test_dbt_mode_never_silently_falls_back_to_the_legacy_source():
     calls = []
     config = AnalyticsChatConfig(
-        enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="", fact_source="dbt",
+        enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="",
+        jev_mode="off", fact_source="dbt",
     )
     service = AnalyticsChatService(
         config,
@@ -392,6 +517,7 @@ def test_shadow_queue_saturation_never_blocks_the_legacy_response(caplog):
     caplog.set_level(logging.INFO, logger="self_healthy_kafka.webhook.analytics_chat")
     config = AnalyticsChatConfig(
         enabled=True, timezone="UTC", hf_endpoint_url="", hf_token="", hf_model_id="",
+        jev_mode="off",
         fact_source="shadow", shadow_queue_size=1,
     )
     service = AnalyticsChatService(

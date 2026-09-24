@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -10,6 +12,13 @@ from self_healthy_kafka.domain.models import (
     ConnectorStatus,
     TaskStatus,
 )
+
+# A clean worktree has no private env/dev.env. Keep tests runnable from the
+# checked-in example while preserving an explicitly configured private file.
+_ROOT = Path(__file__).resolve().parents[1]
+_app_env = os.getenv("APP_ENV", "dev").strip().lower() or "dev"
+if not os.getenv("SELF_HEALTHY_KAFKA_ENV_FILE") and not (_ROOT / "env" / f"{_app_env}.env").is_file():
+    os.environ["SELF_HEALTHY_KAFKA_ENV_FILE"] = str(_ROOT / "env" / "dev.env.example")
 
 
 def make_status(

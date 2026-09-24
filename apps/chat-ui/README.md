@@ -6,12 +6,16 @@ source-owned shadcn-style Button (Radix Slot/CVA), Tailwind CSS and Zod.
 ## Architecture and boundaries
 
 Browser `POST /api/chat` → Next.js server-side BFF → Python `POST /api/v1/chat`.
-Only `{ "question": "..." }` for the current turn is sent. Qwen, SQL validation,
-semantic planning, retrieval and grounding remain in the existing Python service.
-There is no browser-to-model call, streaming, Assistant Cloud service, question
-cache, conversation database or semantic multi-turn. Sidebar sessions are held
-in memory in this browser tab; refreshing the page clears them. Follow-up questions
-must include their own context. A failed question remains visible in the thread.
+Only the current `{ "question": "...", "conversation_id": "..." }` is sent.
+Qwen, JEV scope classification, SQL validation, semantic planning, retrieval and
+grounding remain in the existing Python service. There is no browser-to-model
+call, streaming, Assistant Cloud service, question cache, or browser conversation
+database. Sidebar sessions are held in this browser tab; refreshing the page
+clears them. The backend may retain a bounded, single-process TTL/LRU semantic
+context for that opaque ID: normalized plan/filter state and allowlisted incident
+metadata only, never raw history, logs, SQL, prompts, credentials, or raw fact
+rows. It is not HA or shared across backend replicas. A failed question remains
+visible in the thread.
 
 Answers render separately from source/route badges, citations and a closed-by-default
 technical panel. Relative runbook paths are labels, not invented hyperlinks.
@@ -81,6 +85,13 @@ are forwarded when safe. Unknown top-level response fields (including raw source
 rows) are not forwarded. Retain backend redaction: this BFF is not a replacement
 for source-side data classification or permission enforcement.
 
+JEV is a backend-only relevance gate. In `enforce` mode, an out-of-scope or
+ambiguous question, provider timeout, or malformed provider response stops before
+the semantic planner and SQL/database path. `shadow` preserves the existing path;
+`off` is an explicit local/test bypass. The UI receives only the public-safe
+outcome and never JEV credentials, raw prompt/provider response, SQL, raw logs,
+or internal diagnostics.
+
 ## Automated validation
 
 ```powershell
@@ -135,6 +146,9 @@ semantic correctness.
 | Combined | `Connector nào bị ORA-01017 tuần này và nên xử lý thế nào?` — analytics plus cited guidance |
 | Clarification | An ambiguous query from the router's current evaluation set — clarification question, no invented answer |
 | Deterministic fallback | An unsupported issue from the current evaluation set — safe fallback/no-answer, not a success claim |
+| Out of scope | A weather or unrelated coding question — public-safe out-of-scope result and no planner/SQL/database call |
+| Follow-up | Ask severity after a verified incident in the same session — JEV receives only bounded incident metadata; planner/evidence still establishes impact |
+| Prompt injection | Ask to ignore policy or output SQL/token — safe classification/result and no prompt, token, raw response, or SQL in UI/logs |
 
 Routes depend on the actual router, available evidence and configuration; do not
 force or label a case as passed when it took another route. Record status, route,

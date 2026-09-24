@@ -181,12 +181,13 @@ def build_presentation_facts(
     displayed_count = min(result_total_count, summary_item_limit)
     boundary = evidence[displayed_count - 1] if displayed_count else None
     boundary_tie_count = boundary.get("tie_count") if isinstance(boundary, dict) else None
+    boundary_rank = boundary.get("rank") if isinstance(boundary, dict) else None
     boundary_tie_truncated = bool(
         displayed_count < result_total_count
         and isinstance(boundary_tie_count, int)
         and boundary_tie_count > sum(
             1 for item in evidence[:displayed_count]
-            if item.get("rank") == boundary.get("rank")
+            if isinstance(item, dict) and item.get("rank") == boundary_rank
         )
     )
     return PresentationFacts(
@@ -273,6 +274,8 @@ class SemanticResponseRenderer:
             return f"Trong {source}, đã xác minh {facts.result_count} {subject} phù hợp {facts.time_scope}."
         if facts.outcome == "needs_clarification":
             return facts.clarification_question or "Mình cần thêm một thông tin để chọn đúng phạm vi truy vấn."
+        if facts.outcome == "out_of_scope":
+            return "Câu hỏi này nằm ngoài phạm vi hỗ trợ của chatbot Self Healthy Kafka."
         if facts.outcome == "degraded":
             return (
                 f"Một nguồn dữ liệu cần thiết của {source} hiện không truy cập được. "

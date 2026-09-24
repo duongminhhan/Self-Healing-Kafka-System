@@ -36,7 +36,15 @@ def evaluate(cases=MULTI_TURN_CASES):
             return [dict(row) for row in case["facts"]]
 
         service = AnalyticsChatService(
-            AnalyticsChatConfig(enabled=True, timezone="UTC", hf_endpoint_url=""),
+            # This evaluator is a deterministic local contract check.  It must
+            # not inherit the live development JEV provider from env/dev.env.
+            AnalyticsChatConfig(
+                enabled=True,
+                timezone="UTC",
+                hf_endpoint_url="",
+                jev_mode="off",
+                fact_source="legacy",
+            ),
             incident_facts=facts,
             now=lambda: datetime.fromisoformat(case["now_utc"]),
             # These are pre-authored structural fixtures, not user-language

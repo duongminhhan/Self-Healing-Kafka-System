@@ -6,7 +6,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import httpx
 
@@ -39,6 +39,7 @@ _DIMENSIONS = {
 }
 _DETAILS = {
     "error_message": "error_message",
+    "severity": "severity",
     "connector": "connector_name",
     "root_connector": "job_name",
     "outcome": "final_outcome",
@@ -81,6 +82,7 @@ class SemanticCueContract:
     ranking: str | None
     limit: int | None
     include_ties_requested: bool
+    detail_fields: tuple[str, ...]
     time_scope: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,6 +92,7 @@ class SemanticCueContract:
             "ranking": self.ranking,
             "limit": self.limit,
             "include_ties_requested": self.include_ties_requested,
+            "detail_fields": list(self.detail_fields),
             "time_scope": dict(self.time_scope) if self.time_scope else None,
             "time_scope_origin": "explicit" if self.time_scope else "unspecified",
         }
@@ -211,7 +214,12 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
         "intent", "subject", "metric", "ranking", "time_scope", "time_scope_origin",
         "metrics", "dimensions", "filters", "sort", "limit", "comparison", "detail_fields", "tie_policy",
     }
-    if not set(value) <= allowed:
+    unsupported_fields = set(value) - allowed
+    if unsupported_fields == {"error_code"}:
+        # Keep the feedback specific enough for the bounded correction pass
+        # without reflecting arbitrary model-provided field names.
+        raise SemanticPlanError("data_request error_code is unsupported")
+    if unsupported_fields:
         raise SemanticPlanError("data_request contains an unsupported field")
     metrics = value.get("metrics")
     if not isinstance(metrics, list) or not metrics or len(metrics) > 4:
@@ -228,6 +236,19 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
     ):
         raise SemanticPlanError("data_request.dimensions contains an unsupported dimension")
     filters = dict(value.get("filters") or {})
+    # Models sometimes mirror a dimension name into the filter object. Keep
+    # the public semantic contract canonical while accepting these bounded
+    # business aliases; the compiler still receives only ``connector``.
+    for alias in ("root_connector", "current_connector"):
+        if alias in filters:
+            if "connector" in filters:
+                raise SemanticPlanError("data_request contains conflicting connector filters")
+            filters["connector"] = filters.pop(alias)
+    connector_filter = filters.get("connector")
+    if isinstance(connector_filter, list):
+        if len(connector_filter) != 1 or not isinstance(connector_filter[0], str):
+            raise SemanticPlanError("data_request connector filter must contain one value")
+        filters["connector"] = connector_filter[0]
     if not isinstance(filters, dict) or not set(filters) <= {
         "time_range", "event_type", "outcome", "connector", "error_code"
     }:
@@ -291,6 +312,12 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
         subject = _SUBJECT_ALIASES.get(subject, subject)
     if subject is None:
         subject = _derive_subject(dimensions)
+    elif subject in {"root_connector", "current_connector"} and any(
+        dimension in {"error", "error_code"} for dimension in dimensions
+    ):
+        # A connector filter plus an error dimension describes incidents for
+        # that connector, not a connector-only ranking.
+        subject = "incident"
     if not isinstance(subject, str) or subject not in _SUBJECT_DIMENSIONS:
         raise SemanticPlanError("data_request subject is unsupported")
     _validate_subject_dimensions(subject, dimensions)
@@ -455,11 +482,39 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         re.search(r"\bconnector\s+\d{3}\b", normalized)
     )
     has_error = _matches_any(normalized, subjects["error_signature"])
+    # A connector can be the population being ranked ("connector nào nhiều
+    # lỗi") or an entity whose incident/error is requested ("lỗi của
+    # connector X"). The latter is incident-shaped and must not be forced
+    # into the connector-only subject contract.
+    connector_error_relation = has_error and bool(
+        re.search(
+            r"\b(?:loi|error|failure)\s+(?:cua|of|for)\s+(?:root\s+)?connector\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:root\s+)?connector\b.*\bbi\s+(?:loi|error|failure)\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:root\s+)?connector\b.*\b(?:gap\s+phai|co\s+loi|failed|failure)\b",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:noi\s+dung|chi\s+tiet|error\s+message|message)\s+loi\b.*\bconnector\b",
+            normalized,
+        )
+    )
     # A connector is the requested subject in phrases such as "connector có
     # nhiều lỗi nhất".  The word "lỗi" then describes its incident metric,
     # rather than changing the request into an error-signature ranking.
+    severity_requested = _matches_any(
+        normalized,
+        vocabulary.get("details", {}).get("severity", []),
+    )
     subject = (
-        "current_connector" if has_current_connector
+        "incident" if connector_error_relation
+        else None if severity_requested and not has_connector
+        else "current_connector" if has_current_connector
         else "root_connector" if has_connector
         else "error_signature" if has_error else None
     )
@@ -472,12 +527,28 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         or _matches_any(normalized, vocabulary["metrics"]["incident_count"])
     ) else None
     time_scope = _explicit_time_scope(question, normalized, vocabulary["time_scopes"])
+    detail_fields: list[str] = []
+    if severity_requested:
+        detail_fields.append("severity")
+    if has_error and has_connector and _matches_any(
+            normalized,
+            [
+                "noi dung loi",
+                "chi tiet loi",
+                "error message",
+                "message loi",
+                "gap phai gi",
+                "la gi",
+            ],
+        ):
+        detail_fields.append("error_message")
     return SemanticCueContract(
         subject=subject,
         metric=metric,
         ranking=ranking,
         limit=limit,
         include_ties_requested=bool(ranking and _matches_any(normalized, vocabulary.get("include_ties", []))),
+        detail_fields=tuple(dict.fromkeys(detail_fields)),
         time_scope=time_scope,
     )
 
@@ -532,10 +603,20 @@ def enforce_semantic_cues(
 ) -> SemanticPlan:
     """Reject a valid-looking plan that changes an explicit user constraint."""
 
+    cues = semantic_cue_contract(question)
     request = plan.data_request
     if request is None:
+        previous_request = (context or {}).get("previous_plan", {}).get("data_request")
+        if cues.detail_fields and (cues.subject is not None or isinstance(previous_request, dict)):
+            raise SemanticPlanError(
+                "semantic detail request requires an analytics data_request"
+            )
         return replace(plan, semantic_enforced=True)
-    cues = semantic_cue_contract(question)
+    if cues.detail_fields and not set(cues.detail_fields).issubset(request.get("detail_fields", [])):
+        expected = ", ".join(cues.detail_fields)
+        raise SemanticPlanError(
+            f"semantic detail request requires data_request.detail_fields to include {expected}"
+        )
     if cues.metric == "healing_log_count":
         raise SemanticPlanError("capability_unavailable:healing_log_count")
     if cues.subject is not None and request["subject"] != cues.subject:
@@ -765,7 +846,7 @@ class SemanticPlanner:
             try:
                 value = self._generate(messages, max_tokens=self._max_tokens)
                 diagnostics = _time_scope_diagnostics(value, question)
-                value = _apply_explicit_time_scope(value, question)
+                value = cast(dict[str, Any], _apply_explicit_time_scope(value, question))
                 plan = parse_semantic_plan(value)
                 _validate_inheritance(plan, context)
                 if self._enforce_cues:
@@ -884,6 +965,17 @@ def _planner_correction_feedback(reason: str) -> str:
             '{"kind":"relative","value":"last_n_days","days":N}. '
             "Never include from_at, to_at, timezone, or timestamp fields; the backend resolves them."
         )
+    if "data_request error_code is unsupported" in reason:
+        return (
+            "Do not add error_code directly to data_request. For analytics, put one named code only in "
+            "data_request.filters.error_code. For runbook-only remediation, diagnosis, or meaning, set "
+            "data_request to null and put codes only in guidance_request.error_codes."
+        )
+    if "guidance_request.purpose is unsupported" in reason:
+        return (
+            "guidance_request.purpose must be exactly one of remediation, diagnosis, or meaning. "
+            "Do not invent another purpose value."
+        )
     return reason
 
 
@@ -958,7 +1050,15 @@ def _messages(question: str, *, context: dict[str, Any] | None, correction: str 
         "Do not output route: the backend derives it from whether "
         "data_request and guidance_request are present. A request may include both. Ask clarification only when "
         "a material ambiguity cannot be resolved from supplied conversation context. Preserve an explicit user "
-        "filter; do not invent a connector, error, time range, metric, or live status. Return this exact schema "
+        "filter; when the user names a connector/root connector, preserve that exact name as filters.connector. "
+        "For analytics, place one named error code only in data_request.filters.error_code. For a runbook-only "
+        "remediation, diagnosis, or meaning request, use data_request=null and guidance_request.error_codes. "
+        "When the user asks for the recorded error content/message of a named connector or incident, use an analytics "
+        "data_request with detail_fields containing error_message; do not convert that request into runbook-only meaning. "
+        "When the user asks how serious an identified incident is, use detail_fields containing severity. Severity is "
+        "the recorded confirmed-failure severity only; never infer live impact, root cause, or a business conclusion. "
+        "guidance_request.purpose must be exactly remediation, diagnosis, or meaning. "
+        "Do not invent a connector, error, time range, metric, or live status. Return this exact schema "
         "shape, with null where a section is not needed: "
         + json.dumps(schema, ensure_ascii=False)
         + ". Semantic catalog: "

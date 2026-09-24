@@ -9,14 +9,13 @@ driver's positional placeholders are replaced by typed ``DECLARE`` variables.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
-import re
 from typing import Any
 
 from self_healthy_kafka.semantic.fact_source import IncidentFactSource, incident_fact_source
 from self_healthy_kafka.webhook.analytics import QueryPlan
-
 
 _MAX_ROWS = 500
 _DIMENSION_COLUMNS = {
@@ -35,6 +34,14 @@ _METRIC_COLUMNS = {
     "open_count": "open_incident_count",
     "average_recovery_minutes": "average_recovery_minutes",
     "recovery_rate_percent": "recovery_rate_percent",
+}
+DETAIL_RESULT_COLUMNS = {
+    "error_message": ("[ErrorMessage]", "error_message"),
+    "severity": ("[Severity]", "severity"),
+    "connector_name": ("[ConnectorName]", "connector_name"),
+    "job_name": ("[JobName]", "job_name"),
+    "final_outcome": ("[FinalOutcome]", "final_outcome"),
+    "queue_status": ("[QueueStatus]", "queue_status"),
 }
 
 
@@ -101,14 +108,14 @@ def compile_incident_query(
     if not 1 <= row_limit <= _MAX_ROWS + 1:
         raise ValueError("row_limit is outside the approved analytics bound")
     source = fact_source or incident_fact_source(mode="legacy", dbt_schema="analytics")
-    if plan.details:
-        raise ValueError("details require an unsupported non-aggregated projection")
     if plan.comparison:
         raise ValueError("comparison requires a separate verified execution")
     if not all(field in _DIMENSION_COLUMNS for field in plan.group_by):
         raise ValueError("query plan has an unsupported T-SQL dimension")
     if not all(metric.name in _METRIC_COLUMNS for metric in plan.metrics):
         raise ValueError("query plan has an unsupported T-SQL metric")
+    if not all(detail in DETAIL_RESULT_COLUMNS for detail in plan.details):
+        raise ValueError("query plan has an unsupported T-SQL detail")
 
     parameters: list[QueryParameter] = []
     predicates: list[str] = []
@@ -152,7 +159,25 @@ def compile_incident_query(
     # row for a grouped metric.  Returning every incident id would make a
     # legitimate high-volume group exceed the response byte limit and does not
     # improve the count, rank, or tie evidence exposed to the user.
-    grouped_selects = ",\n        ".join([*dimensions, *metric_selects, "MIN(CONVERT(nvarchar(36), [IncidentId])) AS [evidence_ids]"])
+    dimension_aliases = {alias for _, alias in (_DIMENSION_COLUMNS[field] for field in plan.group_by)}
+    detail_selects = [
+        (
+            f"CASE WHEN COUNT({column}) = COUNT(*) "
+            f"AND MIN(CONVERT(nvarchar(4000), {column})) = MAX(CONVERT(nvarchar(4000), {column})) "
+            f"THEN MIN(CONVERT(nvarchar(4000), {column})) END AS [{alias}]"
+            if field == "severity"
+            else f"MIN(CONVERT(nvarchar(4000), {column})) AS [{alias}]"
+        )
+        for field in plan.details
+        for column, alias in (DETAIL_RESULT_COLUMNS[field],)
+        if alias not in dimension_aliases
+    ]
+    grouped_selects = ",\n        ".join([
+        *dimensions,
+        *metric_selects,
+        *detail_selects,
+        "MIN(CONVERT(nvarchar(36), [IncidentId])) AS [evidence_ids]",
+    ])
     grouped_group = f"\n    GROUP BY {group_by}" if group_by else ""
     public_order = _METRIC_COLUMNS[plan.order_by]
     direction = "DESC" if plan.direction == "desc" else "ASC"
@@ -180,6 +205,10 @@ def compile_incident_query(
         bind("@rank_limit", "int", plan.limit)
     result_shape = [alias for field in plan.group_by for _, alias in (_DIMENSION_COLUMNS[field],)]
     result_shape.extend(_METRIC_COLUMNS[metric.name] for metric in plan.metrics)
+    result_shape.extend(
+        alias for field in plan.details for _, alias in (DETAIL_RESULT_COLUMNS[field],)
+        if alias not in dimension_aliases
+    )
     if any(metric.name == "recovery_rate_percent" for metric in plan.metrics):
         result_shape.extend(["recovery_rate_numerator", "recovery_rate_denominator"])
     if ranking:
@@ -191,7 +220,7 @@ def compile_incident_query(
 
     statement = f"""WITH [filtered] AS (
     SELECT [IncidentId], [JobName], [ConnectorName], [FailureAt], [RecoveredAt],
-           [FinalOutcome], [EventType], [QueueStatus], [ErrorCode]
+           [FinalOutcome], [EventType], [QueueStatus], [Severity], [ErrorMessage], [ErrorCode]
     FROM {source.qualified_name}
     WHERE {where}
 ), [grouped] AS (

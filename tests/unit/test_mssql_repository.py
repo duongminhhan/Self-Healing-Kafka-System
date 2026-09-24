@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-from self_healthy_kafka.storage.mssql import HealingRepository
 from self_healthy_kafka.semantic.fact_source import IncidentFactSource, incident_fact_source
 from self_healthy_kafka.semantic.tsql import compile_incident_query
+from self_healthy_kafka.storage.mssql import HealingRepository
 from self_healthy_kafka.webhook.analytics import parse_plan
 
 

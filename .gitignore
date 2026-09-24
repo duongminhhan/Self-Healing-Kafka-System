@@ -65,6 +65,7 @@ dbt/**/logs/
 !.env.example
 env/*.env
 !env/*.env.example
+/deploy/kubernetes/secret.env
 *.key
 *.pem
 *.p12

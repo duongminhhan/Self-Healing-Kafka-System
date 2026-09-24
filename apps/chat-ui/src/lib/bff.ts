@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { backendSchema, errors, questionSchema } from "./contract";
+import { z } from "zod";
+import { backendSchema, errors, questionSchema, upstreamBackendSchema, type ChatResponse } from "./contract";
 
 type Settings = {url?:string; token?:string; timeoutMs:number};
 type FailureKind = "configuration"|"request_validation"|"upstream_http"|"upstream_json_parse"|"schema_validation"|"empty_answer"|"timeout"|"cancelled"|"transport";
 type Audit = {request_id:string; status:number; latency_ms:number; source?:string|null; route?:string|null; fallback_reason?:string|null; failure_kind?:FailureKind; upstream_status?:number; validation_issues?:Array<{path:string;code:string}>};
 const safeLabel = (value?:string|null) => value && /^[a-z0-9_:-]{1,100}$/i.test(value) ? value : undefined;
-const sensitiveObjectKey = (key:string) => /^(?:authorization|password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|raw[_-]?log|traceback|stack(?:trace)?)$/i.test(key) || /(?:^|[_-])token$/i.test(key);
+const sensitiveObjectKey = (key:string) => /^(?:authorization|password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|prompt|raw[_-]?(?:prompt|question|log)|traceback|stack(?:trace)?)$/i.test(key) || /(?:^|[_-])token$/i.test(key);
 function scrub(value: unknown, token: string, depth=0): unknown {
   if (depth > 8) return "[omitted]";
   if (typeof value === "string") return (token ? value.split(token).join("[REDACTED]") : value)
@@ -21,6 +22,74 @@ async function boundedText(response: Response, limit:number) {
   try { while(true) { const {done,value}=await reader.read(); if(done) break; size+=value.length; if(size>limit) { await reader.cancel(); throw new Error("oversize"); } chunks.push(value); } }
   finally { reader.releaseLock(); }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+const publicRoutes = new Set(["analytics", "runbook", "combined", "clarification", "out_of_scope", "fallback", "no_answer", "conversation", "unsupported"]);
+const publicStatuses = new Set(["ok", "verified_results", "verified_empty", "cannot_verify", "needs_clarification", "out_of_scope", "degraded", "no_answer"]);
+const publicRowKeys = new Set([
+  "label", "connector", "root_connector", "current_connector", "connector_name", "job_name", "error", "failure_code", "error_code", "error_signature", "final_outcome", "outcome", "error_message", "queue_status",
+  "severity",
+  "incident_count", "failure_count", "recovered_incident_count", "recovered_count", "open_incident_count", "open_count", "average_recovery_minutes", "recovery_rate_percent",
+  "recovery_rate_numerator", "recovery_rate_denominator", "rank", "tie_count", "tie_truncated",
+]);
+
+function publicRows(value: ChatResponse["verified_result"]): ChatResponse["verified_result"] {
+  if (!value) return value;
+  return {
+    columns: value.columns?.filter(column => publicRowKeys.has(column)).slice(0, 20),
+    rows: value.rows.map(row => Object.fromEntries(
+      Object.entries(row)
+        .filter(([key]) => publicRowKeys.has(key))
+        .map(([key, item]) => [key, typeof item === "string" ? item.slice(0, 2000) : item]),
+    )),
+  };
+}
+
+function publicCitations(value: Array<{runbook_id?:string;version?:number;section?:string;url?:string;title?:string}>|null|undefined) {
+  return value?.map(item => ({
+    ...(item.runbook_id === undefined ? {} : {runbook_id:item.runbook_id}),
+    ...(item.version === undefined ? {} : {version:item.version}),
+    ...(item.section === undefined ? {} : {section:item.section}),
+    ...(item.url === undefined ? {} : {url:item.url}),
+    ...(item.title === undefined ? {} : {title:item.title}),
+  }));
+}
+
+function publicNotice(data: z.infer<typeof upstreamBackendSchema>): string | undefined {
+  if (data.outcome === "degraded") return "Một phần dịch vụ đang gián đoạn. Kết quả hiện tại có thể chưa đầy đủ.";
+  if (data.outcome === "needs_clarification") return "Hãy bổ sung thông tin được hỏi để chọn đúng phạm vi truy vấn.";
+  if (data.outcome === "out_of_scope") return undefined;
+  if (data.fallback_reason?.includes("qdrant") || data.fallback_reason?.includes("service")) {
+    return "Kho hướng dẫn tạm thời chưa truy cập được; câu trả lời có thể chưa đầy đủ.";
+  }
+  if ((data.outcome === "verified_results" || data.verified_result?.rows.length) && data.fallback_reason) {
+    return "Câu trả lời sử dụng phần dữ liệu đã kiểm chứng. Một số nội dung diễn giải có thể chưa đầy đủ.";
+  }
+  return undefined;
+}
+
+function projectPublicResponse(data: z.infer<typeof upstreamBackendSchema>): Omit<ChatResponse, "request_id"> {
+  const route = data.route && publicRoutes.has(data.route) ? data.route as ChatResponse["route"] : undefined;
+  const statusValue = data.status ?? data.outcome;
+  const status = statusValue && publicStatuses.has(statusValue) ? statusValue as ChatResponse["status"] : undefined;
+  return {
+    answer: data.answer?.trim() || (data.verified_result?.rows.length ? "Đây là kết quả đã xác minh từ dữ liệu." : undefined),
+    route,
+    citations: publicCitations(data.citations),
+    notice: publicNotice(data),
+    status,
+    row_count: data.row_count,
+    outcome: data.outcome,
+    query_executed: data.query_executed,
+    evidence_complete: data.evidence_complete,
+    source_kind: data.source_kind === "historical_incident_snapshot" ? data.source_kind : undefined,
+    snapshot_freshness: data.snapshot_freshness,
+    time_range_applied: data.time_range_applied,
+    presentation: data.presentation,
+    recommended_runbooks: publicCitations(data.recommended_runbooks),
+    verified_result: publicRows(data.verified_result),
+    conversation: data.conversation,
+  };
 }
 export async function handleChat(request:Request, settings:Settings, fetcher:typeof fetch=fetch, audit:(entry:Audit)=>void=()=>{}) {
   const started=Date.now(); let id=randomUUID() as string;
@@ -62,11 +131,14 @@ export async function handleChat(request:Request, settings:Settings, fetcher:typ
     let raw:unknown;
     try { raw=JSON.parse(await boundedText(upstream,1000000)); }
     catch { if(controller.signal.aborted) throw new Error("aborted"); return fail("invalid_response",502,{failure_kind:"upstream_json_parse"}); }
-    const parsed=backendSchema.safeParse(scrub(raw,settings.token));
+    const parsed=upstreamBackendSchema.safeParse(scrub(raw,settings.token));
     if(!parsed.success) return fail("invalid_response",502,{failure_kind:"schema_validation",validation_issues:parsed.error.issues.slice(0,20).map(issue=>({path:issue.path.map(String).join("."),code:issue.code}))});
-    const data=parsed.data;
+    const publicPayload=projectPublicResponse(parsed.data);
+    const publicParsed=backendSchema.safeParse(publicPayload);
+    if(!publicParsed.success) return fail("invalid_response",502,{failure_kind:"schema_validation",validation_issues:publicParsed.error.issues.slice(0,20).map(issue=>({path:issue.path.map(String).join("."),code:issue.code}))});
+    const data=publicParsed.data;
     if(!data.answer?.trim() && !data.verified_result?.rows.length) return fail("empty_answer",502,{failure_kind:"empty_answer"});
-    return respond({...data,answer:data.answer?.trim()||"Đây là kết quả đã xác minh từ dữ liệu.",citations:data.citations??[]},200,{source:safeLabel(data.source),route:safeLabel(data.route),fallback_reason:safeLabel(data.fallback_reason)});
+    return respond({...data,answer:data.answer?.trim()||"Đây là kết quả đã xác minh từ dữ liệu.",citations:data.citations??[]},200,{route:safeLabel(data.route)});
   } catch { return fail(timedOut?"timeout":request.signal.aborted?"cancelled":"unavailable",timedOut?504:request.signal.aborted?499:503,{failure_kind:timedOut?"timeout":request.signal.aborted?"cancelled":"transport"}); }
   finally { clearTimeout(timer);request.signal.removeEventListener("abort",cancel); }
 }
