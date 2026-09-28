@@ -245,7 +245,7 @@ class GroundedAnswerComposer:
                 except Exception as exc:
                     failure_reason = _failure_reason(exc)
                     correction = _correction_feedback(exc)
-            reason = failure_reason or "grounding_or_generation_failure"
+            reason = failure_reason or "runbook_grounding_failure"
         else:
             reason = "qwen_generation_unavailable"
         answer = _deterministic_answer(facts, chunks, guidance_purpose)
@@ -465,6 +465,8 @@ def _canonical(value: str) -> str:
 def _failure_reason(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "qwen_timeout"
+    if isinstance(exc, httpx.RequestError):
+        return "qwen_service_error"
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in {401, 403}:
@@ -476,7 +478,20 @@ def _failure_reason(exc: Exception) -> str:
         if status >= 500:
             return "qwen_service_error"
         return f"qwen_http_error_{status}"
-    return f"grounding_or_generation_failure:{type(exc).__name__}"
+    if not isinstance(exc, ValueError):
+        return "runbook_generation_failure"
+    detail = str(exc)
+    if detail.startswith("Hugging Face"):
+        return "runbook_invalid_json"
+    if any(term in detail for term in (
+        "prompt-injection",
+        "unsupported technical identifier",
+        "unsupported numeric value",
+        "unverified executed action",
+        "unverified user assertion",
+    )):
+        return "runbook_grounding_failure"
+    return "runbook_claim_contract"
 
 
 def _correction_feedback(exc: Exception) -> str:

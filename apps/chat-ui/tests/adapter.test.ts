@@ -66,6 +66,7 @@ describe("browser adapter",()=>{
   });
   it("rejects unsafe citation links and handles backend status distinctly",()=>{
     for(const url of ["javascript:alert(1)","file:///secret", "https://user:password@example.org", "runbooks/file.md"]) expect(safeLink(url)).toBeUndefined();
+    expect(safeLink("/runbooks/RB-ORACLE-003?v=1#diagnostic_steps")).toBe("/runbooks/RB-ORACLE-003?v=1#diagnostic_steps");
     expect(safeLink("https://example.org/runbook")).toBe("https://example.org/runbook");
     expect(statusMessage("no_answer")).not.toBe(statusMessage("degraded"));
     expect(statusMessage("ok")).toBeNull();

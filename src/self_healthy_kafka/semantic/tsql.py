@@ -187,7 +187,7 @@ def compile_incident_query(
     if not tie_order:
         tie_order = "[evidence_ids] ASC"
 
-    ranking = bool(plan.group_by and plan.limit)
+    ranking = bool(plan.group_by and plan.limit and plan.ranking is not None)
     rank_selects = ""
     rank_filter = ""
     if ranking:

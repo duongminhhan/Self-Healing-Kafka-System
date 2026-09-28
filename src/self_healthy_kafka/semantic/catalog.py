@@ -18,7 +18,7 @@ SEMANTIC_CATALOG: dict[str, Any] = {
     "version": CATALOG_VERSION,
     "source": {
         "kind": "historical_incident_snapshot",
-        "display_name_vi": "snapshot incident hiện tại",
+        "display_name_vi": "dữ liệu incident đã xác minh",
         "freshness": "The source records persisted healing incidents. It is not a live Kafka Connect status API.",
         "timezone": "The backend resolves relative dates in the configured business timezone.",
         "truncation": "A result is not asserted when the bounded source packet is truncated.",
@@ -84,12 +84,12 @@ SEMANTIC_CATALOG: dict[str, Any] = {
     # intent or a mapping from a user's wording to an answer.
     "presentation": {
         "sources": {
-            "historical_incident_snapshot": "snapshot incident hiện tại",
+            "historical_incident_snapshot": "dữ liệu incident đã xác minh",
         },
         "subjects": {
             "incident": {"singular_vi": "incident", "plural_vi": "incident"},
             "connector": {"singular_vi": "connector", "plural_vi": "connector"},
-            "root_connector": {"singular_vi": "root connector", "plural_vi": "root connector"},
+            "root_connector": {"singular_vi": "connector", "plural_vi": "connector"},
             "current_connector": {"singular_vi": "phiên bản connector", "plural_vi": "phiên bản connector"},
             "error": {"singular_vi": "lỗi", "plural_vi": "lỗi"},
             "error_code": {"singular_vi": "mã lỗi", "plural_vi": "mã lỗi"},

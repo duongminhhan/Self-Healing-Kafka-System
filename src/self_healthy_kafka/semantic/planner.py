@@ -356,8 +356,6 @@ def _parse_data_request(value: object) -> dict[str, Any] | None:
         raise SemanticPlanError("data_request metric is unsupported")
 
     ranking = value.get("ranking")
-    if ranking is None and dimensions:
-        ranking = "descending" if sort["direction"] == "desc" else "ascending"
     if ranking is not None and ranking not in {"ascending", "descending"}:
         raise SemanticPlanError("data_request ranking is unsupported")
     if ranking is not None and sort["direction"] != ("desc" if ranking == "descending" else "asc"):
@@ -746,8 +744,16 @@ def enforce_semantic_cues(
     # Ordinary "top N" means exactly N stable rows.  The broader dense-rank
     # behavior is reserved for an explicit request to include ties.
     request_with_policy = dict(request)
-    if request.get("ranking") is not None:
+    if cues.ranking is not None and request.get("ranking") != cues.ranking:
+        raise SemanticPlanError(
+            f"semantic ranking mismatch: question requires {cues.ranking}; "
+            f"plan supplied {request.get('ranking')}"
+        )
+    request_with_policy["ranking"] = cues.ranking
+    if cues.ranking is not None:
         request_with_policy["tie_policy"] = "include_ties" if cues.include_ties_requested else "exact_limit"
+    else:
+        request_with_policy["tie_policy"] = "include_ties"
     return replace(plan, data_request=request_with_policy, semantic_enforced=True)
 
 
@@ -900,6 +906,7 @@ def compile_analytics_request(
         "limit": request["limit"],
         "comparison": request["comparison"],
         "details": [_DETAILS[item] for item in request["detail_fields"]],
+        "ranking": request.get("ranking"),
         "tie_policy": request.get("tie_policy", "include_ties"),
     })
 
@@ -1114,7 +1121,7 @@ def _messages(question: str, *, context: dict[str, Any] | None, correction: str 
             "intent": "incidents",
             "subject": "root_connector",
             "metric": "incident_count",
-            "ranking": "descending",
+            "ranking": None,
             "time_scope": None,
             "time_scope_origin": "unspecified",
             "metrics": ["incident_count"],
@@ -1138,7 +1145,7 @@ def _messages(question: str, *, context: dict[str, Any] | None, correction: str 
     system = (
         "You are a semantic planner, not an answer writer. Return exactly one JSON object and no prose. "
         "Never return SQL, database tables, procedures, code, credentials, raw logs, counts, or an answer. "
-        "Use only business concepts in the catalog. Every data_request must include intent, subject, metric, ranking, time_scope, and time_scope_origin. "
+        "Use only business concepts in the catalog. Every data_request must include intent, subject, metric, ranking, time_scope, and time_scope_origin; ranking may be null. "
         "subject must be exactly incident, root_connector, current_connector, or error_signature. Generic connector questions use root_connector; use current_connector only when the user explicitly asks for a current/versioned connector. "
         "Use time_scope=null and time_scope_origin=unspecified when the user did not establish a time range. "
         "Do not output route: the backend derives it from whether "

@@ -71,6 +71,19 @@ describe("chat BFF", () => {
     expect(data.claims).toBeUndefined();
     expect(data.model_usage).toBeUndefined();
   });
+  it("builds canonical internal runbook links and drops incomplete citations", async () => {
+    const citations=[
+      {runbook_id:"RB-ORACLE-003",version:1,section:"diagnostic_steps",url:"https://evil.example/override",title:"Oracle diagnostics"},
+      {runbook_id:"RB-ORACLE-003",version:0,section:"diagnostic_steps",url:"javascript:alert(1)"},
+      {runbook_id:"RB-ORACLE-003",version:1,url:"file:///secret"},
+    ];
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có dữ liệu.",citations,recommended_runbooks:citations})));
+    const data=await response.json();
+    const expected={runbook_id:"RB-ORACLE-003",version:1,section:"diagnostic_steps",url:"/runbooks/RB-ORACLE-003?v=1#diagnostic_steps",title:"Oracle diagnostics"};
+    expect(data.citations).toEqual([expected]);
+    expect(data.recommended_runbooks).toEqual([expected]);
+    expect(JSON.stringify(data)).not.toMatch(/evil\.example|javascript:|file:/);
+  });
   it("never forwards executed SQL or internal plans to the browser", async () => {
     const executed_query={kind:"tsql_select",dialect:"tsql",statement:"SELECT ? AS [incident_count];",display_statement:"DECLARE @limit int = 3;\n\nSELECT @limit AS [incident_count];",parameters:[{name:"@limit",type:"int",value:3}],executed:true,read_only:true,result_shape:["incident_count"]};
     const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({answer:"Có 3 incident.",executed_query,semantic_plan:{data_request:{secret:"internal"}},query_plan:{statement:"SELECT secret"},sql_evidence:{raw_log:"private"},diagnostics:{raw_prompt:"private"}})));
@@ -118,6 +131,19 @@ describe("chat BFF", () => {
     expect(data.model_usage).toBeUndefined();
     expect(data.diagnostics).toBeUndefined();
     expect(JSON.stringify(data)).not.toContain("private");
+  });
+  it("keeps a verified fallback public-safe without exposing internal exception diagnostics", async () => {
+    const audit=vi.fn();
+    const response=await handleChat(request(),settings,vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      answer:"Connector orders có số incident là 2.",outcome:"verified_results",query_executed:true,evidence_complete:true,row_count:1,
+      fallback_reason:"grounding_failure:ValueError",diagnostics:{raw_prompt:"private prompt",raw_log:"private log",provider:"internal-provider"},
+      verified_result:{rows:[{connector_name:"orders",incident_count:2}]},
+    })),audit);
+    const text=await response.text();
+    expect(response.status).toBe(200);
+    expect(text).toContain("Connector orders có số incident là 2.");
+    expect(text).not.toMatch(/grounding_failure|ValueError|private|internal-provider|fallback_reason|diagnostics/);
+    expect(JSON.stringify(audit.mock.calls)).not.toMatch(/grounding_failure|ValueError|private|internal-provider/);
   });
   it("records only safe validation diagnostics when a post-redaction payload is invalid", async () => {
     const audit=vi.fn();

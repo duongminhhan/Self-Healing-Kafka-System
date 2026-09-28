@@ -132,7 +132,7 @@ class PresentationFacts:
             "from_at": self.from_at,
             "to_at": self.to_at,
             "timezone": self.timezone,
-            "source": self.source,
+            "source": str(_PRESENTATION["sources"].get(self.source, self.source)),
             "snapshot_freshness": self.snapshot_freshness,
             "evidence_complete": self.evidence_complete,
             "query_executed": self.query_executed,
@@ -217,7 +217,11 @@ def build_presentation_facts(
         result_total_count=result_total_count,
         displayed_count=displayed_count,
         remaining_count=result_total_count - displayed_count,
-        tie_policy=query_plan.tie_policy if query_plan is not None else None,
+        tie_policy=(
+            query_plan.tie_policy
+            if query_plan is not None and query_plan.ranking is not None
+            else None
+        ),
         boundary_tie_count=boundary_tie_count if isinstance(boundary_tie_count, int) else None,
         boundary_tie_truncated=boundary_tie_truncated,
         has_more_verified_results=(
@@ -263,27 +267,26 @@ class SemanticResponseRenderer:
     """Render safe outcome statements without semantic-intent branches."""
 
     def render_outcome(self, facts: PresentationFacts) -> str:
-        source = _source_label(facts.source)
         if facts.permits_empty_claim:
             subject = _subject_label(facts.subject, plural=False)
             condition = _condition_label(facts.conditions)
             suffix = f" {condition}" if condition else ""
-            return f"Trong {source}, chưa ghi nhận {subject} nào{suffix} {facts.time_scope}."
+            if facts.subject in {"connector", "root_connector", "current_connector"}:
+                return f"Không. Chưa ghi nhận {subject} nào{suffix} {facts.time_scope}."
+            return f"Chưa ghi nhận {subject} nào{suffix} {facts.time_scope}."
         if facts.outcome == "verified_results":
             subject = _subject_label(facts.subject, plural=True)
-            return f"Trong {source}, đã xác minh {facts.result_count} {subject} phù hợp {facts.time_scope}."
+            return f"Đã xác minh {facts.result_count} {subject} phù hợp {facts.time_scope}."
         if facts.outcome == "needs_clarification":
             return facts.clarification_question or "Mình cần thêm một thông tin để chọn đúng phạm vi truy vấn."
         if facts.outcome == "out_of_scope":
             return "Câu hỏi này nằm ngoài phạm vi hỗ trợ của chatbot Self Healthy Kafka."
         if facts.outcome == "degraded":
-            return (
-                f"Một nguồn dữ liệu cần thiết của {source} hiện không truy cập được. "
-                "Mình chưa thể xác minh kết quả cho yêu cầu này."
+            return _failure_message(
+                facts.safe_failure_reason, degraded=True, conditions=facts.conditions
             )
-        return (
-            f"Mình chưa thể xác minh đủ dữ liệu từ {source} cho yêu cầu này, "
-            "nên chưa thể đưa ra kết luận."
+        return _failure_message(
+            facts.safe_failure_reason, degraded=False, conditions=facts.conditions
         )
 
 
@@ -304,7 +307,7 @@ def _subject(dimensions: tuple[str, ...]) -> str:
 
 
 def _presentation_subject(subject: str, dimensions: tuple[str, ...]) -> str:
-    if subject in {"connector", "root_connector", "current_connector"}:
+    if subject in {"incident", "connector", "root_connector", "current_connector"}:
         return subject if subject != "connector" else "connector"
     if subject == "error_signature":
         return _subject(dimensions)
@@ -316,8 +319,41 @@ def _subject_label(subject: str, *, plural: bool) -> str:
     return str(descriptor["plural_vi" if plural else "singular_vi"])
 
 
-def _source_label(source: str) -> str:
-    return str(_PRESENTATION["sources"].get(source, source))
+def _failure_message(
+    reason: str | None,
+    *,
+    degraded: bool,
+    conditions: tuple[PresentationCondition, ...] = (),
+) -> str:
+    connector = next(
+        (condition.value for condition in conditions if condition.field == "connector"),
+        None,
+    )
+    target = f" cho connector {connector}" if connector else ""
+    if reason == "snapshot_stale":
+        return (
+            f"Snapshot incident chưa đủ mới để xác minh yêu cầu{target}. Điều này không có nghĩa là "
+            "không có sự cố; hãy thử lại sau khi snapshot được cập nhật."
+        )
+    if reason in {"incomplete_result_coverage", "analytics_evidence_truncated"}:
+        return (
+            f"Truy vấn đã chạy nhưng dữ liệu kiểm chứng{target} chưa đầy đủ, nên mình chưa thể xác minh kết quả. "
+            "Điều này không có nghĩa là không có sự cố."
+        )
+    if reason in {"query_failed", "analytics_dbt_query_not_supported"}:
+        return (
+            f"Truy vấn dữ liệu incident{target} không hoàn tất, nên mình chưa thể xác minh yêu cầu này. "
+            "Điều này không có nghĩa là không có sự cố; bạn có thể thử lại sau."
+        )
+    if degraded or reason in {"source_unavailable", "analytics_source_unavailable"}:
+        return (
+            f"Nguồn dữ liệu incident hiện không truy cập được, nên mình chưa thể xác minh yêu cầu{target}. "
+            "Điều này không có nghĩa là không có sự cố; bạn có thể thử lại sau."
+        )
+    return (
+        f"Mình chưa có đủ dữ liệu đã kiểm chứng để xác minh yêu cầu{target}. "
+        "Điều này không có nghĩa là không có sự cố."
+    )
 
 
 def _condition_label(conditions: tuple[PresentationCondition, ...]) -> str:
@@ -349,7 +385,7 @@ def _time_scope(
         )
     if from_at and to_at:
         return f"từ {from_at.isoformat()} đến {to_at.isoformat()}"
-    return "trên toàn bộ snapshot hiện có"
+    return "trong toàn bộ dữ liệu incident hiện có"
 
 
 def _semantic_metric_for_query_metric(query_metric: str) -> str | None:

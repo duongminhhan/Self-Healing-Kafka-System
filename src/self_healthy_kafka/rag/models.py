@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
+from urllib.parse import quote
 
 
 class RagError(RuntimeError):
@@ -176,6 +177,7 @@ class RetrievedChunk:
             version=self.version,
             section=self.section,
             source=self.source,
+            title=self.title,
         )
 
 
@@ -253,6 +255,11 @@ class Citation:
     version: int
     section: str
     source: str
+    title: str = ""
+
+    @property
+    def url(self) -> str:
+        return f"/runbooks/{quote(self.runbook_id, safe='')}?v={self.version}#{quote(self.section, safe='_')}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -260,6 +267,8 @@ class Citation:
             "version": self.version,
             "section": self.section,
             "source": self.source,
+            "title": self.title or self.runbook_id,
+            "url": self.url,
         }
 
 

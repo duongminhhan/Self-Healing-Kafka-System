@@ -453,8 +453,10 @@ def test_conversation_context_is_isolated_by_conversation_id():
     assert result["conversation"] == {
         "id": "conversation-b",
         "context_used": False,
-        "action": "semantic_plan",
+        "action": "clarification",
     }
+    assert result["query_executed"] is False
+    assert result["outcome"] == "needs_clarification"
 
 
 def test_jev_failure_logs_type_only(caplog):

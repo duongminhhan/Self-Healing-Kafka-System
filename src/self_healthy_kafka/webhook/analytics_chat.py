@@ -386,7 +386,9 @@ class AnalyticsChatService:
                     logger.info("JEV shadow classification unavailable", extra={"event": "jev_shadow_unavailable"})
             elif error or decision.classification != "in_scope":
                 return self._relevance_result(decision, error=error, conversation_id=conversation_id)
-        if prior and _requires_verified_context(question) and not _has_unambiguous_verified_context(prior):
+        if _requires_verified_context(question) and (
+            prior is None or not _has_unambiguous_verified_context(prior)
+        ):
             outcome = needs_clarification(reason="ambiguous_verified_context")
             result = {
                 "answer": "Mình cần biết connector hoặc incident cụ thể để xác định mức độ nghiêm trọng.",
@@ -836,7 +838,7 @@ class AnalyticsChatService:
             database_rows = self._run_compiled_query(compiled)
         except Exception as exc:
             return _execution_failure(
-                "analytics_source_unavailable", exception=exc, timezone_name=self._config.timezone
+                "query_failed", exception=exc, timezone_name=self._config.timezone
             )
         truncated = len(database_rows) > _MAX_EXECUTED_RESULT_ROWS
         facts = _compiled_result_facts(database_rows[:_MAX_EXECUTED_RESULT_ROWS], plan)
@@ -1291,7 +1293,7 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
             metrics[metric.name] for metric in plan.metrics
         ]
         required.extend(detail_aliases[field] for field in plan.details)
-        if plan.group_by:
+        if plan.group_by and plan.ranking is not None:
             required.extend(["rank", "tie_count", "row_number"])
         if any(field not in row for field in required):
             # The query did run, but a changed view/driver result cannot be
@@ -1334,7 +1336,7 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
             item for item in str(raw_ids or "").split(";") if item
         ]
         facts.append(fact)
-    if plan.tie_policy == "exact_limit" and facts and plan.group_by:
+    if plan.ranking is not None and plan.tie_policy == "exact_limit" and facts and plan.group_by:
         boundary = facts[-1].get(plan.order_by)
         selected = sum(1 for item in facts if item.get(plan.order_by) == boundary)
         for fact in facts:
@@ -1455,7 +1457,7 @@ def _aggregate(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, An
     present.sort(key=lambda item: tuple(str(item.get(field) or "") for field in plan.group_by))
     present.sort(key=lambda item: item[plan.order_by], reverse=plan.direction == "desc")
     ordered = present + missing
-    if not plan.group_by:
+    if not plan.group_by or plan.ranking is None:
         return ordered[:plan.limit]
     # The fallback aggregation exists for offline fixtures and unsupported
     # projections.  It applies exactly the same ranking semantics as the
