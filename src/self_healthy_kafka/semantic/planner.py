@@ -66,6 +66,27 @@ _SUBJECT_ALIASES = {
     "error_code": "error_signature",
 }
 _TIME_SCOPE_ORIGINS = {"explicit", "inherited", "default", "unspecified"}
+_EXPLICIT_ERROR_CODE = re.compile(
+    r"\b(?:ORA-\d{5}|SQLSTATE-?[0-9A-Z]{5}|HTTP-?\d{3}|[A-Z]{2,}[A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b",
+    re.IGNORECASE,
+)
+_CONNECTOR_REFERENCE = re.compile(
+    r"\b(?:root\s+|current\s+)?connectors?\b\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9._:-]{0,127})(?=\s|[?!,.;)]|$)",
+    re.IGNORECASE,
+)
+_CONNECTOR_REFERENCE_STOPWORDS = frozenset({
+    "root", "current", "version", "hien", "tai", "nao", "which", "what", "co", "cua",
+    "bi", "gap", "nhieu", "loi", "error", "errors", "failure", "failed", "fail", "su", "nay",
+    "status", "state", "health", "healthy", "name", "ten", "dang", "incidents", "incident",
+    "today", "this", "week", "last", "month", "is", "are", "have", "has", "did", "do",
+    "meet", "encounter", "list", "all", "any", "many", "most",
+})
+_EXPLICIT_OUTCOME_TERMS = {
+    "RECOVERED": ("recovered", "recover", "phuc hoi", "da phuc hoi"),
+    "FAILED": ("failed", "failure", "fail"),
+    "ESCALATED": ("escalated", "escalate", "leo thang"),
+    "OPEN": ("open", "dang mo"),
+}
 
 
 @dataclass(frozen=True)
@@ -84,6 +105,9 @@ class SemanticCueContract:
     include_ties_requested: bool
     detail_fields: tuple[str, ...]
     time_scope: dict[str, Any] | None
+    connector_name: str | None = None
+    error_code: str | None = None
+    outcome: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +119,9 @@ class SemanticCueContract:
             "detail_fields": list(self.detail_fields),
             "time_scope": dict(self.time_scope) if self.time_scope else None,
             "time_scope_origin": "explicit" if self.time_scope else "unspecified",
+            "connector_name": self.connector_name,
+            "error_code": self.error_code,
+            "outcome": self.outcome,
         }
 
 
@@ -466,6 +493,52 @@ def _canonical_time_scope(value: object) -> dict[str, Any]:
     return parsed.to_dict()
 
 
+def _connector_population_requested(normalized_question: str) -> bool:
+    return bool(
+        re.search(r"\b(?:root\s+)?connectors?\s+nao\b", normalized_question)
+        or re.search(r"\b(?:nhung|cac)\s+(?:root\s+)?connectors?\b", normalized_question)
+        or re.search(
+            r"\b(?:liet\s+ke|danh\s+sach|bao\s+nhieu|which|what|any|list|all)\b.{0,48}\b(?:root\s+)?connectors?\b",
+            normalized_question,
+        )
+    )
+
+
+def _explicit_connector_name(question: str) -> str | None:
+    for match in _CONNECTOR_REFERENCE.finditer(question):
+        candidate = match.group(1).strip()
+        normalized = _normalize_question(candidate).strip()
+        if normalized not in _CONNECTOR_REFERENCE_STOPWORDS:
+            return candidate
+    return None
+
+
+def _explicit_error_code(question: str) -> str | None:
+    connector = _explicit_connector_name(question)
+    searchable = question
+    if connector:
+        searchable = re.sub(re.escape(connector), " ", searchable, flags=re.IGNORECASE)
+    match = _EXPLICIT_ERROR_CODE.search(searchable)
+    return match.group(0).upper() if match else None
+
+
+def _explicit_outcome(normalized_question: str, *, connector_population: bool, has_error: bool) -> str | None:
+    matches = [
+        outcome
+        for outcome, terms in _EXPLICIT_OUTCOME_TERMS.items()
+        if _matches_any(normalized_question, list(terms))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if (
+        connector_population
+        and has_error
+        and re.search(r"\b(?:bi\s+loi|gap\s+loi|co\s+loi)\b", normalized_question)
+    ):
+        return "FAILED"
+    return None
+
+
 def semantic_cue_contract(question: str) -> SemanticCueContract:
     """Extract explicit business constraints from question vocabulary.
 
@@ -482,11 +555,12 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         re.search(r"\bconnector\s+\d{3}\b", normalized)
     )
     has_error = _matches_any(normalized, subjects["error_signature"])
+    connector_population = _connector_population_requested(normalized)
     # A connector can be the population being ranked ("connector nào nhiều
     # lỗi") or an entity whose incident/error is requested ("lỗi của
     # connector X"). The latter is incident-shaped and must not be forced
     # into the connector-only subject contract.
-    connector_error_relation = has_error and bool(
+    connector_error_relation = has_error and not connector_population and bool(
         re.search(
             r"\b(?:loi|error|failure)\s+(?:cua|of|for)\s+(?:root\s+)?connector\b",
             normalized,
@@ -550,6 +624,9 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         include_ties_requested=bool(ranking and _matches_any(normalized, vocabulary.get("include_ties", []))),
         detail_fields=tuple(dict.fromkeys(detail_fields)),
         time_scope=time_scope,
+        connector_name=_explicit_connector_name(question),
+        error_code=_explicit_error_code(question),
+        outcome=_explicit_outcome(normalized, connector_population=connector_population, has_error=has_error),
     )
 
 
@@ -619,21 +696,26 @@ def enforce_semantic_cues(
         )
     if cues.metric == "healing_log_count":
         raise SemanticPlanError("capability_unavailable:healing_log_count")
-    if cues.subject is not None and request["subject"] != cues.subject:
+    filters = request.get("filters") or {}
+    if cues.connector_name is not None:
+        actual_connector = filters.get("connector")
+        if not isinstance(actual_connector, str) or actual_connector.casefold() != cues.connector_name.casefold():
+            raise SemanticPlanError(
+                "semantic connector mismatch: an explicitly named connector must be preserved"
+            )
+    if cues.error_code is not None:
+        actual_error_code = filters.get("error_code")
+        if not isinstance(actual_error_code, str) or actual_error_code.upper() != cues.error_code:
+            raise SemanticPlanError(
+                "semantic error code mismatch: an explicitly named error code must be preserved"
+            )
+    if cues.outcome is not None and filters.get("outcome") != [cues.outcome]:
         raise SemanticPlanError(
-            f"semantic subject mismatch: question requires {cues.subject}; "
-            f"plan supplied {request['subject']}"
+            "semantic outcome mismatch: an explicitly requested outcome must be preserved"
         )
-    if cues.metric is not None and request.get("metric") != cues.metric:
-        raise SemanticPlanError(
-            f"semantic metric mismatch: question requires {cues.metric}; "
-            f"plan supplied {request.get('metric')}"
-        )
-    if cues.ranking is not None and request.get("ranking") != cues.ranking:
-        raise SemanticPlanError(
-            f"semantic ranking mismatch: question requires {cues.ranking}; "
-            f"plan supplied {request.get('ranking')}"
-        )
+    # Subject, intent, metric, and ranking extracted from vocabulary are model
+    # hints. Catalog validation above remains authoritative; these weak cues
+    # must not reject an otherwise valid, internally consistent plan.
     if cues.limit is not None and request.get("limit") != cues.limit:
         raise SemanticPlanError(
             f"semantic ranking limit mismatch: question requires top {cues.limit}; "
@@ -859,7 +941,7 @@ class SemanticPlanner:
                 return replace(plan, time_scope_resolution=diagnostics), attempt
             except SemanticPlanError as exc:
                 diagnostics["validation_reason"] = str(exc)
-                correction = _planner_correction_feedback(str(exc))
+                correction = _planner_correction_feedback(str(exc), question=question)
             except ValueError as exc:
                 # A JSON boundary that returns malformed content is a model
                 # output problem, not a reason to fall back to phrase rules.
@@ -955,7 +1037,7 @@ def _safe_time_scope(value: object) -> dict[str, Any] | str | None:
     return safe or "invalid_shape"
 
 
-def _planner_correction_feedback(reason: str) -> str:
+def _planner_correction_feedback(reason: str, *, question: str | None = None) -> str:
     if "time_range" in reason:
         return (
             "data_request.time_scope and filters.time_range must be identical. "
@@ -975,6 +1057,18 @@ def _planner_correction_feedback(reason: str) -> str:
         return (
             "guidance_request.purpose must be exactly one of remediation, diagnosis, or meaning. "
             "Do not invent another purpose value."
+        )
+    if "semantic outcome mismatch" in reason:
+        expected = semantic_cue_contract(question).outcome if question else None
+        if expected:
+            return (
+                f'data_request.filters.outcome must be exactly ["{expected}"], because the user explicitly '
+                "asked for that outcome. Keep the filter in the JSON data_request; do not replace it with "
+                "event_type alone."
+            )
+        return (
+            "Preserve the user's explicit outcome in data_request.filters.outcome as a one-item list; "
+            "do not replace it with event_type alone."
         )
     return reason
 
@@ -1057,6 +1151,12 @@ def _messages(question: str, *, context: dict[str, Any] | None, correction: str 
         "data_request with detail_fields containing error_message; do not convert that request into runbook-only meaning. "
         "When the user asks how serious an identified incident is, use detail_fields containing severity. Severity is "
         "the recorded confirmed-failure severity only; never infer live impact, root cause, or a business conclusion. "
+        "Use these semantic distinctions: a population question such as 'connector nào bị lỗi' or 'which connectors failed' "
+        "uses intent failed_connectors, root_connector, incident_count, and filters.outcome=[FAILED]; a named-entity "
+        "question such as 'connector X bị lỗi gì' uses incident "
+        "details; a vague follow-up such as 'lỗi này có nghiêm trọng không' may inherit only one verified incident, "
+        "otherwise ask clarification. Subject, intent, and metric are semantic choices; keep them internally consistent "
+        "with the catalog and never invent a subject from a single keyword. "
         "guidance_request.purpose must be exactly remediation, diagnosis, or meaning. "
         "Do not invent a connector, error, time range, metric, or live status. Return this exact schema "
         "shape, with null where a section is not needed: "

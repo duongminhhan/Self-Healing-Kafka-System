@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -227,7 +227,15 @@ def test_multi_turn_sends_bounded_semantic_context_and_reexecutes_new_request():
     calls = []
     service = AnalyticsChatService(
         _config(),
-        incident_facts=lambda **kwargs: calls.append(kwargs) or [{"incident_id": str(len(calls)), "connector_name": "orders"}],
+        incident_facts=lambda **kwargs: calls.append(kwargs) or [{
+            "incident_id": str(len(calls)),
+            "job_name": "orders",
+            "connector_name": "orders",
+            "failure_at": datetime(2026, 9, 3, 2, tzinfo=timezone.utc),
+            "final_outcome": "FAILED",
+            "event_type": "HEALTH_FAILED_CONFIRMED",
+            "error_code": "ORA-01013",
+        }],
         now=lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
         semantic_planner=planner,
     )
@@ -325,6 +333,68 @@ def _failed_connectors_plan():
         },
     })
     return plan
+
+
+def _weekly_failed_connectors_plan():
+    plan = _failed_connectors_plan()
+    plan["data_request"].update({
+        "intent": "failed_connectors",
+        "subject": "root_connector",
+        "metric": "incident_count",
+        "ranking": "descending",
+        "time_scope": {"kind": "relative", "value": "this_week"},
+        "time_scope_origin": "explicit",
+        "dimensions": ["root_connector"],
+        "filters": {
+            "time_range": {"kind": "relative", "value": "this_week"},
+            "outcome": ["FAILED"],
+        },
+    })
+    return plan
+
+
+def test_weekly_failed_connector_population_executes_and_resolves_this_week():
+    calls = []
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(**{**_config().__dict__, "timezone": "Asia/Ho_Chi_Minh"}),
+        incident_facts=lambda **kwargs: calls.append(kwargs) or [{
+            "incident_id": "incident-1",
+            "job_name": "orders",
+            "connector_name": "orders",
+            "failure_at": datetime(2026, 9, 22, 2, tzinfo=timezone.utc),
+            "final_outcome": "FAILED",
+            "event_type": "HEALTH_FAILED_CONFIRMED",
+            "error_code": "ORA-01013",
+        }],
+        now=lambda: datetime(2026, 9, 24, 5, tzinfo=timezone.utc),
+        semantic_planner=SemanticPlanner(lambda _messages, **_kwargs: _weekly_failed_connectors_plan()),
+    )
+
+    result = service.ask("tuần này có connector nào bị lỗi không?")
+
+    assert result["outcome"] == "verified_results"
+    assert result["query_executed"] is True
+    assert result["verified_result"]["rows"]
+    assert "orders" in str(result["verified_result"]["rows"])
+    assert len(calls) == 1
+    assert calls[0]["from_at"] == datetime(2026, 9, 21, tzinfo=timezone(timedelta(hours=7)))
+    assert calls[0]["to_at"] == datetime(2026, 9, 28, tzinfo=timezone(timedelta(hours=7)))
+
+
+def test_weekly_failed_connector_population_returns_verified_empty_without_rows():
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(**{**_config().__dict__, "timezone": "Asia/Ho_Chi_Minh"}),
+        incident_facts=lambda **_kwargs: [],
+        now=lambda: datetime(2026, 9, 24, 5, tzinfo=timezone.utc),
+        semantic_planner=SemanticPlanner(lambda _messages, **_kwargs: _weekly_failed_connectors_plan()),
+    )
+
+    result = service.ask("tuần này có connector nào bị lỗi không?")
+
+    assert result["outcome"] == "verified_empty"
+    assert result["query_executed"] is True
+    assert result["row_count"] == 0
+    assert "chưa ghi nhận" in result["answer"].lower()
 
 
 def test_verified_empty_is_the_only_outcome_that_may_state_no_failed_connectors():

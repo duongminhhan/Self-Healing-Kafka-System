@@ -365,6 +365,83 @@ def test_cue_contract_keeps_connector_error_ranking_as_connector_scope():
 
     assert cues.subject == "root_connector"
     assert cues.ranking == "descending"
+    assert cues.connector_name is None
+
+
+@pytest.mark.parametrize("question", [
+    "which connectors failed",
+    "list connectors",
+    "current connector status",
+    "tuần này có connector nào bị lỗi không?",
+])
+def test_cue_contract_does_not_turn_connector_population_words_into_an_entity_filter(question):
+    assert semantic_cue_contract(question).connector_name is None
+
+
+def test_cue_contract_extracts_only_a_named_connector_as_a_hard_filter():
+    assert semantic_cue_contract("connector orders bị lỗi gì?").connector_name == "orders"
+
+
+@pytest.mark.parametrize(
+    ("question", "outcome"),
+    [
+        ("which connectors failed this week?", "FAILED"),
+        ("connector nào đã phục hồi hôm nay?", "RECOVERED"),
+        ("connector nào đang open hôm nay?", "OPEN"),
+    ],
+)
+def test_cue_contract_extracts_explicit_outcome_without_using_subject_as_a_guard(question, outcome):
+    assert semantic_cue_contract(question).outcome == outcome
+
+
+def test_weekly_failed_connector_population_is_not_treated_as_incident_detail():
+    raw = _connector_ranking_plan(time_range="this_week", origin="explicit")
+    raw["data_request"].update({
+        "intent": "failed_connectors",
+        "subject": "root_connector",
+        "filters": {
+            "outcome": ["FAILED"],
+            "time_range": {"kind": "relative", "value": "this_week"},
+        },
+    })
+
+    plan, attempts = SemanticPlanner(lambda _messages, **_kwargs: raw).plan(
+        "tuần này có connector nào bị lỗi không?"
+    )
+
+    assert attempts == 1
+    assert semantic_cue_contract("tuần này có connector nào bị lỗi không?").subject == "root_connector"
+    assert plan.data_request["intent"] == "failed_connectors"
+    assert plan.data_request["subject"] == "root_connector"
+    assert plan.data_request["metrics"] == ["incident_count"]
+    assert plan.data_request["dimensions"] == ["root_connector"]
+    assert plan.data_request["filters"]["outcome"] == ["FAILED"]
+    assert plan.data_request["time_scope"] == {"kind": "relative", "value": "this_week"}
+
+
+def test_planner_correction_names_the_explicit_failed_outcome():
+    wrong = _connector_ranking_plan(time_range="this_week", origin="explicit")
+    correct = _connector_ranking_plan(time_range="this_week", origin="explicit")
+    correct["data_request"].update({
+        "intent": "failed_connectors",
+        "subject": "root_connector",
+        "filters": {
+            "outcome": ["FAILED"],
+            "time_range": {"kind": "relative", "value": "this_week"},
+        },
+    })
+    calls = []
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return wrong if len(calls) == 1 else correct
+
+    plan, attempts = SemanticPlanner(generate).plan("tuần này có connector nào bị lỗi không?")
+
+    assert attempts == 2
+    assert plan.data_request["filters"]["outcome"] == ["FAILED"]
+    assert "filters.outcome must be exactly" in calls[1][1]["content"]
+    assert "FAILED" in calls[1][1]["content"]
 
 
 def test_top_n_defaults_to_exact_limit_but_explicit_ties_are_preserved():
@@ -466,7 +543,7 @@ def test_planner_corrects_error_ranking_and_invented_today_for_connector_ranking
     assert plan.data_request["dimensions"] == ["root_connector"]
     assert plan.data_request["time_scope"] is None
     assert plan.data_request["time_scope_origin"] == "unspecified"
-    assert "semantic subject mismatch" in calls[1][1]["content"]
+    assert "semantic time scope mismatch" in calls[1][1]["content"]
     assert compile_analytics_request(plan, require_semantic_enforcement=True).time_range is None
 
 

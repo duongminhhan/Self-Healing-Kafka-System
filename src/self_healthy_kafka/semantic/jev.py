@@ -169,6 +169,9 @@ def sanitize_jev_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
         value = context.get(field)
         if isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value):
             result[field] = value
+    fact_count = context.get("fact_count")
+    if type(fact_count) is int and 0 <= fact_count <= 1_000:
+        result["fact_count"] = fact_count
     if isinstance(context.get("verified"), bool):
         result["verified"] = context["verified"]
     time_scope = context.get("time_scope")
