@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from self_healthy_kafka.config import RagConfig
 from self_healthy_kafka.rag.answer_composer import GroundedAnswerComposer
 from self_healthy_kafka.rag.models import RagConfigurationError, RagStoreError, RetrievedChunk
@@ -101,6 +103,22 @@ def test_analytics_only_plan_never_calls_qdrant():
     assert result["answer"].startswith("orders có 1 incident.")
 
 
+def test_analytics_only_route_uses_analytics_log_event(caplog):
+    class Store:
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("analytics plan must not retrieve runbooks")
+
+    caplog.set_level(logging.INFO, logger="self_healthy_kafka.rag.workflow")
+    workflow = RunbookRagWorkflow(
+        _config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer()
+    )
+    workflow.ask("Một câu hỏi", plan=_plan(guidance=False), analytics_ask=lambda _: _analytics())
+
+    record = caplog.records[-1]
+    assert record.event == "analytics_response_completed"
+    assert not hasattr(record, "retrieval")
+
+
 def test_rag_failure_keeps_verified_analytics_result():
     class Store:
         def search(self, *_args, **_kwargs):
@@ -135,6 +153,7 @@ def test_combined_success_keeps_analytics_answer_and_fact_evidence_intact():
             return [_chunk()]
 
     analytics = _analytics()
+    analytics["fallback_reason"] = "grounding_failure:response_metric_mismatch"
     workflow = RunbookRagWorkflow(
         _config(), retriever=RunbookRetriever(_config(), Store()), composer=GroundedAnswerComposer()
     )
@@ -148,6 +167,9 @@ def test_combined_success_keeps_analytics_answer_and_fact_evidence_intact():
     assert result["claims"] == analytics["claims"]
     assert result["evidence"][0]["runbook_id"] == "RB-ORACLE-001"
     assert result["verified_result"] == analytics["verified_result"]
+    assert result["analytics_fallback_reason"] == "grounding_failure:response_metric_mismatch"
+    assert result["runbook_fallback_reason"] == "qwen_generation_unavailable"
+    assert result["fallback_reason"] == "qwen_generation_unavailable"
 
 
 def test_qdrant_configuration_failure_is_explicit():

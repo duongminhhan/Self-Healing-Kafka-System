@@ -4,7 +4,7 @@ import { backendSchema, errors, questionSchema, upstreamBackendSchema, type Chat
 
 type Settings = {url?:string; token?:string; timeoutMs:number};
 type FailureKind = "configuration"|"request_validation"|"upstream_http"|"upstream_json_parse"|"schema_validation"|"empty_answer"|"timeout"|"cancelled"|"transport";
-type Audit = {request_id:string; status:number; latency_ms:number; source?:string|null; route?:string|null; fallback_reason?:string|null; failure_kind?:FailureKind; upstream_status?:number; validation_issues?:Array<{path:string;code:string}>};
+type Audit = {request_id:string; status:number; latency_ms:number; source?:string|null; route?:string|null; failure_kind?:FailureKind; upstream_status?:number; validation_issues?:Array<{path:string;code:string}>};
 const safeLabel = (value?:string|null) => value && /^[a-z0-9_:-]{1,100}$/i.test(value) ? value : undefined;
 const sensitiveObjectKey = (key:string) => /^(?:authorization|password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|token|prompt|raw[_-]?(?:prompt|question|log)|traceback|stack(?:trace)?)$/i.test(key) || /(?:^|[_-])token$/i.test(key);
 function scrub(value: unknown, token: string, depth=0): unknown {
@@ -46,22 +46,25 @@ function publicRows(value: ChatResponse["verified_result"]): ChatResponse["verif
 }
 
 function publicCitations(value: Array<{runbook_id?:string;version?:number;section?:string;url?:string;title?:string}>|null|undefined) {
-  return value?.map(item => ({
-    ...(item.runbook_id === undefined ? {} : {runbook_id:item.runbook_id}),
-    ...(item.version === undefined ? {} : {version:item.version}),
-    ...(item.section === undefined ? {} : {section:item.section}),
-    ...(item.url === undefined ? {} : {url:item.url}),
-    ...(item.title === undefined ? {} : {title:item.title}),
-  }));
+  return value?.flatMap(item => {
+    const {runbook_id,version,section}=item;
+    if (!runbook_id?.match(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
+      || typeof version!=="number" || !Number.isInteger(version) || version < 1
+      || !section?.match(/^[A-Za-z0-9_-]+$/)) return [];
+    return [{
+      runbook_id,
+      version,
+      section,
+      url:`/runbooks/${runbook_id}?v=${version}#${section}`,
+      ...(item.title === undefined ? {} : {title:item.title}),
+    }];
+  });
 }
 
 function publicNotice(data: z.infer<typeof upstreamBackendSchema>): string | undefined {
   if (data.outcome === "degraded") return "Một phần dịch vụ đang gián đoạn. Kết quả hiện tại có thể chưa đầy đủ.";
   if (data.outcome === "needs_clarification") return "Hãy bổ sung thông tin được hỏi để chọn đúng phạm vi truy vấn.";
   if (data.outcome === "out_of_scope") return undefined;
-  if (data.fallback_reason?.includes("qdrant") || data.fallback_reason?.includes("service")) {
-    return "Kho hướng dẫn tạm thời chưa truy cập được; câu trả lời có thể chưa đầy đủ.";
-  }
   if ((data.outcome === "verified_results" || data.verified_result?.rows.length) && data.fallback_reason) {
     return "Câu trả lời sử dụng phần dữ liệu đã kiểm chứng. Một số nội dung diễn giải có thể chưa đầy đủ.";
   }

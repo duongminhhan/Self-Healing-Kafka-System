@@ -333,12 +333,87 @@ def test_follow_up_severity_uses_verified_context_and_reexecutes_the_semantic_pi
         "previous_outcome": "verified_results",
         "source_kind": "historical_incident_snapshot",
         "verified": True,
+        "fact_count": 1,
         "evidence_ids": ["incident-1"],
         "connector": "orders",
         "root_connector": "orders-root",
         "error_code": "ORA-01013",
         "exception_class": "OracleException",
     }
+
+
+def test_ambiguous_verified_context_clarifies_without_selecting_a_connector():
+    provider = MockJEVProvider({"classification": "in_scope"})
+    planner_calls = []
+
+    def generate(messages, **_kwargs):
+        planner_calls.append(messages)
+        return _plan()
+
+    rows = [
+        {
+            "incident_id": "incident-1",
+            "job_name": "orders",
+            "connector_name": "orders",
+            "failure_at": datetime(2026, 9, 3, tzinfo=timezone.utc),
+            "final_outcome": "FAILED",
+            "event_type": "HEALTH_FAILED_CONFIRMED",
+        },
+        {
+            "incident_id": "incident-2",
+            "job_name": "payments",
+            "connector_name": "payments",
+            "failure_at": datetime(2026, 9, 3, tzinfo=timezone.utc),
+            "final_outcome": "FAILED",
+            "event_type": "HEALTH_FAILED_CONFIRMED",
+        },
+    ]
+    service = AnalyticsChatService(
+        _config("enforce"),
+        incident_facts=lambda **_kwargs: rows,
+        semantic_planner=SemanticPlanner(generate, enforce_cues=False),
+        jev_adapter=provider,
+    )
+
+    first = service.ask("Có connector nào bị lỗi hôm nay không?", conversation_id="ambiguous")
+    result = service.ask("Lỗi này có nghiêm trọng không?", conversation_id="ambiguous")
+
+    assert first["outcome"] == "verified_results"
+    assert result["outcome"] == "needs_clarification"
+    assert result["query_executed"] is False
+    assert result["conversation"]["context_used"] is False
+    assert len(planner_calls) == 1
+    assert provider.calls[1]["context"]["fact_count"] == 2
+    assert "connector" not in provider.calls[1]["context"]
+
+
+def test_unverified_outcome_is_not_retained_for_a_follow_up():
+    provider = MockJEVProvider({"classification": "in_scope"})
+    planner_calls = []
+    first_plan = _plan()
+    first_plan["data_request"]["detail_fields"] = ["severity"]
+    second_plan = _plan()
+    planned = iter([first_plan, second_plan])
+
+    def generate(messages, **_kwargs):
+        planner_calls.append(messages)
+        return next(planned)
+
+    service = AnalyticsChatService(
+        _config("enforce"),
+        incident_facts=lambda **_kwargs: [{"incident_id": "incomplete", "connector_name": "orders"}],
+        semantic_planner=SemanticPlanner(generate, enforce_cues=False),
+        jev_adapter=provider,
+    )
+
+    first = service.ask("Một truy vấn chưa đủ dữ liệu", conversation_id="unverified")
+    assert "unverified" not in service._conversation_states
+    second = service.ask("Một truy vấn mới", conversation_id="unverified")
+
+    assert first["outcome"] == "cannot_verify"
+    assert second["query_executed"] is True
+    assert len(planner_calls) == 2
+    assert provider.calls[1]["context"] == {}
 
 
 def test_expired_conversation_context_is_not_sent_to_jev():
@@ -378,8 +453,10 @@ def test_conversation_context_is_isolated_by_conversation_id():
     assert result["conversation"] == {
         "id": "conversation-b",
         "context_used": False,
-        "action": "semantic_plan",
+        "action": "clarification",
     }
+    assert result["query_executed"] is False
+    assert result["outcome"] == "needs_clarification"
 
 
 def test_jev_failure_logs_type_only(caplog):
@@ -509,6 +586,7 @@ def test_follow_up_passes_only_bounded_conversation_context_to_jev():
         "previous_outcome": "verified_results",
         "source_kind": "historical_incident_snapshot",
         "verified": True,
+        "fact_count": 1,
         "evidence_ids": ["1"],
         "connector": "orders",
         "time_scope": {"kind": "relative", "value": "today"},
@@ -540,6 +618,7 @@ def test_conversation_state_never_retains_raw_fact_rows_or_logs():
         "previous_outcome": "verified_results",
         "source_kind": "historical_incident_snapshot",
         "verified": True,
+        "fact_count": 1,
         "evidence_ids": ["incident-1"],
         "connector": "orders",
         "time_scope": {"kind": "relative", "value": "today"},

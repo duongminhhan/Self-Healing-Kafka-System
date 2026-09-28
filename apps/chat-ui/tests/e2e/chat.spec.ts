@@ -22,8 +22,17 @@ test("send, loading, answer, citations, details, retry and cancellation", async 
   await expect(page.getByLabel("Thông tin phản hồi")).toContainText(/Phản hồi trong (?:\d+ ms|\d+(?:,\d)? giây)/);
   await expect(page.locator(".badges")).not.toContainText("Phân tích dữ liệu");
   await expect(page.locator("details[open]")).toHaveCount(0);
-  await page.getByText("Nguồn tham khảo (1)").click();
-  await expect(page.getByRole("link", { name: "connection-failure" })).toBeVisible();
+  await expect(page.getByLabel("Nguồn runbook")).toHaveCount(1);
+  await expect(page.locator("body")).not.toContainText(/Runbook phù hợp \(|Nguồn tham khảo \(/);
+  const runbookLink = page.getByRole("link", { name: /RB-ORACLE-003 v1 · diagnostic_steps/ });
+  await expect(runbookLink).toHaveAttribute("href", "/runbooks/RB-ORACLE-003?v=1#diagnostic_steps");
+  const runbookPage = await page.context().newPage();
+  await runbookPage.goto(new URL("/runbooks/RB-ORACLE-003?v=1#diagnostic_steps", page.url()).toString());
+  await expect(runbookPage).toHaveURL(/\/runbooks\/RB-ORACLE-003\?v=1#diagnostic_steps$/);
+  await expect(runbookPage.getByRole("heading", { name: "Oracle operation cancelled or timed out" })).toBeVisible();
+  await expect(runbookPage.locator("#diagnostic_steps")).toBeVisible();
+  await runbookPage.close();
+  await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.", { exact: true })).toBeVisible();
   await expect(page.getByText("Chi tiết kỹ thuật")).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("DECLARE @");
   await page.screenshot({path:"test-results/desktop-answer.png"});
@@ -52,6 +61,7 @@ test("empty state, multiline, local visual history and mobile long content",asyn
   await expect(page.locator(".table-scroll tbody tr")).toHaveCount(1);
   await expect(page.locator(".notice")).toContainText("dữ liệu đã kiểm chứng");
   await expect(page.locator(".table-scroll")).toContainText("75");
+  await expect(page.locator("body")).not.toContainText(/grounding_failure|ValueError|private prompt|internal-provider/);
   await page.screenshot({path:"test-results/mobile-fallback.png"});
   await page.getByRole("button",{name:"Ẩn hoặc mở lịch sử"}).click();
   await page.getByRole("button",{name:"Cuộc trò chuyện mới",exact:true}).click();
@@ -151,17 +161,55 @@ test("out-of-scope relevance gate does not create a SQL request", async ({page})
   expect(sqlRequests).toEqual([]);
 });
 
-test("semantic ranking responses retain the verified entity and unspecified time scope",async({page})=>{
+test("weekly connector answer is direct and does not invent ranking", async ({page}) => {
+  await page.goto("/");
+  await sendQuestion(page, "Tuần này có connector nào gặp sự cố không?");
+  const latest=page.locator(".assistant-message").last();
+  await expect(latest).toContainText("Có. Tuần này ghi nhận 1 connector gặp sự cố");
+  await expect(latest).toContainText("orders với 1 incident");
+  await expect(latest).not.toContainText(/Hạng|root connector|snapshot incident hiện tại/i);
+});
+
+test("severity follow-up keeps the verified conversation context", async ({page}) => {
+  const conversationIds:string[]=[];
+  page.on("request", request => {
+    if(request.url().endsWith("/api/chat")&&request.method()==="POST") {
+      const id=(request.postDataJSON() as {conversation_id?:string}).conversation_id;
+      if(id) conversationIds.push(id);
+    }
+  });
+  await page.goto("/");
+  await sendQuestion(page, "Chi tiết connector orders");
+  await sendQuestion(page, "Lỗi này có nghiêm trọng không?");
+  await expect(page.locator(".assistant-message").last()).toContainText("connector orders có mức độ nghiêm trọng đã ghi nhận là CRITICAL");
+  expect(conversationIds).toHaveLength(2);
+  expect(new Set(conversationIds).size).toBe(1);
+});
+
+test("runbook index filters on mobile and reports an empty search", async ({page}) => {
+  await page.setViewportSize({width:390,height:844});
+  await page.goto("/runbooks");
+  await expect(page.getByRole("heading", {name:"Runbook vận hành"})).toBeVisible();
+  const search = page.getByRole("searchbox", {name:"Tìm runbook"});
+  await search.fill("RB-ORACLE-003");
+  await search.press("Enter");
+  await expect(page.getByRole("link", {name:/RB-ORACLE-003 · v1/})).toBeVisible();
+  await search.fill("does-not-exist");
+  await search.press("Enter");
+  await expect(page.getByRole("status")).toContainText("Không tìm thấy runbook phù hợp");
+});
+
+test("semantic responses retain the verified entity and unspecified time scope",async({page})=>{
   await page.goto("/");
   await sendQuestion(page, "Connector ranking response test");
   const connector=page.locator(".assistant-message").last();
   await expect(connector).toContainText("connector sample-oracle-orders");
-  await expect(connector).toContainText("toàn bộ snapshot hiện có");
+  await expect(connector).toContainText("toàn bộ dữ liệu incident hiện có");
   await expect(connector).not.toContainText("hôm nay");
   await sendQuestion(page, "Error ranking response test");
   const error=page.locator(".assistant-message").last();
   await expect(error).toContainText("mã lỗi ORA-01013");
-  await expect(error).toContainText("toàn bộ snapshot hiện có");
+  await expect(error).toContainText("toàn bộ dữ liệu incident hiện có");
   await sendQuestion(page, "Rejected semantic plan test");
   const rejected=page.locator(".assistant-message").last();
   await expect(rejected).toContainText("chưa thể xác minh");

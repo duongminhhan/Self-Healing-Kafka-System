@@ -70,16 +70,20 @@ export function ResponseDetails({response,timing,resultId}:{response:ChatRespons
     && rows.length
     && presentation.remaining_count>0
   );
+  const runbooks=Array.from(new Map(
+    [...(response.citations??[]), ...(response.recommended_runbooks??[])].map(item=>[
+      `${item.runbook_id??"runbook"}:${item.version??""}:${item.section??""}`, item,
+    ])
+  ).values()).filter(item=>safeLink(item.url)?.startsWith("/runbooks/"));
   return <div className="response-details">
     {!!metadata.length&&<div className="response-meta badges" aria-label="Thông tin phản hồi" aria-live="polite">{metadata.map(item=><span key={item} title={item.startsWith("Phản hồi")?"Thời gian end-to-end quan sát từ trình duyệt":undefined}>{item}</span>)}</div>}
     {response.notice&&<p className="notice">{response.notice}</p>}
-    {!!response.recommended_runbooks?.length&&<details className="disclosure"><summary>Runbook phù hợp ({response.recommended_runbooks.length})</summary><ul>{response.recommended_runbooks.map((item,index)=><li key={index}>{item.title??item.runbook_id}<small>{item.version?`v${item.version}`:""}</small></li>)}</ul></details>}
+    {!!runbooks.length&&<div className="runbook-links" aria-label="Nguồn runbook"><BookOpen size={15}/><span>Nguồn runbook:</span>{runbooks.map((citation,index)=>{
+      const url=safeLink(citation.url);
+      const label=`${citation.runbook_id??"Runbook"}${citation.version?` v${citation.version}`:""}${citation.section?` · ${citation.section}`:""}`;
+      return <a key={index} href={url}>{label} <ExternalLink size={12}/></a>;
+    })}</div>}
     {showMore&&<Button variant="outline" className="verified-more" onClick={()=>document.getElementById(resultId)?.scrollIntoView({behavior:"smooth",block:"center"})}>Xem {presentation?.remaining_count??0} kết quả đã xác minh khác</Button>}
     {!!rows.length&&<VerifiedTable rows={rows} columns={columns} resultId={resultId}/>}
-    {!!response.citations?.length&&<details className="disclosure"><summary><BookOpen size={15}/> Nguồn tham khảo ({response.citations.length}) <ChevronDown size={14}/></summary><ul>{response.citations.map((citation,index)=>{
-      const url=safeLink(citation.url);
-      const label=citation.title??citation.runbook_id??"Runbook";
-      return <li key={index}>{url?<a href={url} target="_blank" rel="noopener noreferrer">{label} <ExternalLink size={12}/></a>:<strong>{label}</strong>}<small>{citation.section?.replaceAll("_"," ")}{citation.version?` · v${citation.version}`:""}</small></li>;
-    })}</ul></details>}
   </div>;
 }

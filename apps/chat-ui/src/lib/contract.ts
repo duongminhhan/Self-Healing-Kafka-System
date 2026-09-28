@@ -11,8 +11,10 @@ export const citationSchema = z.object({
   source: z.string().max(2000).optional(), url: z.string().max(2000).optional(), title: label.optional(),
 });
 const publicCitationSchema = z.object({
-  runbook_id: label.optional(), version: z.number().optional(), section: label.optional(),
-  url: z.string().max(2000).optional(), title: label.optional(),
+  runbook_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  version: z.number().int().positive(), section: z.string().regex(/^[A-Za-z0-9_-]+$/),
+  url: z.string().regex(/^\/runbooks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\?v=\d+#[A-Za-z0-9_-]+$/),
+  title: label.optional(),
 }).strict();
 const cell = z.union([z.string().max(8000), z.number().finite(), z.boolean(), z.null()]);
 const rows = z.array(z.record(z.string().max(160), cell)).max(500);
@@ -200,6 +202,7 @@ export function routeLabel(value?: string | null) {
 }
 export function safeLink(value?: string) {
   if (!value) return undefined;
+  if (/^\/runbooks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\?v=\d+#(?:[A-Za-z0-9_-]+)$/.test(value)) return value;
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : undefined; }
   catch { return undefined; }
 }

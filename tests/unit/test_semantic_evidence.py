@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import httpx
+
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
 from self_healthy_kafka.semantic.evidence import AnalyticsResponseComposer
 from self_healthy_kafka.semantic.planner import parse_semantic_plan
@@ -98,7 +100,7 @@ def test_analytics_response_retries_once_after_claim_scope_mismatch():
     assert fallback_reason is None
     assert attempts == 2
     assert claims[0]["fact_id"] == "analytics:orders:2"
-    assert "validation_feedback" in calls[1][1]["content"]
+    assert "Copy fact_id, entity, time_range, and status exactly" in calls[1][1]["content"]
     assert "question" not in json.loads(calls[0][1]["content"])
 
 
@@ -110,7 +112,8 @@ def test_analytics_response_rejects_value_that_does_not_match_the_fact():
     )
 
     assert source == "deterministic_evidence_renderer"
-    assert fallback_reason == "grounding_failure:ValueError"
+    assert fallback_reason == "grounding_failure:response_metric_mismatch"
+    assert "ValueError" not in fallback_reason
     assert attempts == 2
     assert "orders" in answer and "2" in answer
     assert claims[0]["metric"] == "failure_count"
@@ -126,6 +129,32 @@ def test_verified_results_cannot_add_an_unproven_negative_conclusion():
     )
 
     assert source == "deterministic_evidence_renderer"
-    assert fallback_reason == "grounding_failure:ValueError"
+    assert fallback_reason == "grounding_failure:response_negative_claim"
+    assert "ValueError" not in fallback_reason
     assert attempts == 2
     assert "không có connector" not in answer.lower()
+
+
+def test_analytics_response_malformed_output_uses_safe_fallback_reason():
+    answer, source, fallback_reason, attempts, _claims = AnalyticsResponseComposer(
+        lambda _messages, **_kwargs: "private malformed output"
+    ).compose(presentation=_presentation())
+
+    assert source == "deterministic_evidence_renderer"
+    assert fallback_reason == "grounding_failure:response_invalid_json"
+    assert "private malformed output" not in fallback_reason
+    assert attempts == 2
+    assert "orders" in answer
+
+
+def test_analytics_response_timeout_uses_provider_category_without_exception_name():
+    answer, source, fallback_reason, attempts, _claims = AnalyticsResponseComposer(
+        lambda _messages, **_kwargs: (_ for _ in ()).throw(httpx.TimeoutException("private timeout"))
+    ).compose(presentation=_presentation())
+
+    assert source == "deterministic_evidence_renderer"
+    assert fallback_reason == "grounding_failure:response_timeout"
+    assert "TimeoutException" not in fallback_reason
+    assert "private timeout" not in fallback_reason
+    assert attempts == 2
+    assert "orders" in answer

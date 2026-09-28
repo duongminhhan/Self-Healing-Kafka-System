@@ -47,6 +47,8 @@ def _empty_analytics_fields() -> dict[str, Any]:
         "presentation": None,
         "evidence_ids": [],
         "analytics_evidence": [],
+        "analytics_fallback_reason": None,
+        "runbook_fallback_reason": None,
         "claims": [],
         "runbook_claims": [],
     }
@@ -198,7 +200,9 @@ class RunbookRagWorkflow:
             "route": route.value,
             "source": "combined" if keep_analytics and chunks else ("analytics" if keep_analytics else composed.source),
             "citations": [item.to_dict() for item in composed.citations],
-            "fallback_reason": composed.fallback_reason,
+            "fallback_reason": composed.fallback_reason or analytics_result.get("fallback_reason"),
+            "analytics_fallback_reason": analytics_result.get("fallback_reason") if keep_analytics else None,
+            "runbook_fallback_reason": composed.fallback_reason,
             "status": (
                 str(analytics_result.get("status") or "ok")
                 if keep_analytics else ("ok" if chunks or composed.source == "analytics" else "no_answer")
@@ -250,18 +254,24 @@ class RunbookRagWorkflow:
         retrieval_hits: int,
         search_diagnostics: SearchDiagnostics | None = None,
     ) -> None:
-        search = search_diagnostics.to_dict() if search_diagnostics is not None else {}
-        logger.info(
-            "Runbook RAG request completed",
-            extra={
-                "event": "runbook_rag_completed",
-                "route": route,
-                "source": result.get("source"),
-                "fallback_reason": result.get("fallback_reason"),
+        is_rag = route in {Route.RUNBOOK.value, Route.COMBINED.value}
+        details = {
+            "event": "runbook_rag_completed" if is_rag else "analytics_response_completed",
+            "route": route,
+            "source": result.get("source"),
+            "fallback_reason": result.get("fallback_reason"),
+            "analytics_fallback_reason": result.get("analytics_fallback_reason"),
+            "runbook_fallback_reason": result.get("runbook_fallback_reason"),
+            "latency_seconds": round(time.perf_counter() - started, 6),
+        }
+        if is_rag:
+            details.update({
                 "retrieval_hits": retrieval_hits,
-                "latency_seconds": round(time.perf_counter() - started, 6),
-                "retrieval": search,
-            },
+                "retrieval": search_diagnostics.to_dict() if search_diagnostics is not None else {},
+            })
+        logger.info(
+            "Runbook RAG request completed" if is_rag else "Analytics response completed",
+            extra=details,
         )
 
 
@@ -272,6 +282,8 @@ def _analytics_envelope(result: dict[str, Any]) -> dict[str, Any]:
         "source": result.get("source") or "analytics",
         "citations": [],
         "fallback_reason": result.get("fallback_reason"),
+        "analytics_fallback_reason": result.get("fallback_reason"),
+        "runbook_fallback_reason": None,
         "status": result.get("status") or "ok",
         "reason": result.get("reason"),
         "recommended_runbooks": [],
@@ -292,6 +304,8 @@ def _rag_failure_result(analytics_result: dict[str, Any], route: Route, reason: 
             "source": analytics_result.get("source") or "analytics",
             "citations": [],
             "fallback_reason": reason,
+            "analytics_fallback_reason": analytics_result.get("fallback_reason"),
+            "runbook_fallback_reason": reason,
             # RAG availability is separate from whether the analytics evidence
             # was complete.  Do not relabel a verified analytics answer as a
             # data failure merely because supplementary guidance failed.
@@ -308,6 +322,8 @@ def _rag_failure_result(analytics_result: dict[str, Any], route: Route, reason: 
         "source": "deterministic_fallback",
         "citations": [],
         "fallback_reason": reason,
+        "analytics_fallback_reason": None,
+        "runbook_fallback_reason": reason,
         "status": "degraded",
         "outcome": "degraded",
         "query_executed": False,
@@ -377,10 +393,7 @@ def _response_evidence(chunks: list[RetrievedChunk], query: RetrievalQuery) -> l
         else:
             match_basis = "semantic_plan"
         result.append({
-            "runbook_id": chunk.runbook_id,
-            "version": chunk.version,
-            "section": chunk.section,
-            "source": chunk.source,
+            **chunk.citation().to_dict(),
             "match_basis": match_basis,
             "matched_error_codes": matched_codes,
             "matched_config_keys": [],
@@ -400,7 +413,7 @@ def _recommended_runbooks(chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
         if identity in seen:
             continue
         seen.add(identity)
-        result.append({"runbook_id": chunk.runbook_id, "title": chunk.title, "version": chunk.version})
+        result.append(chunk.citation().to_dict())
         if len(result) >= 5:
             break
     return result

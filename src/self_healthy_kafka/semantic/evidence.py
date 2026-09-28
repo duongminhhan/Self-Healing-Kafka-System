@@ -8,6 +8,8 @@ import re
 from datetime import datetime
 from typing import Any, Callable
 
+import httpx
+
 from self_healthy_kafka.semantic.catalog import SEMANTIC_CATALOG
 from self_healthy_kafka.semantic.planner import SemanticPlan
 from self_healthy_kafka.semantic.presentation import PresentationFacts, SemanticResponseRenderer
@@ -115,7 +117,10 @@ def build_evidence(
         evidence.append(
             {
                 "fact_id": f"analytics:{digest}",
-                "rank": int(rank_value) if isinstance(rank_value, int) and rank_value > 0 else (position if query_plan.group_by else None),
+                "rank": (
+                    int(rank_value) if isinstance(rank_value, int) and rank_value > 0
+                    else (position if query_plan.group_by and query_plan.ranking is not None else None)
+                ),
                 "tie_count": int(tie_count_value) if isinstance(tie_count_value, int) else None,
                 "coverage": "boundary_tie_truncated" if fact.get("tie_truncated") else ("incomplete" if truncated else "complete"),
                 "dimension": list(query_plan.group_by),
@@ -149,20 +154,27 @@ def render_evidence(presentation: PresentationFacts) -> str:
     evidence = [dict(item) for item in presentation.summary_rows]
     if not presentation.query_executed or not presentation.evidence_complete or not evidence:
         raise ValueError("render_evidence requires complete, non-empty evidence")
-    source = _PRESENTATION["sources"].get(presentation.source, presentation.source)
-    scope = f"Trong {source} {presentation.time_scope},"
+    population_lead = _population_lead(presentation, evidence)
+    if population_lead is not None:
+        lead = population_lead
+        notice = _summary_notice(presentation)
+        if notice:
+            lead += f"\n\n{notice}"
+        return lead
     first_text = _fact_text(
-        evidence[0], include_rank=len(evidence) == 1, include_tie=False,
+        evidence[0], include_rank=presentation.ranking is not None and len(evidence) == 1, include_tie=False,
         details_limit=presentation.summary_detail_limit,
     )
     if len(evidence) == 1:
-        lead = f"{scope} {first_text}."
+        lead = f"{first_text}."
     else:
         lines = [
-            f"{index}. {_fact_text(item, include_rank=False, include_tie=False, details_limit=presentation.summary_detail_limit)}."
+            f"- {_fact_text(item, include_rank=presentation.ranking is not None, include_tie=False, details_limit=presentation.summary_detail_limit)}."
             for index, item in enumerate(evidence, start=1)
         ]
-        lead = f"{scope}\n\n" + "\n".join(lines)
+        lead = f"Đã xác minh {len(evidence)} kết quả:\n\n" + "\n".join(lines)
+    if presentation.time_scope_origin != "unspecified":
+        lead += f"\n\nPhạm vi: {presentation.time_scope}."
     notice = _summary_notice(presentation)
     if notice:
         lead += f"\n\n{notice}"
@@ -194,6 +206,7 @@ class AnalyticsResponseComposer:
             answer = render_evidence(presentation)
             return answer, "deterministic_evidence_renderer", "response_model_not_configured", 0, _deterministic_claims(summary_evidence)
         correction: str | None = None
+        failure_reason: str | None = None
         for attempt in range(1, 3):
             try:
                 candidate = self._generate(
@@ -205,9 +218,16 @@ class AnalyticsResponseComposer:
                     answer = f"{answer.rstrip()}\n\n{notice}"
                 return answer, "huggingface", None, attempt, claims
             except Exception as exc:
-                correction = _error_label(exc)
+                failure_reason = _response_failure_reason(exc)
+                correction = _response_correction_feedback(failure_reason)
         answer = render_evidence(presentation)
-        return answer, "deterministic_evidence_renderer", f"grounding_failure:{correction}", 2, _deterministic_claims(summary_evidence)
+        return (
+            answer,
+            "deterministic_evidence_renderer",
+            f"grounding_failure:{failure_reason or 'response_grounding_failure'}",
+            2,
+            _deterministic_claims(summary_evidence),
+        )
 
 
 def _messages(
@@ -216,6 +236,9 @@ def _messages(
 ) -> list[dict[str, str]]:
     system = (
         "Return only JSON with keys answer and claims. Write concise natural Vietnamese in answer, using at most three short facts. "
+        "Lead with the direct conclusion; do not begin every answer with the source label. "
+        "Do not mention a rank or tie unless presentation_facts.ranking is non-null. "
+        "Do not repeat source, snapshot, or timezone metadata unless it disambiguates the requested time scope. "
         "Do not use SQL, raw logs, credentials, or hidden diagnostics. Each factual statement about an entity, "
         "metric, value, time, status, error code, or message must have one matching claim. A claim has exactly "
         "fact_id, entity, metric, value, time_range, status, and text. metric is either a metric name or "
@@ -398,6 +421,45 @@ def _fact_text(
     return f"{rank_prefix}{prefix} có {', '.join(metrics)}{tie_suffix}{detail_suffix}"
 
 
+def _population_lead(
+    presentation: PresentationFacts, evidence: list[dict[str, Any]]
+) -> str | None:
+    """Lead unranked connector populations with the conclusion, not metadata."""
+
+    if presentation.ranking is not None or presentation.subject not in {
+        "connector", "root_connector", "current_connector"
+    } or any(condition.field == "connector" for condition in presentation.conditions) or any(
+        item.get("details") or len(item.get("entity") or {}) != 1 for item in evidence
+    ):
+        return None
+    subject = _PRESENTATION["subjects"].get(presentation.subject, {})
+    label = str(subject.get("plural_vi") or "connector")
+    lines = [f"- {_population_fact_text(item)}." for item in evidence]
+    incident_phrase = " gặp sự cố" if any(
+        condition.field == "outcome" and condition.value == "FAILED"
+        for condition in presentation.conditions
+    ) else ""
+    time_phrase = (
+        f" {presentation.time_scope}" if presentation.time_scope_origin != "unspecified" else ""
+    )
+    prefix = (
+        f"Có. Đã ghi nhận {presentation.result_total_count} {label}{incident_phrase}{time_phrase}:"
+    )
+    return prefix + (f"\n\n{lines[0]}" if len(lines) == 1 else "\n\n" + "\n".join(lines))
+
+
+def _population_fact_text(fact: dict[str, Any]) -> str:
+    entity = ", ".join(str(value) for value in fact["entity"].values()) or "Toàn bộ phạm vi"
+    metrics = []
+    for metric in fact["metrics"]:
+        value = metric["value"]
+        metrics.append(
+            f"{value} {metric['unit']}" if value is not None
+            else f"{metric['label']} chưa thể tính từ dữ liệu hợp lệ"
+        )
+    return f"{entity}: {', '.join(metrics)}"
+
+
 def _summary_notice(presentation: PresentationFacts) -> str | None:
     if not presentation.has_more_verified_results or not presentation.detail_accessible:
         return None
@@ -478,5 +540,52 @@ def _contains_empty_conclusion(text: str) -> bool:
     ))
 
 
-def _error_label(exc: Exception) -> str:
-    return type(exc).__name__
+def _response_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return "response_timeout"
+    if isinstance(exc, httpx.RequestError):
+        return "response_service_error"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in {401, 403}:
+            return "response_authentication"
+        if status == 402:
+            return "response_quota_or_billing"
+        if status == 429:
+            return "response_rate_limited"
+        if status >= 500:
+            return "response_service_error"
+        return f"response_http_error_{status}"
+    if not isinstance(exc, ValueError):
+        return "response_generation_failure"
+    detail = str(exc)
+    if detail.startswith("Hugging Face") or detail == "response is not an object":
+        return "response_invalid_json"
+    if "scope" in detail or "unknown evidence" in detail or "omits its entity" in detail:
+        return "response_scope_mismatch"
+    if "metric/value" in detail or "bind metric" in detail or "bind detail" in detail:
+        return "response_metric_mismatch"
+    if "negative conclusion" in detail or "negates a positive" in detail:
+        return "response_negative_claim"
+    if "claim" in detail or "answer" in detail or "response" in detail:
+        return "response_claim_contract"
+    return "response_grounding_failure"
+
+
+def _response_correction_feedback(reason: str) -> str:
+    feedback = {
+        "response_invalid_json": "Return only one complete JSON object with answer and claims.",
+        "response_scope_mismatch": (
+            "Copy fact_id, entity, time_range, and status exactly from one summary row."
+        ),
+        "response_metric_mismatch": (
+            "Copy metric and value exactly from the same summary row and bind both in claim.text."
+        ),
+        "response_negative_claim": (
+            "Do not add a no-result or negative conclusion when verified evidence contains results."
+        ),
+        "response_claim_contract": (
+            "Return answer plus at least one claim using exactly the required claim fields."
+        ),
+    }
+    return feedback.get(reason, "Return a concise response grounded only in the supplied summary rows.")

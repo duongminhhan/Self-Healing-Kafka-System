@@ -18,10 +18,28 @@ http.createServer(async (req, res) => {
       conversation:{id:conversation_id,context_used:false,action:"out_of_scope"},
     })); return;
   }
+  if(question === "Tuần này có connector nào gặp sự cố không?") {
+    res.setHeader("Content-Type","application/json");
+    res.end(JSON.stringify({
+      answer:"Có. Tuần này ghi nhận 1 connector gặp sự cố: orders với 1 incident.",
+      route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",
+      query_executed:true,evidence_complete:true,row_count:1,
+      conversation:{id:conversation_id,context_used:false,action:"start"},
+    })); return;
+  }
+  if(question === "Lỗi này có nghiêm trọng không?") {
+    res.setHeader("Content-Type","application/json");
+    res.end(JSON.stringify({
+      answer:"Lỗi của connector orders có mức độ nghiêm trọng đã ghi nhận là CRITICAL.",
+      route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",
+      query_executed:true,evidence_complete:true,row_count:1,
+      conversation:{id:conversation_id,context_used:true,action:"continue"},
+    })); return;
+  }
   if(question === "Verified empty outcome test") {
     res.setHeader("Content-Type","application/json");
     res.end(JSON.stringify({
-      answer:"Trong snapshot incident hiện tại, chưa ghi nhận connector nào có trạng thái FAILED trong ngày hôm nay theo múi giờ Asia/Ho_Chi_Minh.",
+      answer:"Không. Chưa ghi nhận connector nào có trạng thái FAILED trong ngày hôm nay theo múi giờ Asia/Ho_Chi_Minh.",
       route:"analytics",source:"deterministic_outcome_renderer",outcome:"verified_empty",query_executed:true,evidence_complete:true,row_count:0,
       source_kind:"historical_incident_snapshot",snapshot_freshness:"historical_incident_snapshot",
       time_range_applied:{from_at:"2026-09-14T00:00:00+07:00",to_at:"2026-09-14T09:00:00+07:00",timezone:"Asia/Ho_Chi_Minh",timestamp:"failure_at"},
@@ -43,7 +61,7 @@ http.createServer(async (req, res) => {
   if(question === "Connector ranking response test") {
     res.setHeader("Content-Type","application/json");
     res.end(JSON.stringify({
-      answer:"Trên toàn bộ snapshot hiện có, connector sample-oracle-orders có số incident là 4.",
+      answer:"Trong toàn bộ dữ liệu incident hiện có, connector sample-oracle-orders có số incident là 4.",
       route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",query_executed:true,evidence_complete:true,row_count:1,
       conversation:{id:conversation_id,context_used:false,action:"start"},
     })); return;
@@ -51,7 +69,7 @@ http.createServer(async (req, res) => {
   if(question === "Error ranking response test") {
     res.setHeader("Content-Type","application/json");
     res.end(JSON.stringify({
-      answer:"Trên toàn bộ snapshot hiện có, mã lỗi ORA-01013 có số incident là 6.",
+      answer:"Trong toàn bộ dữ liệu incident hiện có, mã lỗi ORA-01013 có số incident là 6.",
       route:"analytics",source:"deterministic_evidence_renderer",outcome:"verified_results",query_executed:true,evidence_complete:true,row_count:1,
       conversation:{id:conversation_id,context_used:false,action:"start"},
     })); return;
@@ -66,7 +84,7 @@ http.createServer(async (req, res) => {
   }
   if(question === "Fallback test") {
     res.setHeader("Content-Type","application/json");
-    res.end(JSON.stringify({answer:"",verified_result:{rows:[{incident_count:75}]},fallback_reason:"unsupported_numeric_claim"})); return;
+    res.end(JSON.stringify({answer:"",verified_result:{rows:[{incident_count:75}]},fallback_reason:"grounding_failure:ValueError",diagnostics:{raw_prompt:"private prompt",provider:"internal-provider"}})); return;
   }
   if(question === "Long test") {
     res.setHeader("Content-Type","application/json");
@@ -98,7 +116,7 @@ http.createServer(async (req, res) => {
   if (question === "Retry test" && count === 1) { res.writeHead(503); res.end("private backend failure"); return; }
   const timer = setTimeout(() => {
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ answer: "Connector orders có 2 incident trong dữ liệu thử nghiệm.", route: "analytics", source: "verified_sql", row_count:1, request_id:"request-e2e-123456", citations: [{ runbook_id: "connection-failure", version: 1, section: "recovery", url: "https://example.org/runbook" }], diagnostics: { row_count: 1 }, conversation:{id:conversation_id,context_used:false,action:"start"} }));
+    res.end(JSON.stringify({ answer: "Connector orders có 2 incident trong dữ liệu thử nghiệm.", route: "analytics", source: "verified_sql", row_count:1, request_id:"request-e2e-123456", citations: [{ runbook_id: "RB-ORACLE-003", version: 1, section: "diagnostic_steps", url: "/runbooks/RB-ORACLE-003?v=1#diagnostic_steps" }], diagnostics: { row_count: 1 }, conversation:{id:conversation_id,context_used:false,action:"start"} }));
   }, question === "Cancel test" ? 8000 : question === "Connector nào lỗi?" ? 1500 : 700);
   res.on("close", () => clearTimeout(timer));
 }).listen(Number(process.env.MOCK_BACKEND_PORT??"18080"), "127.0.0.1");

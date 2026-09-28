@@ -122,6 +122,8 @@ class _ConversationState:
     exception_class: str | None
 
     def planner_context(self) -> dict[str, Any]:
+        if self.outcome not in {"verified_results", "verified_empty"}:
+            return {"previous_outcome": self.outcome}
         context = {
             **self.semantic_plan.context(),
             "previous_query_plan": self.query_plan.to_dict() if self.query_plan else None,
@@ -135,17 +137,23 @@ class _ConversationState:
     def jev_context(self) -> dict[str, Any]:
         """Return only bounded incident metadata, never plans, SQL, or raw facts."""
 
+        verified = self.outcome in {"verified_results", "verified_empty"}
         context: dict[str, Any] = {
             "previous_route": self.route,
             "previous_outcome": self.outcome,
             "source_kind": self.source_kind,
-            "verified": self.outcome in {"verified_results", "verified_empty"},
+            "verified": verified,
+        }
+        if not verified:
+            return sanitize_jev_context(context)
+        context.update({
             "evidence_ids": list(self.evidence_ids[:20]),
+            "fact_count": self.fact_count,
             "connector": self.connector,
             "root_connector": self.root_connector,
             "error_code": self.error_code,
             "exception_class": self.exception_class,
-        }
+        })
         if self.query_plan is not None:
             context["connector"] = self.query_plan.connector_name or self.connector
             context["error_code"] = self.query_plan.error_code or self.error_code
@@ -158,13 +166,14 @@ def _uses_conversation_context(
     plan: SemanticPlan,
     prior: _ConversationState,
 ) -> bool:
+    if prior.outcome not in {"verified_results", "verified_empty"}:
+        return False
     if plan.inherited_fields:
         return True
     cues = semantic_cue_contract(question)
     request = plan.data_request
     if (
-        prior.outcome not in {"verified_results", "verified_empty"}
-        or request is None
+        request is None
         or not cues.detail_fields
         or cues.subject is not None
     ):
@@ -183,9 +192,31 @@ def _uses_conversation_context(
     ):
         return True
     return bool(
-        prior.query_plan
+        prior.fact_count == 1
+        and len(prior.evidence_ids) == 1
+        and (prior.connector or prior.root_connector)
+        and prior.query_plan
         and prior.query_plan.time_range
         and request.get("time_scope") == prior.query_plan.time_range.to_dict()
+    )
+
+
+def _requires_verified_context(question: str) -> bool:
+    cues = semantic_cue_contract(question)
+    return bool(
+        cues.detail_fields
+        and cues.subject is None
+        and cues.connector_name is None
+        and cues.error_code is None
+    )
+
+
+def _has_unambiguous_verified_context(state: _ConversationState) -> bool:
+    return bool(
+        state.outcome == "verified_results"
+        and state.fact_count == 1
+        and len(state.evidence_ids) == 1
+        and (state.connector or state.root_connector)
     )
 
 
@@ -355,6 +386,33 @@ class AnalyticsChatService:
                     logger.info("JEV shadow classification unavailable", extra={"event": "jev_shadow_unavailable"})
             elif error or decision.classification != "in_scope":
                 return self._relevance_result(decision, error=error, conversation_id=conversation_id)
+        if _requires_verified_context(question) and (
+            prior is None or not _has_unambiguous_verified_context(prior)
+        ):
+            outcome = needs_clarification(reason="ambiguous_verified_context")
+            result = {
+                "answer": "Mình cần biết connector hoặc incident cụ thể để xác định mức độ nghiêm trọng.",
+                "route": "clarification",
+                "source": "verified_context_guard",
+                **outcome.to_dict(),
+                "status": outcome.outcome,
+                "fallback_reason": outcome.reason,
+                "citations": [],
+                "sources": [],
+                "evidence": [],
+                "recommended_runbooks": [],
+                "candidates": [],
+                "query_plan": None,
+                "semantic_plan": None,
+                "evidence_ids": [],
+                "model_usage": {"planning": [], "analytics_response": [], "runbook": []},
+            }
+            return self._with_conversation(
+                result,
+                conversation_id,
+                context_used=False,
+                action="clarification",
+            )
         planning_model_index = self._qwen.call_count
         try:
             semantic_plan, planning_attempts = self._planner.plan(
@@ -436,6 +494,8 @@ class AnalyticsChatService:
         result["semantic_plan"] = semantic_plan.to_dict()
         result["planning_attempts"] = planning_attempts
         analytics_calls = result.pop("_analytics_model_calls", [])
+        if not isinstance(analytics_calls, list):
+            analytics_calls = []
         execution_calls = self._qwen.calls_since(execution_model_index)
         result["model_usage"] = {
             "planning": planning_calls,
@@ -778,7 +838,7 @@ class AnalyticsChatService:
             database_rows = self._run_compiled_query(compiled)
         except Exception as exc:
             return _execution_failure(
-                "analytics_source_unavailable", exception=exc, timezone_name=self._config.timezone
+                "query_failed", exception=exc, timezone_name=self._config.timezone
             )
         truncated = len(database_rows) > _MAX_EXECUTED_RESULT_ROWS
         facts = _compiled_result_facts(database_rows[:_MAX_EXECUTED_RESULT_ROWS], plan)
@@ -1030,6 +1090,8 @@ class AnalyticsChatService:
         *,
         result: dict[str, Any],
     ) -> None:
+        if result.get("outcome") not in {"verified_results", "verified_empty"}:
+            return
         query_plan = internal.get("plan")
         if query_plan is not None and not isinstance(query_plan, QueryPlan):
             return
@@ -1231,7 +1293,7 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
             metrics[metric.name] for metric in plan.metrics
         ]
         required.extend(detail_aliases[field] for field in plan.details)
-        if plan.group_by:
+        if plan.group_by and plan.ranking is not None:
             required.extend(["rank", "tie_count", "row_number"])
         if any(field not in row for field in required):
             # The query did run, but a changed view/driver result cannot be
@@ -1274,7 +1336,7 @@ def _compiled_result_facts(rows: list[dict[str, Any]], plan: QueryPlan) -> list[
             item for item in str(raw_ids or "").split(";") if item
         ]
         facts.append(fact)
-    if plan.tie_policy == "exact_limit" and facts and plan.group_by:
+    if plan.ranking is not None and plan.tie_policy == "exact_limit" and facts and plan.group_by:
         boundary = facts[-1].get(plan.order_by)
         selected = sum(1 for item in facts if item.get(plan.order_by) == boundary)
         for fact in facts:
@@ -1313,9 +1375,14 @@ def _conversation_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 context["evidence_ids"].extend(value.split(";") if field == "evidence_ids" else [value])
             elif isinstance(value, (list, tuple)):
                 context["evidence_ids"].extend(value)
-        for target, field_names in _CONVERSATION_METADATA_FIELDS.items():
-            if context.get(target) is None:
-                context[target] = next((row.get(field) for field in field_names if row.get(field)), None)
+    for target, field_names in _CONVERSATION_METADATA_FIELDS.items():
+        values = {
+            str(value)
+            for row in rows[:MAX_LIMIT]
+            if (value := next((row.get(field) for field in field_names if row.get(field)), None))
+        }
+        if len(values) == 1:
+            context[target] = values.pop()
     return sanitize_jev_context(context)
 
 
@@ -1390,7 +1457,7 @@ def _aggregate(rows: list[dict[str, Any]], plan: QueryPlan) -> list[dict[str, An
     present.sort(key=lambda item: tuple(str(item.get(field) or "") for field in plan.group_by))
     present.sort(key=lambda item: item[plan.order_by], reverse=plan.direction == "desc")
     ordered = present + missing
-    if not plan.group_by:
+    if not plan.group_by or plan.ranking is None:
         return ordered[:plan.limit]
     # The fallback aggregation exists for offline fixtures and unsupported
     # projections.  It applies exactly the same ranking semantics as the

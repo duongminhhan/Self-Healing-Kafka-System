@@ -68,7 +68,7 @@ def test_empty_renderer_uses_catalog_conditions_not_an_intent_sentence():
     assert presentation.subject == "root_connector"
     assert presentation.condition == {"field": "outcome", "operator": "equals", "value": "FAILED"}
     assert answer == (
-        "Trong snapshot incident hiện tại, chưa ghi nhận root connector nào có trạng thái FAILED "
+        "Không. Chưa ghi nhận connector nào có trạng thái FAILED "
         "trong ngày hôm nay theo múi giờ Asia/Ho_Chi_Minh."
     )
 
@@ -84,8 +84,9 @@ def test_empty_renderer_is_generic_across_catalog_subjects(dimensions, expected_
     answer = SemanticResponseRenderer().render_outcome(presentation)
 
     assert presentation.subject == expected_subject
-    assert "chưa ghi nhận" in answer
-    assert "snapshot incident hiện tại" in answer
+    assert "chưa ghi nhận" in answer.lower()
+    assert "snapshot incident hiện tại" not in answer.lower()
+    assert "root connector" not in answer.lower()
 
 
 def test_unspecified_time_scope_renders_all_snapshot_without_today():
@@ -94,10 +95,10 @@ def test_unspecified_time_scope_renders_all_snapshot_without_today():
 
     answer = SemanticResponseRenderer().render_outcome(presentation)
 
-    assert presentation.time_scope == "trên toàn bộ snapshot hiện có"
+    assert presentation.time_scope == "trong toàn bộ dữ liệu incident hiện có"
     assert presentation.time_scope_origin == "unspecified"
     assert "hôm nay" not in answer.lower()
-    assert "toàn bộ snapshot" in answer
+    assert "toàn bộ dữ liệu incident" in answer
 
 
 def test_non_empty_outcome_never_uses_the_empty_claim_renderer():
@@ -111,8 +112,9 @@ def test_non_empty_outcome_never_uses_the_empty_claim_renderer():
 
     answer = SemanticResponseRenderer().render_outcome(presentation)
 
-    assert "đã xác minh 1 root connector" in answer
-    assert "chưa ghi nhận" not in answer
+    assert "đã xác minh 1 connector" in answer.lower()
+    assert "root connector" not in answer.lower()
+    assert "chưa ghi nhận" not in answer.lower()
 
 
 @pytest.mark.parametrize(
@@ -130,6 +132,27 @@ def test_unverified_outcomes_do_not_make_negative_data_claims(outcome):
     assert "chưa ghi nhận" not in answer
     assert "không có connector" not in answer
     assert "xác minh" in answer
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (cannot_verify(reason="snapshot_stale"), "Snapshot incident chưa đủ mới"),
+        (cannot_verify(reason="query_failed"), "Truy vấn dữ liệu incident không hoàn tất"),
+        (
+            cannot_verify(reason="incomplete_result_coverage", query_executed=True, row_count=1),
+            "dữ liệu kiểm chứng chưa đầy đủ",
+        ),
+        (degraded(reason="source_unavailable"), "Nguồn dữ liệu incident hiện không truy cập được"),
+    ],
+)
+def test_public_failure_categories_are_distinct_and_actionable(outcome, expected):
+    answer = SemanticResponseRenderer().render_outcome(
+        _presentation(_plan(dimensions=["root_connector"]), outcome)
+    )
+
+    assert expected in answer
+    assert "không có sự cố" in answer
 
 
 def test_clarification_uses_the_validated_clarification_fact_only():

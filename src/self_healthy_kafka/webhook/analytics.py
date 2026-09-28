@@ -103,6 +103,8 @@ class QueryPlan:
     limit: int
     comparison: str | None
     details: tuple[str, ...] = ()
+    # None means the user asked for a population, not a top-N ranking.
+    ranking: str | None = None
     # Ranking defaults to business ranks.  A fixed row count is only used when
     # the user explicitly asks for exactly N connectors.
     tie_policy: str = "include_ties"
@@ -120,7 +122,7 @@ def parse_plan(value: object) -> QueryPlan:
     if not isinstance(value, dict):
         raise ValueError("query plan must be a JSON object")
     if not set(value) <= {
-        "dataset", "metrics", "group_by", "filters", "order_by", "limit", "comparison", "details", "tie_policy"
+        "dataset", "metrics", "group_by", "filters", "order_by", "limit", "comparison", "details", "tie_policy", "ranking"
     }:
         raise ValueError("query plan contains an unsupported field")
     if value.get("dataset") != DATASET:
@@ -177,8 +179,18 @@ def parse_plan(value: object) -> QueryPlan:
     if comparison not in {None, "previous_period"}:
         raise ValueError("comparison is not allowed")
     tie_policy = value.get("tie_policy", "include_ties")
-    if tie_policy not in {"include_ties", "exact_limit"}:
+    ranking = value.get("ranking")
+    if ranking is not None and ranking not in {"ascending", "descending"}:
+        raise ValueError("ranking is not allowed")
+    if ranking is None and "ranking" not in value:
+        # Legacy query-plan fixtures predate the semantic ranking field.
+        ranking = "descending" if direction == "desc" else "ascending"
+    if tie_policy not in {"include_ties", "exact_limit", "none"}:
         raise ValueError("tie_policy is not allowed")
+    if ranking is None:
+        tie_policy = "none"
+    elif tie_policy == "none":
+        raise ValueError("ranked query requires a tie policy")
     if tie_policy == "exact_limit" and not raw_group_by:
         raise ValueError("tie_policy requires a ranked dimension")
     raw_details = value.get("details") or []
@@ -191,7 +203,8 @@ def parse_plan(value: object) -> QueryPlan:
         metrics=tuple(metrics), group_by=tuple(raw_group_by), time_range=time_range,
         event_types=event_types, outcomes=outcomes, connector_name=connector_name,
         error_code=error_code, order_by=order_field, direction=direction, limit=limit,
-        comparison=comparison, details=tuple(dict.fromkeys(raw_details)), tie_policy=tie_policy,
+        comparison=comparison, details=tuple(dict.fromkeys(raw_details)), ranking=ranking,
+        tie_policy=tie_policy,
     )
 
 

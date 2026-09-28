@@ -79,7 +79,8 @@ def test_invalid_qwen_structured_output_uses_grounded_fallback():
     )
 
     assert result.source == "deterministic_fallback"
-    assert result.fallback_reason == "grounding_or_generation_failure:ValueError"
+    assert result.fallback_reason == "runbook_claim_contract"
+    assert "ValueError" not in result.fallback_reason
     assert result.citations[0].runbook_id == "RB-ORACLE-001"
 
 
@@ -179,13 +180,9 @@ def test_question_secret_is_redacted_before_qwen_receives_it():
 
 
 def test_unverified_user_incident_assertion_is_rejected():
-    result = GroundedAnswerComposer(lambda _messages: {
-        "answer": "Connector orders đang báo ORA-01017 nên cần xác minh tài khoản.",
-        "citations": [{
-            "runbook_id": "RB-ORACLE-001", "version": 1,
-            "section": "recovery_steps", "source": "runbooks/oracle/invalid-credentials.md",
-        }],
-    }).compose(
+    result = GroundedAnswerComposer(lambda _messages: _grounded_response(
+        answer="Connector orders đang báo ORA-01017. Hãy xác minh tài khoản."
+    )).compose(
         question="Connector orders đang báo ORA-01017, xử lý thế nào?",
         route=Route.COMBINED,
         analytics_facts=[],
@@ -193,7 +190,8 @@ def test_unverified_user_incident_assertion_is_rejected():
     )
 
     assert result.source == "deterministic_fallback"
-    assert result.fallback_reason == "grounding_or_generation_failure:ValueError"
+    assert result.fallback_reason == "runbook_grounding_failure"
+    assert "ValueError" not in result.fallback_reason
     assert "orders đang báo" not in result.answer
 
 
@@ -303,6 +301,16 @@ def test_qwen_http_status_is_classified_in_fallback_reason():
     assert result.fallback_reason == "qwen_quota_or_billing"
 
 
+def test_qwen_timeout_is_classified_without_exception_name():
+    result = GroundedAnswerComposer(
+        lambda _messages: (_ for _ in ()).throw(httpx.TimeoutException("private timeout"))
+    ).compose(question="Help", route=Route.RUNBOOK, analytics_facts=[], chunks=[_chunk()])
+
+    assert result.source == "deterministic_fallback"
+    assert result.fallback_reason == "qwen_timeout"
+    assert "TimeoutException" not in result.fallback_reason
+
+
 def test_grounding_retries_once_then_accepts_a_corrected_claim_contract():
     responses = iter([{}, _grounded_response()])
     calls = []
@@ -386,4 +394,5 @@ def test_claim_cannot_cite_one_section_but_quote_another_section():
     )
 
     assert result.source == "deterministic_fallback"
-    assert result.fallback_reason == "grounding_or_generation_failure:ValueError"
+    assert result.fallback_reason == "runbook_claim_contract"
+    assert "ValueError" not in result.fallback_reason
