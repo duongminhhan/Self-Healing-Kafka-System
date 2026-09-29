@@ -382,6 +382,31 @@ def test_cue_contract_extracts_only_a_named_connector_as_a_hard_filter():
     assert semantic_cue_contract("connector orders bị lỗi gì?").connector_name == "orders"
 
 
+@pytest.mark.parametrize("connector", [
+    "test-connector-ora-01013-20260921",
+    "test.connector.ora.01013",
+    "test_connector_ora_01013",
+])
+def test_cue_contract_does_not_treat_bare_connector_ids_as_error_codes(connector):
+    cues = semantic_cue_contract(f"{connector} bị lỗi gì?")
+
+    assert cues.connector_name == connector
+    assert cues.error_code is None
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("ORA-01013 nghĩa là gì?", "ORA-01013"),
+        ("SQLSTATE 08001 nghĩa là gì?", "SQLSTATE-08001"),
+        ("HTTP 500 có ý nghĩa gì?", "HTTP-500"),
+        ("CONNECT_TIMEOUT là lỗi gì?", "CONNECT_TIMEOUT"),
+    ],
+)
+def test_cue_contract_keeps_supported_error_code_shapes(question, expected):
+    assert semantic_cue_contract(question).error_code == expected
+
+
 @pytest.mark.parametrize(
     ("question", "outcome"),
     [

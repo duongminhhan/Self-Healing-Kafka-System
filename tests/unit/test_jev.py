@@ -387,6 +387,38 @@ def test_ambiguous_verified_context_clarifies_without_selecting_a_connector():
     assert "connector" not in provider.calls[1]["context"]
 
 
+def test_single_aggregate_row_with_multiple_incidents_still_requires_clarification():
+    provider = MockJEVProvider({"classification": "in_scope"})
+    planner_calls = []
+    query_calls = []
+
+    def generate(messages, **_kwargs):
+        planner_calls.append(messages)
+        return _plan()
+
+    service = AnalyticsChatService(
+        AnalyticsChatConfig(**{**_config("enforce").__dict__, "fact_source": "dbt"}),
+        incident_facts=lambda **_kwargs: pytest.fail("legacy source must not be called"),
+        execute_incident_query=lambda **kwargs: query_calls.append(kwargs) or [{
+            "current_connector_name": "orders",
+            "incident_count": 2,
+            "evidence_ids": "representative-incident",
+        }],
+        semantic_planner=SemanticPlanner(generate, enforce_cues=False),
+        jev_adapter=provider,
+    )
+
+    first = service.ask("Có connector nào bị lỗi hôm nay không?", conversation_id="aggregate")
+    result = service.ask("Lỗi này có nghiêm trọng không?", conversation_id="aggregate")
+
+    assert first["outcome"] == "verified_results"
+    assert first["verified_result"]["rows"][0]["failure_count"] == 2
+    assert result["outcome"] == "needs_clarification"
+    assert result["query_executed"] is False
+    assert len(planner_calls) == 1
+    assert len(query_calls) == 1
+
+
 def test_unverified_outcome_is_not_retained_for_a_follow_up():
     provider = MockJEVProvider({"classification": "in_scope"})
     planner_calls = []
@@ -414,6 +446,43 @@ def test_unverified_outcome_is_not_retained_for_a_follow_up():
     assert second["query_executed"] is True
     assert len(planner_calls) == 2
     assert provider.calls[1]["context"] == {}
+
+
+def test_unverified_turn_clears_an_older_verified_context():
+    provider = MockJEVProvider({"classification": "in_scope"})
+    planner_calls = []
+    plans = [_plan(), _plan()]
+    plans[1]["data_request"]["filters"]["connector"] = "payments"
+    plans[1]["data_request"]["detail_fields"] = ["severity"]
+    rows = iter([
+        [{"incident_id": "one", "connector_name": "orders", "severity": "WARNING"}],
+        [{"incident_id": "two", "connector_name": "payments"}],
+    ])
+
+    def generate(messages, **_kwargs):
+        planner_calls.append(messages)
+        return plans[len(planner_calls) - 1]
+
+    service = AnalyticsChatService(
+        _config("enforce"),
+        incident_facts=lambda **_kwargs: next(rows),
+        semantic_planner=SemanticPlanner(generate, enforce_cues=False),
+        jev_adapter=provider,
+    )
+
+    first = service.ask("Connector orders gặp lỗi gì?", conversation_id="stale")
+    second = service.ask(
+        "Mức độ nghiêm trọng của connector payments là gì?", conversation_id="stale"
+    )
+    third = service.ask("Lỗi này có nghiêm trọng không?", conversation_id="stale")
+
+    assert first["outcome"] == "verified_results"
+    assert second["outcome"] == "cannot_verify"
+    assert "stale" not in service._conversation_states
+    assert third["outcome"] == "needs_clarification"
+    assert third["query_executed"] is False
+    assert len(planner_calls) == 2
+    assert provider.calls[2]["context"] == {}
 
 
 def test_expired_conversation_context_is_not_sent_to_jev():
