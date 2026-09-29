@@ -67,15 +67,23 @@ _SUBJECT_ALIASES = {
 }
 _TIME_SCOPE_ORIGINS = {"explicit", "inherited", "default", "unspecified"}
 _EXPLICIT_ERROR_CODE = re.compile(
-    r"\b(?:ORA-\d{5}|SQLSTATE-?[0-9A-Z]{5}|HTTP-?\d{3}|[A-Z]{2,}[A-Z0-9]*(?:[-_][A-Z0-9]+)+)\b",
+    r"\b(?:ORA-\d{5}|SQLSTATE(?:-|\s)?[0-9A-Z]{5}|HTTP(?:-|\s)?\d{3})\b",
     re.IGNORECASE,
 )
+_SYMBOLIC_ERROR_CODE = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 _CONNECTOR_REFERENCE = re.compile(
     r"\b(?:root\s+|current\s+)?connectors?\b\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9._:-]{0,127})(?=\s|[?!,.;)]|$)",
     re.IGNORECASE,
 )
+_BARE_CONNECTOR_REFERENCE = re.compile(
+    r"\b(?:lỗi|loi|error|failure)\s+(?:của|cua|of|for)\s+"
+    r"([A-Za-z0-9][A-Za-z0-9._:-]{2,127})(?=\s|[?!,.;)]|$)"
+    r"|\b([A-Za-z0-9][A-Za-z0-9._:-]{2,127})\s+"
+    r"(?=(?:bị|bi|có|co|gặp|gap|failed|failure|error|lỗi|loi)\b)",
+    re.IGNORECASE,
+)
 _CONNECTOR_REFERENCE_STOPWORDS = frozenset({
-    "root", "current", "version", "hien", "tai", "nao", "which", "what", "co", "cua",
+    "root", "current", "connector", "connectors", "version", "hien", "tai", "nao", "which", "what", "co", "cua",
     "bi", "gap", "nhieu", "loi", "error", "errors", "failure", "failed", "fail", "su", "nay",
     "status", "state", "health", "healthy", "name", "ten", "dang", "incidents", "incident",
     "today", "this", "week", "last", "month", "is", "are", "have", "has", "did", "do",
@@ -508,6 +516,11 @@ def _explicit_connector_name(question: str) -> str | None:
         normalized = _normalize_question(candidate).strip()
         if normalized not in _CONNECTOR_REFERENCE_STOPWORDS:
             return candidate
+    for match in _BARE_CONNECTOR_REFERENCE.finditer(question):
+        candidate = next(value for value in match.groups() if value).strip()
+        normalized = _normalize_question(candidate).strip()
+        if not candidate.isdigit() and normalized not in _CONNECTOR_REFERENCE_STOPWORDS:
+            return candidate
     return None
 
 
@@ -516,8 +529,10 @@ def _explicit_error_code(question: str) -> str | None:
     searchable = question
     if connector:
         searchable = re.sub(re.escape(connector), " ", searchable, flags=re.IGNORECASE)
-    match = _EXPLICIT_ERROR_CODE.search(searchable)
-    return match.group(0).upper() if match else None
+    match = _EXPLICIT_ERROR_CODE.search(searchable) or _SYMBOLIC_ERROR_CODE.search(searchable)
+    if not match:
+        return None
+    return re.sub(r"^(SQLSTATE|HTTP)\s+", r"\1-", match.group(0), flags=re.IGNORECASE).upper()
 
 
 def _explicit_outcome(normalized_question: str, *, connector_population: bool, has_error: bool) -> str | None:

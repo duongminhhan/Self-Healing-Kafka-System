@@ -112,6 +112,7 @@ class _ConversationState:
     semantic_plan: SemanticPlan
     query_plan: QueryPlan | None
     fact_count: int
+    single_incident: bool
     evidence_ids: tuple[str, ...]
     route: str | None
     outcome: str
@@ -193,6 +194,7 @@ def _uses_conversation_context(
         return True
     return bool(
         prior.fact_count == 1
+        and prior.single_incident
         and len(prior.evidence_ids) == 1
         and (prior.connector or prior.root_connector)
         and prior.query_plan
@@ -215,6 +217,7 @@ def _has_unambiguous_verified_context(state: _ConversationState) -> bool:
     return bool(
         state.outcome == "verified_results"
         and state.fact_count == 1
+        and state.single_incident
         and len(state.evidence_ids) == 1
         and (state.connector or state.root_connector)
     )
@@ -817,6 +820,7 @@ class AnalyticsChatService:
             "_conversation_state": {
                 "plan": plan,
                 "fact_count": len(facts),
+                "single_incident": _is_single_incident(facts),
                 "context": conversation_context,
             },
         }
@@ -910,6 +914,7 @@ class AnalyticsChatService:
             "_conversation_state": {
                 "plan": plan,
                 "fact_count": len(facts),
+                "single_incident": _is_single_incident(facts),
                 "context": _conversation_metadata(database_rows),
             },
             **({"_shadow_rows": database_rows} if include_shadow_rows else {}),
@@ -1065,6 +1070,8 @@ class AnalyticsChatService:
         action: str,
     ) -> dict[str, Any]:
         if conversation_id:
+            if result.get("outcome") in {"cannot_verify", "degraded"}:
+                self.clear_conversation(conversation_id)
             result["conversation"] = {"id": conversation_id, "context_used": context_used, "action": action}
         return result
 
@@ -1118,6 +1125,7 @@ class AnalyticsChatService:
             semantic_plan=semantic_plan,
             query_plan=query_plan,
             fact_count=min(fact_count, MAX_LIMIT),
+            single_incident=internal.get("single_incident") is True,
             evidence_ids=tuple(context.get("evidence_ids", [])),
             route=result.get("route") if isinstance(result.get("route"), str) else None,
             outcome=str(result.get("outcome") or "cannot_verify"),
@@ -1384,6 +1392,11 @@ def _conversation_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if len(values) == 1:
             context[target] = values.pop()
     return sanitize_jev_context(context)
+
+
+def _is_single_incident(facts: list[dict[str, Any]]) -> bool:
+    counts = [fact.get("failure_count") for fact in facts]
+    return bool(counts) and all(type(value) is int and value >= 0 for value in counts) and sum(counts) == 1
 
 
 def _failure_signature(row: dict[str, Any]) -> str | None:
