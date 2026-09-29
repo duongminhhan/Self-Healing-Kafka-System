@@ -79,7 +79,7 @@ _BARE_CONNECTOR_REFERENCE = re.compile(
     r"\b(?:lỗi|loi|error|failure)\s+(?:của|cua|of|for)\s+"
     r"([A-Za-z0-9][A-Za-z0-9._:-]{2,127})(?=\s|[?!,.;)]|$)"
     r"|\b([A-Za-z0-9][A-Za-z0-9._:-]{2,127})\s+"
-    r"(?=(?:bị|bi|có|co|gặp|gap|failed|failure|error|lỗi|loi)\b)",
+    r"(?=(?:bị|bi|có|co|gặp|gap|failed)\b)",
     re.IGNORECASE,
 )
 _CONNECTOR_REFERENCE_STOPWORDS = frozenset({
@@ -516,6 +516,7 @@ def _explicit_connector_name(question: str) -> str | None:
         normalized = _normalize_question(candidate).strip()
         if normalized not in _CONNECTOR_REFERENCE_STOPWORDS:
             return candidate
+
     for match in _BARE_CONNECTOR_REFERENCE.finditer(question):
         candidate = next(value for value in match.groups() if value).strip()
         normalized = _normalize_question(candidate).strip()
@@ -598,6 +599,11 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         normalized,
         vocabulary.get("details", {}).get("severity", []),
     )
+    named_connector = _explicit_connector_name(question)
+    error_code_requested = named_connector is not None and _matches_any(
+        normalized,
+        ["ma loi", "error code", "failure code"],
+    )
     subject = (
         "incident" if connector_error_relation
         else None if severity_requested and not has_connector
@@ -617,7 +623,7 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
     detail_fields: list[str] = []
     if severity_requested:
         detail_fields.append("severity")
-    if has_error and has_connector and _matches_any(
+    if has_error and has_connector and not error_code_requested and _matches_any(
             normalized,
             [
                 "noi dung loi",
@@ -637,7 +643,7 @@ def semantic_cue_contract(question: str) -> SemanticCueContract:
         include_ties_requested=bool(ranking and _matches_any(normalized, vocabulary.get("include_ties", []))),
         detail_fields=tuple(dict.fromkeys(detail_fields)),
         time_scope=time_scope,
-        connector_name=_explicit_connector_name(question),
+        connector_name=named_connector,
         error_code=_explicit_error_code(question),
         outcome=_explicit_outcome(normalized, connector_population=connector_population, has_error=has_error),
     )
@@ -694,10 +700,17 @@ def enforce_semantic_cues(
     """Reject a valid-looking plan that changes an explicit user constraint."""
 
     cues = semantic_cue_contract(question)
+    named_connector_error_code = cues.connector_name is not None and _matches_any(
+        _normalize_question(question),
+        ["ma loi", "error code", "failure code"],
+    )
     request = plan.data_request
     if request is None:
         previous_request = (context or {}).get("previous_plan", {}).get("data_request")
-        if cues.detail_fields and (cues.subject is not None or isinstance(previous_request, dict)):
+        if (
+            (cues.detail_fields or named_connector_error_code)
+            and (cues.subject is not None or isinstance(previous_request, dict))
+        ):
             raise SemanticPlanError(
                 "semantic detail request requires an analytics data_request"
             )
@@ -722,6 +735,10 @@ def enforce_semantic_cues(
             raise SemanticPlanError(
                 "semantic error code mismatch: an explicitly named error code must be preserved"
             )
+    if named_connector_error_code and "error_code" not in request.get("dimensions", []):
+        raise SemanticPlanError(
+            "semantic error code request requires data_request.dimensions to include error_code"
+        )
     if cues.outcome is not None and filters.get("outcome") != [cues.outcome]:
         raise SemanticPlanError(
             "semantic outcome mismatch: an explicitly requested outcome must be preserved"
@@ -1075,6 +1092,20 @@ def _planner_correction_feedback(reason: str, *, question: str | None = None) ->
             "data_request.filters.error_code. For runbook-only remediation, diagnosis, or meaning, set "
             "data_request to null and put codes only in guidance_request.error_codes."
         )
+    named_connector_error_code = bool(
+        question
+        and semantic_cue_contract(question).connector_name is not None
+        and _matches_any(_normalize_question(question), ["ma loi", "error code", "failure code"])
+    )
+    if "semantic error code request requires" in reason or (
+        "data_request.detail_fields contains an unsupported field" in reason
+        and named_connector_error_code
+    ):
+        return (
+            "For the recorded error code of a named connector, use an analytics incident request with "
+            'dimensions=["error_code"], keep the exact connector in filters.connector, and do not put '
+            "error_code in detail_fields or filters.error_code."
+        )
     if "guidance_request.purpose is unsupported" in reason:
         return (
             "guidance_request.purpose must be exactly one of remediation, diagnosis, or meaning. "
@@ -1171,6 +1202,8 @@ def _messages(question: str, *, context: dict[str, Any] | None, correction: str 
         "remediation, diagnosis, or meaning request, use data_request=null and guidance_request.error_codes. "
         "When the user asks for the recorded error content/message of a named connector or incident, use an analytics "
         "data_request with detail_fields containing error_message; do not convert that request into runbook-only meaning. "
+        "When the user asks for the recorded error code of a named connector, use an analytics incident request with "
+        "dimensions containing error_code and keep detail_fields empty; do not treat a code embedded in the connector name as a filter. "
         "When the user asks how serious an identified incident is, use detail_fields containing severity. Severity is "
         "the recorded confirmed-failure severity only; never infer live impact, root cause, or a business conclusion. "
         "Use these semantic distinctions: a population question such as 'connector nào bị lỗi' or 'which connectors failed' "

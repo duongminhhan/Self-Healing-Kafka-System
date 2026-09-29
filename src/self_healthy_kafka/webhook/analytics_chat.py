@@ -1396,7 +1396,11 @@ def _conversation_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _is_single_incident(facts: list[dict[str, Any]]) -> bool:
     counts = [fact.get("failure_count") for fact in facts]
-    return bool(counts) and all(type(value) is int and value >= 0 for value in counts) and sum(counts) == 1
+    valid_counts = [
+        value for value in counts
+        if type(value) is int and value >= 0
+    ]
+    return bool(counts) and len(valid_counts) == len(counts) and sum(valid_counts) == 1
 
 
 def _failure_signature(row: dict[str, Any]) -> str | None:

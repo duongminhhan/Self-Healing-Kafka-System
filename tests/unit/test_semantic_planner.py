@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -314,6 +316,96 @@ def test_cue_contract_treats_recorded_error_content_as_analytics_detail():
 
     assert cues.subject == "incident"
     assert cues.detail_fields == ("error_message",)
+
+
+def test_cue_contract_prefers_named_connector_after_prose_error_content():
+    cues = semantic_cue_contract(
+        "nội dung lỗi của test-connector-ora-01013-20260921 là gì"
+    )
+
+    assert cues.connector_name == "test-connector-ora-01013-20260921"
+    assert cues.error_code is None
+    assert cues.detail_fields == ("error_message",)
+
+
+def test_cue_contract_does_not_extract_prose_as_a_connector():
+    cues = semantic_cue_contract("nội dung lỗi")
+
+    assert cues.connector_name is None
+
+
+def test_cue_contract_does_not_turn_named_connector_error_code_request_into_message_detail():
+    cues = semantic_cue_contract(
+        "mã lỗi của connector test-connector-ora-01013-20260921 là gì"
+    )
+
+    assert cues.connector_name == "test-connector-ora-01013-20260921"
+    assert cues.error_code is None
+    assert cues.detail_fields == ()
+
+
+def test_named_connector_error_code_request_requires_error_code_dimension():
+    connector = "test-connector-ora-01013-20260921"
+    plan = _value(data_request={
+        "intent": "incidents",
+        "subject": "incident",
+        "metric": "incident_count",
+        "ranking": None,
+        "time_scope": None,
+        "time_scope_origin": "unspecified",
+        "metrics": ["incident_count"],
+        "dimensions": ["connector", "error_code"],
+        "filters": {"connector": connector},
+        "sort": {"metric": "incident_count", "direction": "desc"},
+        "limit": 20,
+        "comparison": None,
+        "detail_fields": [],
+    })
+
+    parsed, attempts = SemanticPlanner(lambda _messages, **_kwargs: plan).plan(
+        f"mã lỗi của connector {connector} là gì"
+    )
+
+    assert attempts == 1
+    assert parsed.data_request["dimensions"] == ["connector", "error_code"]
+
+
+def test_planner_corrects_error_code_used_as_an_unsupported_detail_field():
+    connector = "test-connector-ora-01013-20260921"
+    invalid = _value(data_request={
+        "intent": "incidents",
+        "subject": "incident",
+        "metric": "incident_count",
+        "ranking": None,
+        "time_scope": None,
+        "time_scope_origin": "unspecified",
+        "metrics": ["incident_count"],
+        "dimensions": ["connector"],
+        "filters": {"connector": connector},
+        "sort": {"metric": "incident_count", "direction": "desc"},
+        "limit": 20,
+        "comparison": None,
+        "detail_fields": ["error_code"],
+    })
+    corrected = _value(data_request={
+        **invalid["data_request"],
+        "dimensions": ["connector", "error_code"],
+        "detail_fields": [],
+    })
+    calls = []
+
+    def generate(messages, **_kwargs):
+        calls.append(messages)
+        return invalid if len(calls) == 1 else corrected
+
+    plan, attempts = SemanticPlanner(generate).plan(
+        f"mã lỗi của connector {connector} là gì"
+    )
+
+    assert attempts == 2
+    assert plan.data_request["dimensions"] == ["connector", "error_code"]
+    feedback = json.loads(calls[1][1]["content"])["validation_feedback"]
+    assert 'dimensions=["error_code"]' in feedback
 
 
 def test_cue_contract_treats_vague_severity_follow_up_as_a_detail_request():
