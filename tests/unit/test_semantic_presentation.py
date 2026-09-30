@@ -18,7 +18,10 @@ from self_healthy_kafka.semantic.presentation import (
 )
 
 
-def _plan(*, dimensions=None, filters=None, metrics=None, intent="incidents"):
+def _plan(
+    *, dimensions=None, filters=None, metrics=None, intent="incidents", details=None,
+    comparison=None,
+):
     return parse_semantic_plan({
         "version": CATALOG_VERSION,
         "data_request": {
@@ -28,8 +31,8 @@ def _plan(*, dimensions=None, filters=None, metrics=None, intent="incidents"):
             "filters": filters or {},
             "sort": {"metric": (metrics or ["incident_count"])[0], "direction": "desc"},
             "limit": 20 if intent != "top_error_signature" else 1,
-            "comparison": None,
-            "detail_fields": [],
+            "comparison": comparison,
+            "detail_fields": details or [],
         },
         "guidance_request": {
             "needed": False, "purpose": None, "error_codes": [], "connector_class": None,
@@ -68,8 +71,7 @@ def test_empty_renderer_uses_catalog_conditions_not_an_intent_sentence():
     assert presentation.subject == "root_connector"
     assert presentation.condition == {"field": "outcome", "operator": "equals", "value": "FAILED"}
     assert answer == (
-        "Không. Chưa ghi nhận connector nào có trạng thái FAILED "
-        "trong ngày hôm nay theo múi giờ Asia/Ho_Chi_Minh."
+        "Không, chưa ghi nhận connector nào có trạng thái FAILED trong ngày hôm nay."
     )
 
 
@@ -112,7 +114,7 @@ def test_non_empty_outcome_never_uses_the_empty_claim_renderer():
 
     answer = SemanticResponseRenderer().render_outcome(presentation)
 
-    assert "đã xác minh 1 connector" in answer.lower()
+    assert "có 1 connector" in answer.lower()
     assert "root connector" not in answer.lower()
     assert "chưa ghi nhận" not in answer.lower()
 
@@ -261,3 +263,21 @@ def test_evidence_renderer_previews_verified_rows_and_summarizes_boundary_ties()
         "boundary_tie_truncated": True, "has_more_verified_results": True,
         "detail_accessible": True,
     }
+
+
+def test_presentation_derives_response_act_from_validated_request_shape():
+    assert _presentation(_plan(
+        dimensions=["root_connector"], filters={"outcome": ["FAILED"]},
+        intent="failed_connectors",
+    ), verified_results(row_count=1)).response_act == "existence"
+    assert _presentation(_plan(dimensions=[]), verified_results(row_count=1)).response_act == "count"
+    assert _presentation(_plan(dimensions=["connector"]), verified_results(row_count=1)).response_act == "list"
+    assert _presentation(
+        _plan(dimensions=["connector", "error_code"]), verified_results(row_count=1)
+    ).response_act == "error_code"
+    assert _presentation(
+        _plan(dimensions=["connector"], details=["error_message"]), verified_results(row_count=1)
+    ).response_act == "error_detail"
+    assert _presentation(
+        _plan(dimensions=["connector"], comparison="previous_period"), verified_results(row_count=1)
+    ).response_act == "comparison"

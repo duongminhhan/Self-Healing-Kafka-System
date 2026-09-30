@@ -260,7 +260,9 @@ def test_detail_field_uses_redacted_verified_message_not_question_template():
     details = result["evidence"][0]["details"]
     assert "password=must-not-leak" not in str(details)
     assert "[REDACTED]" in str(details)
-    assert "Nội dung lỗi đã ghi nhận" in result["answer"]
+    assert "Connector orders gặp lỗi" in result["answer"]
+    assert "ORA-01013" in result["answer"]
+    assert "[REDACTED]" in result["answer"]
 
 
 def test_connector_detail_keeps_verified_error_and_severity_fields():
@@ -592,7 +594,9 @@ def test_weekly_failed_connector_population_executes_and_resolves_this_week():
     assert "orders" in str(result["verified_result"]["rows"])
     assert result["answer"].startswith("Có.")
     assert "orders: 1 incident" in result["answer"]
-    assert "trong tuần này theo múi giờ Asia/Ho_Chi_Minh" in result["answer"]
+    assert "Trong tuần này" in result["answer"]
+    assert "Asia/Ho_Chi_Minh" not in result["answer"]
+    assert result["time_range_applied"]["timezone"] == "Asia/Ho_Chi_Minh"
     assert "Hạng" not in result["answer"]
     assert "root connector" not in result["answer"].lower()
     assert "snapshot incident hiện tại" not in result["answer"].lower()
@@ -622,7 +626,9 @@ def test_yesterday_failed_connector_list_is_unranked_and_time_bounded():
     assert result["answer"].startswith("Có.")
     assert "orders: 1 incident" in result["answer"]
     assert "payments: 1 incident" in result["answer"]
-    assert "trong ngày hôm qua theo múi giờ Asia/Ho_Chi_Minh" in result["answer"]
+    assert "Trong ngày hôm qua" in result["answer"]
+    assert "Asia/Ho_Chi_Minh" not in result["answer"]
+    assert result["time_range_applied"]["timezone"] == "Asia/Ho_Chi_Minh"
     assert "Hạng" not in result["answer"]
     assert calls[0]["from_at"] == datetime(2026, 9, 23, tzinfo=timezone(timedelta(hours=7)))
     assert calls[0]["to_at"] == datetime(2026, 9, 24, tzinfo=timezone(timedelta(hours=7)))
@@ -688,6 +694,9 @@ def test_exact_prose_error_question_returns_verified_connector_message():
     assert result["evidence"][0]["detail_values"]["error_message"] == (
         "ORA-01013: user requested cancel of current operation"
     )
+    assert connector in result["answer"]
+    assert "ORA-01013: user requested cancel of current operation" in result["answer"]
+    assert result["outcome"] != "cannot_verify"
 
 
 def test_named_connector_error_code_question_executes_once_and_returns_verified_code():
@@ -719,6 +728,9 @@ def test_named_connector_error_code_question_executes_once_and_returns_verified_
         "connector": connector,
         "mã lỗi": "ORA-01013",
     }
+    assert connector in result["answer"]
+    assert "ORA-01013" in result["answer"]
+    assert result["outcome"] != "cannot_verify"
 
 
 def test_weekly_failed_connector_population_returns_verified_empty_without_rows():
@@ -751,7 +763,7 @@ def test_verified_empty_is_the_only_outcome_that_may_state_no_failed_connectors(
     assert result["query_executed"] is True
     assert result["evidence_complete"] is True
     assert result["row_count"] == 0
-    assert result["answer"].startswith("Không.")
+    assert result["answer"].startswith("Không,")
     assert "chưa ghi nhận connector nào có trạng thái failed" in result["answer"].lower()
     assert "root connector" not in result["answer"].lower()
     assert result["time_range_applied"]["timezone"] == "UTC"

@@ -33,6 +33,7 @@ def _config(mode: str) -> AnalyticsChatConfig:
         jev_endpoint_url="https://jev.invalid/classify" if mode != "off" else "",
         jev_token="test-token" if mode != "off" else "",
         jev_model_id="jev-1.13.0" if mode != "off" else "",
+        conversation_store="memory",
         fact_source="legacy",
     )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from self_healthy_kafka.semantic.catalog import SEMANTIC_CATALOG
 from self_healthy_kafka.semantic.outcome import AnalyticsOutcome
@@ -20,6 +20,16 @@ _METRIC_VALUE_FIELDS = {
     "recovery_rate": "recovery_rate_percent",
 }
 _SUBJECT_DIMENSIONS = {"connector", "root_connector", "current_connector", "error", "error_code"}
+
+ResponseAct = Literal[
+    "existence",
+    "list",
+    "count",
+    "error_detail",
+    "error_code",
+    "comparison",
+    "runbook_guidance",
+]
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,7 @@ class PresentationFacts:
     boundary_tie_truncated: bool = False
     has_more_verified_results: bool = False
     detail_accessible: bool = False
+    response_act: ResponseAct = "list"
 
     @property
     def condition(self) -> dict[str, str] | None:
@@ -128,7 +139,7 @@ class PresentationFacts:
             "result_count": self.result_count,
             "rows": [dict(row) for row in self.rows],
             "row_count": self.row_count,
-            "time_scope": self.time_scope,
+            "time_scope": natural_time_scope(self),
             "from_at": self.from_at,
             "to_at": self.to_at,
             "timezone": self.timezone,
@@ -141,6 +152,7 @@ class PresentationFacts:
             "sort_metric": self.sort_metric,
             "ranking": self.ranking,
             "time_scope_origin": self.time_scope_origin,
+            "response_act": self.response_act,
             "summary_rows": [dict(row) for row in self.summary_rows],
             "presentation": self.summary_metadata(),
         }
@@ -230,6 +242,7 @@ def build_presentation_facts(
             and bool(evidence)
         ),
         detail_accessible=outcome.outcome == "verified_results" and bool(evidence),
+        response_act=_response_act(request),
     )
 
 
@@ -272,11 +285,11 @@ class SemanticResponseRenderer:
             condition = _condition_label(facts.conditions)
             suffix = f" {condition}" if condition else ""
             if facts.subject in {"connector", "root_connector", "current_connector"}:
-                return f"Không. Chưa ghi nhận {subject} nào{suffix} {facts.time_scope}."
-            return f"Chưa ghi nhận {subject} nào{suffix} {facts.time_scope}."
+                return f"Không, chưa ghi nhận {subject} nào{suffix} {natural_time_scope(facts)}."
+            return f"Chưa ghi nhận {subject} nào{suffix} {natural_time_scope(facts)}."
         if facts.outcome == "verified_results":
             subject = _subject_label(facts.subject, plural=True)
-            return f"Đã xác minh {facts.result_count} {subject} phù hợp {facts.time_scope}."
+            return f"Có {facts.result_count} {subject} phù hợp {natural_time_scope(facts)}."
         if facts.outcome == "needs_clarification":
             return facts.clarification_question or "Mình cần thêm một thông tin để chọn đúng phạm vi truy vấn."
         if facts.outcome == "out_of_scope":
@@ -288,6 +301,28 @@ class SemanticResponseRenderer:
         return _failure_message(
             facts.safe_failure_reason, degraded=False, conditions=facts.conditions
         )
+
+
+def natural_time_scope(facts: PresentationFacts) -> str:
+    """Keep timezone metadata out of ordinary prose while preserving its bounds."""
+
+    return facts.time_scope.split(" theo múi giờ ", 1)[0]
+
+
+def _response_act(request: dict[str, Any]) -> ResponseAct:
+    details = set(request.get("detail_fields") or ())
+    dimensions = set(request.get("dimensions") or ())
+    if "error_message" in details:
+        return "error_detail"
+    if "error_code" in dimensions:
+        return "error_code"
+    if request.get("comparison") is not None:
+        return "comparison"
+    if request.get("intent") == "failed_connectors":
+        return "existence"
+    if not dimensions:
+        return "count"
+    return "list"
 
 
 def _conditions(filters: dict[str, Any]) -> tuple[PresentationCondition, ...]:
