@@ -3,10 +3,19 @@ const attempts = new Map();
 http.createServer(async (req, res) => {
   if (req.url === "/health") { res.end("ok"); return; }
   if (req.headers.authorization !== "Bearer ui-e2e-server-only-secret") { res.writeHead(401); res.end(); return; }
+  if(req.method==="DELETE") {
+    const id=new URL(req.url,"http://localhost").searchParams.get("conversation_id");
+    if(!id || !/^[A-Za-z0-9._:-]{1,128}$/.test(id)){res.writeHead(400);res.end();return;}
+    res.setHeader("Content-Type","application/json");res.end(JSON.stringify({status:"ok",conversation_id:id}));return;
+  }
   let body = "";
   for await (const chunk of req) body += chunk;
   const { question, conversation_id } = JSON.parse(body);
   if(typeof conversation_id!=="string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(conversation_id)) { res.writeHead(400); res.end(); return; }
+  if(question === "Persistence test" || question === "Persistence follow-up") {
+    res.setHeader("Content-Type","application/json");
+    res.end(JSON.stringify({answer:"Connector orders có 2 incident trong dữ liệu thử nghiệm.",route:"analytics",source:"verified_sql",conversation:{id:conversation_id,context_used:question === "Persistence follow-up",action:question === "Persistence follow-up" ? "continue" : "start"}})); return;
+  }
   if(question === "Empty test") { res.setHeader("Content-Type","application/json"); res.end(JSON.stringify({answer:""})); return; }
   if(question === "Invalid JSON test") { res.end("private invalid JSON"); return; }
   if(question === "Out of scope test") {

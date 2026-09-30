@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatModelRunOptions } from "@assistant-ui/react";
-import { chatAdapter, makeChatAdapter } from "../src/lib/adapter";
+import { chatAdapter, clearConversation, makeChatAdapter } from "../src/lib/adapter";
 import { errors, safeLink, statusMessage } from "../src/lib/contract";
 const options = (signal = new AbortController().signal) => ({
   messages: [{role:"user",content:[{type:"text",text:"Previous question"}]},{role:"assistant",content:[{type:"text",text:"Previous answer"}]},{role:"user",content:[{type:"text",text:"Current question"}]}], abortSignal: signal,
 } as unknown as ChatModelRunOptions);
 afterEach(()=>vi.unstubAllGlobals());
 describe("browser adapter",()=>{
+  it("requests backend context deletion without exposing state",async()=>{
+    const fetcher=vi.fn().mockResolvedValue(new Response(null,{status:204}));
+    vi.stubGlobal("fetch",fetcher);
+    expect(await clearConversation("conversation-1")).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith("/api/chat?conversation_id=conversation-1",{method:"DELETE"});
+  });
   it("sends only current question to BFF, without authorization", async()=>{
     const fetcher=vi.fn().mockResolvedValue(Response.json({answer:"Verified answer",route:"analytics",citations:[],request_id:"req-1"}));
     vi.stubGlobal("fetch",fetcher);

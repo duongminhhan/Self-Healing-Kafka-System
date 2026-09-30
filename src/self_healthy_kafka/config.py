@@ -166,6 +166,8 @@ class AnalyticsChatConfig:
     jev_token: str = os.getenv("JEV_TOKEN", "")
     jev_model_id: str = os.getenv("JEV_MODEL_ID", "")
     jev_request_timeout_seconds: float = float(os.getenv("JEV_REQUEST_TIMEOUT_SECONDS", "5"))
+    conversation_store: str = os.getenv("CHAT_CONVERSATION_STORE", "memory").strip().lower()
+    conversation_redis_url: str = os.getenv("CHAT_CONVERSATION_REDIS_URL", "").strip()
     conversation_ttl_seconds: int = int(os.getenv("CHAT_CONVERSATION_TTL_SECONDS", "1800"))
     conversation_max_entries: int = int(os.getenv("CHAT_CONVERSATION_MAX_ENTRIES", "500"))
     # ``legacy`` remains the safe default until shadow parity is explicitly reviewed.
@@ -203,6 +205,14 @@ class AnalyticsChatConfig:
                 raise ValueError(
                     "JEV_ENDPOINT_URL and JEV_TOKEN are required when CHAT_JEV_MODE is enabled"
                 )
+        if self.conversation_store not in {"memory", "redis"}:
+            raise ValueError("CHAT_CONVERSATION_STORE must be memory or redis")
+        if self.conversation_store == "redis" and not self.conversation_redis_url:
+            raise ValueError("CHAT_CONVERSATION_REDIS_URL is required for Redis conversation storage")
+        if self.conversation_redis_url and not self.conversation_redis_url.startswith(
+            ("redis://", "rediss://")
+        ):
+            raise ValueError("CHAT_CONVERSATION_REDIS_URL must use redis:// or rediss://")
 
 
 @dataclass

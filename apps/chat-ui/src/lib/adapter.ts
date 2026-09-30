@@ -34,3 +34,8 @@ export function makeChatAdapter(conversationId?:string, now:()=>number=()=>perfo
   };
 }
 export const chatAdapter=makeChatAdapter();
+
+export async function clearConversation(conversationId:string) {
+  try{return (await fetch(`/api/chat?conversation_id=${encodeURIComponent(conversationId)}`,{method:"DELETE"})).ok;}
+  catch{return false;}
+}

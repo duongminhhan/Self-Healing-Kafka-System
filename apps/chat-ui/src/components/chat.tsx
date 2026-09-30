@@ -1,13 +1,14 @@
 "use client";
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantRuntimeProvider, useLocalRuntime, ThreadPrimitive, ComposerPrimitive, MessagePrimitive, ActionBarPrimitive, useAuiState, useAui } from "@assistant-ui/react";
 import { Activity, Plus, ArrowUp, Square, RotateCcw, Moon, Sun, PanelLeft, MessageSquare, ArrowRight, Trash2, Copy, ChevronsDown, Search, ChevronUp, ChevronDown, X, Pencil, Check } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
-import { makeChatAdapter } from "@/lib/adapter";
+import { clearConversation, makeChatAdapter } from "@/lib/adapter";
 import type { ChatResponse } from "@/lib/contract";
 import { safeLink } from "@/lib/contract";
+import { defaultChatState, initialMessages, loadChatState, saveChatState, storeMessages, type StoredMessage, type StoredSession } from "@/lib/session-storage";
 import { formatElapsedTime, normalizeSearchText, sessionTitleFromQuestion, type UiTiming } from "@/lib/ui-utils";
 import { useDarkTheme, useMediaQuery, setDarkTheme } from "@/lib/theme";
 import { ResponseDetails } from "./response-details";
@@ -139,24 +140,29 @@ function Conversation({searchOpen,onCloseSearch}:{searchOpen:boolean;onCloseSear
     </ThreadPrimitive.Root>
   </ActiveSearchMessageContext.Provider>;
 }
-function SessionObserver({onHasMessages,onFirstQuestion}:{onHasMessages:(has:boolean)=>void;onFirstQuestion:(question:string)=>void}){
+function SessionObserver({onHasMessages,onFirstQuestion,onMessages}:{onHasMessages:(has:boolean)=>void;onFirstQuestion:(question:string)=>void;onMessages:(messages:StoredMessage[])=>void}){
   const messages=useAuiState(state=>state.thread.messages);
   const reportedFirstQuestion=useRef(false);
   const firstQuestion=messages.find(message=>message.role==="user")?.content.filter(part=>part.type==="text").map(part=>part.text).join(" ")??"";
   useEffect(()=>{onHasMessages(messages.length>0);},[messages.length,onHasMessages]);
   useEffect(()=>{if(firstQuestion&&!reportedFirstQuestion.current){reportedFirstQuestion.current=true;onFirstQuestion(firstQuestion);}},[firstQuestion,onFirstQuestion]);
+  useEffect(()=>{onMessages(storeMessages(messages));},[messages,onMessages]);
   return null;
 }
-function Session({id,hidden,onHasMessages,onFirstQuestion,searchOpen,onCloseSearch}:{id:string;hidden:boolean;onHasMessages:(has:boolean)=>void;onFirstQuestion:(question:string)=>void;searchOpen:boolean;onCloseSearch:()=>void}){
+function Session({session,hidden,onHasMessages,onFirstQuestion,onMessages,searchOpen,onCloseSearch}:{session:StoredSession;hidden:boolean;onHasMessages:(has:boolean)=>void;onFirstQuestion:(question:string)=>void;onMessages:(id:string,messages:StoredMessage[])=>void;searchOpen:boolean;onCloseSearch:()=>void}){
+  const {id,messages}=session;
   const adapter=useMemo(()=>makeChatAdapter(id),[id]);
-  const runtime=useLocalRuntime(adapter);
-  return <div className="session" hidden={hidden}><AssistantRuntimeProvider runtime={runtime}><SessionObserver onHasMessages={onHasMessages} onFirstQuestion={onFirstQuestion}/><Conversation searchOpen={searchOpen} onCloseSearch={onCloseSearch}/></AssistantRuntimeProvider></div>;
+  const hydratedMessages=useMemo(()=>initialMessages(messages),[messages]);
+  const runtime=useLocalRuntime(adapter,{initialMessages:hydratedMessages});
+  const persistMessages=useCallback((value:StoredMessage[])=>onMessages(id,value),[id,onMessages]);
+  return <div className="session" hidden={hidden}><AssistantRuntimeProvider runtime={runtime}><SessionObserver onHasMessages={onHasMessages} onFirstQuestion={onFirstQuestion} onMessages={persistMessages}/><Conversation searchOpen={searchOpen} onCloseSearch={onCloseSearch}/></AssistantRuntimeProvider></div>;
 }
-type ChatSession={id:string;title:string;autoTitled:boolean};
 
 export function Chat(){
-  const [sessions,setSessions]=useState<ChatSession[]>([{id:"session-1",title:"Cuộc trò chuyện 1",autoTitled:false}]);
-  const [active,setActive]=useState<string|null>("session-1");
+  const initial=defaultChatState();
+  const [sessions,setSessions]=useState<StoredSession[]>(initial.sessions);
+  const [active,setActive]=useState<string|null>(initial.active);
+  const [hydrated,setHydrated]=useState(false);
   const [mobileSidebarOpen,setMobileSidebarOpen]=useState(false);
   const [desktopSidebarOpen,setDesktopSidebarOpen]=useState(true);
   const [deleteTarget,setDeleteTarget]=useState<string|null>(null);
@@ -166,7 +172,11 @@ export function Chat(){
   const [renameDraft,setRenameDraft]=useState("");
   const dark=useDarkTheme();
   const isMobile=useMediaQuery("(max-width: 760px)");
-  const nextSessionNumber=useRef(2);
+  const nextSessionNumber=useRef(initial.nextSessionNumber);
+  const sessionMessages=useRef<Record<string,StoredMessage[]>>(Object.fromEntries(initial.sessions.map(session=>[session.id,session.messages])));
+  const sessionsRef=useRef(sessions);
+  const activeRef=useRef(active);
+  const hydratedRef=useRef(hydrated);
   const deleteTriggers=useRef<Record<string,HTMLButtonElement|null>>({});
   const historyButtons=useRef<Record<string,HTMLButtonElement|null>>({});
   const renameInputs=useRef<Record<string,HTMLInputElement|null>>({});
@@ -174,8 +184,21 @@ export function Chat(){
   const searchButton=useRef<HTMLButtonElement|null>(null);
   const focusAfterDelete=useRef<string|null>(null);
   const sidebarOpen=isMobile?mobileSidebarOpen:desktopSidebarOpen;
+  useEffect(()=>{
+    sessionsRef.current=sessions;
+    activeRef.current=active;
+    hydratedRef.current=hydrated;
+  },[sessions,active,hydrated]);
+
+  const persist=useCallback(()=>saveChatState({sessions:sessionsRef.current.map(session=>({...session,messages:sessionMessages.current[session.id]??[]})),active:activeRef.current,nextSessionNumber:nextSessionNumber.current}),[]);
 
   const closeSearch=()=>{setSearchOpen(false);requestAnimationFrame(()=>searchButton.current?.focus());};
+  useEffect(()=>{
+    const stored=loadChatState();
+    sessionMessages.current=Object.fromEntries(stored.sessions.map(session=>[session.id,session.messages]));
+    startTransition(()=>{setSessions(stored.sessions);setActive(stored.active);nextSessionNumber.current=stored.nextSessionNumber;setHydrated(true);});
+  },[]);
+  useEffect(()=>{if(hydrated)persist();},[active,hydrated,persist,sessions]);
   useEffect(()=>{if(deleteTarget)confirmButton.current?.focus();},[deleteTarget]);
   useEffect(()=>{if(editingSession)renameInputs.current[editingSession]?.focus();},[editingSession]);
   useEffect(()=>{
@@ -194,22 +217,27 @@ export function Chat(){
     window.addEventListener("keydown",onKeyDown);return()=>window.removeEventListener("keydown",onKeyDown);
   },[active,deleteTarget,mobileSidebarOpen,searchOpen]);
 
-  const makeSession=():ChatSession=>{const number=nextSessionNumber.current++;return{id:`session-${Date.now()}-${number}`,title:`Cuộc trò chuyện ${number}`,autoTitled:false};};
+  const makeSession=():StoredSession=>{const number=nextSessionNumber.current++;return{id:`session-${Date.now()}-${number}`,title:`Cuộc trò chuyện ${number}`,autoTitled:false,messages:[]};};
   const closeMobileSidebar=()=>setMobileSidebarOpen(false);
   const createSession=()=>{const session=makeSession();setSessions(current=>[...current,session]);setActive(session.id);setDeleteTarget(null);setSearchOpen(false);closeMobileSidebar();};
   const selectSession=(id:string)=>{setActive(id);setDeleteTarget(null);setSearchOpen(false);closeMobileSidebar();};
   const autoTitle=(id:string,question:string)=>setSessions(current=>current.map(session=>session.id===id&&!session.autoTitled?{...session,title:sessionTitleFromQuestion(question),autoTitled:true}:session));
-  const startRename=(session:ChatSession)=>{setEditingSession(session.id);setRenameDraft(session.title);};
+  const startRename=(session:StoredSession)=>{setEditingSession(session.id);setRenameDraft(session.title);};
   const cancelRename=()=>{const id=editingSession;setEditingSession(null);if(id)requestAnimationFrame(()=>historyButtons.current[id]?.focus());};
   const saveRename=(id:string)=>{const title=renameDraft.replace(/\s+/g," ").trim();if(title)setSessions(current=>current.map(session=>session.id===id?{...session,title:title.slice(0,80),autoTitled:true}:session));setEditingSession(null);requestAnimationFrame(()=>historyButtons.current[id]?.focus());};
   const deleteSession=(id:string)=>{
     const deletedIndex=sessions.findIndex(session=>session.id===id);if(deletedIndex<0)return;
+    void clearConversation(id);
+    delete sessionMessages.current[id];
     const remaining=sessions.filter(session=>session.id!==id);delete deleteTriggers.current[id];delete historyButtons.current[id];delete renameInputs.current[id];
     if(remaining.length===0){setSessions([]);setActive(null);setSearchOpen(false);}else{const neighbour=remaining[Math.min(deletedIndex,remaining.length-1)];setSessions(remaining);if(active===id)setActive(neighbour.id);focusAfterDelete.current=neighbour.id;}
     setDeleteTarget(null);
   };
   const cancelDelete=(id:string)=>{setDeleteTarget(null);deleteTriggers.current[id]?.focus();};
   const toggleSidebar=()=>{if(isMobile)setMobileSidebarOpen(open=>!open);else setDesktopSidebarOpen(open=>!open);};
+  const updateMessages=useCallback((id:string,messages:StoredMessage[])=>{sessionMessages.current[id]=messages;if(hydratedRef.current)persist();},[persist]);
+
+  if(!hydrated)return <div className="app-shell"/>;
 
   return <div className="app-shell">
     {mobileSidebarOpen&&<button className="backdrop" aria-label="Đóng lịch sử" onClick={closeMobileSidebar}/>}
@@ -229,7 +257,7 @@ export function Chat(){
         </li>)}</ul></nav>
         <div className="sidebar-bottom"><div className="workspace-icon">SK</div><div><strong>Self Healthy Kafka</strong><small>Không gian vận hành</small></div></div>
       </aside>
-      <main className="main">{sessions.length===0?<div className="no-sessions"><p>Chưa có cuộc trò chuyện nào.</p><Button variant="outline" onClick={createSession}><Plus size={17}/>Cuộc trò chuyện mới</Button></div>:sessions.map(session=><Session key={session.id} id={session.id} hidden={active!==session.id} onHasMessages={active===session.id?setActiveHasMessages:()=>{}} onFirstQuestion={question=>autoTitle(session.id,question)} searchOpen={active===session.id&&searchOpen} onCloseSearch={closeSearch}/>)}</main>
+      <main className="main">{sessions.length===0?<div className="no-sessions"><p>Chưa có cuộc trò chuyện nào.</p><Button variant="outline" onClick={createSession}><Plus size={17}/>Cuộc trò chuyện mới</Button></div>:sessions.map(session=><Session key={session.id} session={session} hidden={active!==session.id} onHasMessages={active===session.id?setActiveHasMessages:()=>{}} onFirstQuestion={question=>autoTitle(session.id,question)} onMessages={updateMessages} searchOpen={active===session.id&&searchOpen} onCloseSearch={closeSearch}/>)}</main>
     </div>
   </div>;
 }

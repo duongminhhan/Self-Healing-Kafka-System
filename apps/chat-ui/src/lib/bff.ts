@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { backendSchema, errors, questionSchema, upstreamBackendSchema, type ChatResponse } from "./contract";
+import { backendSchema, conversationIdSchema, errors, questionSchema, upstreamBackendSchema, type ChatResponse } from "./contract";
 
 type Settings = {url?:string; token?:string; timeoutMs:number};
 type FailureKind = "configuration"|"request_validation"|"upstream_http"|"upstream_json_parse"|"schema_validation"|"empty_answer"|"timeout"|"cancelled"|"transport";
@@ -144,4 +144,24 @@ export async function handleChat(request:Request, settings:Settings, fetcher:typ
     return respond({...data,answer:data.answer?.trim()||"Đây là kết quả đã xác minh từ dữ liệu.",citations:data.citations??[]},200,{route:safeLabel(data.route)});
   } catch { return fail(timedOut?"timeout":request.signal.aborted?"cancelled":"unavailable",timedOut?504:request.signal.aborted?499:503,{failure_kind:timedOut?"timeout":request.signal.aborted?"cancelled":"transport"}); }
   finally { clearTimeout(timer);request.signal.removeEventListener("abort",cancel); }
+}
+
+export async function handleClearConversation(request:Request, settings:Settings, fetcher:typeof fetch=fetch) {
+  const origin=request.headers.get("origin");
+  const expectedHost=request.headers.get("host")??new URL(request.url).host;
+  if(origin){try{const parsed=new URL(origin);if(parsed.host!==expectedHost||!["http:","https:"].includes(parsed.protocol))return new Response(null,{status:403});}catch{return new Response(null,{status:403});}}
+  const conversationId=conversationIdSchema.safeParse(new URL(request.url).searchParams.get("conversation_id"));
+  if(!conversationId.success)return new Response(null,{status:400});
+  if(!settings.url||!settings.token)return new Response(null,{status:503});
+  let url:URL;
+  try{url=new URL(settings.url);if(!["http:","https:"].includes(url.protocol)||url.username||url.password)throw new Error();}
+  catch{return new Response(null,{status:503});}
+  url.searchParams.set("conversation_id",conversationId.data);
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),settings.timeoutMs);
+  try{
+    const response=await fetcher(url,{method:"DELETE",headers:{Authorization:`Bearer ${settings.token}`},signal:controller.signal,cache:"no-store",redirect:"error"});
+    await response.body?.cancel();
+    return new Response(null,{status:response.ok?204:response.status===400?400:503,headers:{"Cache-Control":"no-store"}});
+  }catch{return new Response(null,{status:503});}
+  finally{clearTimeout(timer);}
 }

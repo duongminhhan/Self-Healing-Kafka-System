@@ -541,6 +541,50 @@ class GrafanaWebhookService:
                 result = service.submit(payload)
                 self._json_response(HTTPStatus.ACCEPTED, result)
 
+            def do_DELETE(self) -> None:
+                request_url = urlsplit(self.path)
+                if not (
+                    service._analytics_chat
+                    and service._analytics_chat.enabled
+                    and request_url.path == service._analytics_chat.path
+                ):
+                    self._json_response(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                if not service._chat_api or not service._chat_api.is_authorized(
+                    self.headers.get("Authorization", "")
+                ):
+                    self._json_response(
+                        HTTPStatus.UNAUTHORIZED,
+                        {"error": "invalid chat API authentication"},
+                    )
+                    return
+                values = parse_qs(request_url.query).get("conversation_id") or []
+                if len(values) != 1:
+                    self._json_response(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "conversation_id is required"},
+                    )
+                    return
+                try:
+                    service._analytics_chat.clear_conversation(values[0])
+                except ChatInputError as exc:
+                    self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:
+                    logger.exception(
+                        "Analytics chat context deletion failed",
+                        extra={"event": "analytics_chat_context_delete_failed"},
+                    )
+                    self._json_response(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "analytics chat context is unavailable"},
+                    )
+                    return
+                self._json_response(
+                    HTTPStatus.OK,
+                    {"status": "ok", "conversation_id": values[0]},
+                )
+
             def _read_json_body(self) -> dict[str, Any] | None:
                 body = self._read_body()
                 if body is None:
