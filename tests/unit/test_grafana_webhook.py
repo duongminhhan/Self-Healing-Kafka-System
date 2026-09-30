@@ -399,6 +399,48 @@ def test_existing_chat_endpoint_returns_rag_metadata_without_exposing_credential
         service.close()
 
 
+def test_chat_delete_clears_only_the_validated_conversation_context():
+    service = GrafanaWebhookService(
+        _config(),
+        lambda *_: None,
+        chat_api_config=_chat_config(),
+        analytics_chat_config=AnalyticsChatConfig(
+            enabled=True,
+            jev_mode="off",
+            timezone="UTC",
+            hf_endpoint_url="",
+            hf_token="",
+            hf_model_id="",
+        ),
+        incident_facts=lambda **_kwargs: [],
+    )
+    calls = []
+    service._analytics_chat.clear_conversation = calls.append
+    service.start()
+    try:
+        port = service._server.server_port
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "DELETE",
+            "/api/v1/chat?conversation_id=conversation-1",
+            headers={"Authorization": "Bearer chat-test-token"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == 200
+        assert payload == {"status": "ok", "conversation_id": "conversation-1"}
+        assert calls == ["conversation-1"]
+
+        connection.request("DELETE", "/api/v1/chat?conversation_id=unsafe%20id")
+        denied = connection.getresponse()
+        denied.read()
+        assert denied.status == 401
+        assert calls == ["conversation-1"]
+    finally:
+        service.close()
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_message"),
     [

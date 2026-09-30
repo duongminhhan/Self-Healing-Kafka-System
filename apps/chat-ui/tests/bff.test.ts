@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleChat } from "../src/lib/bff";
+import { handleChat, handleClearConversation } from "../src/lib/bff";
 
 const settings = { url: "http://127.0.0.1:8080/api/v1/chat", token: "test-server-secret", timeoutMs: 1000 };
 function request(question: unknown = "  Connector nào lỗi?  ", signal?: AbortSignal, conversationId?: unknown) {
@@ -12,6 +12,25 @@ const pending = vi.fn<typeof fetch>((_, init) => new Promise((_, reject) => {
 }));
 
 describe("chat BFF", () => {
+  it("clears one validated conversation without returning backend details", async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(null,{status:204}));
+    const response=await handleClearConversation(new Request("http://localhost:3000/api/chat?conversation_id=conversation-1"),settings,fetcher);
+    expect(response.status).toBe(204);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url,init]=fetcher.mock.calls[0];
+    expect(url.toString()).toBe(`${settings.url}?conversation_id=conversation-1`);
+    expect(init?.method).toBe("DELETE");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${settings.token}`);
+    expect(await response.text()).toBe("");
+  });
+
+  it.each(["", "unsafe id", "x".repeat(129)])("rejects invalid clear id %s", async conversationId=>{
+    const fetcher=vi.fn<typeof fetch>();
+    const response=await handleClearConversation(new Request(`http://localhost:3000/api/chat?conversation_id=${encodeURIComponent(conversationId)}`),settings,fetcher);
+    expect(response.status).toBe(400);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("forwards only trimmed current question and injects server token, without exposing it", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ answer: "Có dữ liệu.", route: "analytics" }, { headers: { "X-Request-ID": "backend-123" } }));
     const audit = vi.fn();

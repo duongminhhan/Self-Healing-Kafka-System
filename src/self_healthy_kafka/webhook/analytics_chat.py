@@ -54,6 +54,7 @@ from self_healthy_kafka.semantic.planner import (
     SemanticPlanError,
     SemanticPlanner,
     compile_analytics_request,
+    parse_semantic_plan,
     semantic_cue_contract,
 )
 from self_healthy_kafka.semantic.presentation import (
@@ -66,11 +67,17 @@ from self_healthy_kafka.semantic.tsql import (
     ExecutedTsql,
     compile_incident_query,
 )
-from self_healthy_kafka.storage.common import json_safe
+from self_healthy_kafka.storage.common import json_safe, parse_datetime
+from self_healthy_kafka.storage.conversation import (
+    ConversationStore,
+    ConversationStoreError,
+    RedisConversationStore,
+)
 from self_healthy_kafka.webhook.analytics import (
     MAX_LIMIT,
     QueryPlan,
     ResolvedTimeRange,
+    parse_plan,
     resolve_canonical_time_range,
 )
 
@@ -96,6 +103,12 @@ _CONVERSATION_METADATA_FIELDS = {
     "error_code": ("error_code", "failure_code", "error_signature", "error", "lỗi"),
     "exception_class": ("exception_class", "exception"),
 }
+_REFERENTIAL_GUIDANCE = re.compile(
+    r"\b(?:lỗi|loi|error|failure)\s+(?:này|nay|đó|do|vừa\s+nêu|vua\s+neu|vừa\s+rồi|vua\s+roi|trên|tren)\b"
+    r"|\b(?:fix|sửa|sua|khắc\s+phục|khac\s+phuc)\s+(?:nó|no|it|this\s+error|lỗi\s+này|loi\s+nay)\b"
+    r"|\b(?:câu\s+trả\s+lời|cau\s+tra\s+loi|kết\s+quả|ket\s+qua)\s+vừa\s+rồi\b",
+    re.IGNORECASE,
+)
 
 
 class ChatInputError(ValueError):
@@ -174,6 +187,13 @@ def _uses_conversation_context(
     cues = semantic_cue_contract(question)
     request = plan.data_request
     if (
+        _references_prior_incident(question)
+        and plan.guidance_request.needed
+        and prior.error_code
+        and prior.error_code in plan.guidance_request.error_codes
+    ):
+        return True
+    if (
         request is None
         or not cues.detail_fields
         or cues.subject is not None
@@ -206,9 +226,10 @@ def _uses_conversation_context(
 def _requires_verified_context(question: str) -> bool:
     cues = semantic_cue_contract(question)
     return bool(
-        cues.detail_fields
-        and cues.subject is None
-        and cues.connector_name is None
+        (cues.detail_fields and cues.subject is None)
+        or _references_prior_incident(question)
+    ) and bool(
+        cues.connector_name is None
         and cues.error_code is None
     )
 
@@ -220,6 +241,36 @@ def _has_unambiguous_verified_context(state: _ConversationState) -> bool:
         and state.single_incident
         and len(state.evidence_ids) == 1
         and (state.connector or state.root_connector)
+    )
+
+
+def _references_prior_incident(question: str) -> bool:
+    cues = semantic_cue_contract(question)
+    return bool(
+        cues.connector_name is None
+        and cues.error_code is None
+        and _REFERENTIAL_GUIDANCE.search(question)
+    )
+
+
+def _inherit_guidance_context(
+    question: str,
+    plan: SemanticPlan,
+    prior: _ConversationState | None,
+) -> SemanticPlan:
+    guidance = plan.guidance_request
+    if not (
+        prior
+        and _references_prior_incident(question)
+        and _has_unambiguous_verified_context(prior)
+        and prior.error_code
+        and guidance.needed
+        and not guidance.error_codes
+    ):
+        return plan
+    return replace(
+        plan,
+        guidance_request=replace(guidance, error_codes=(prior.error_code.upper(),)),
     )
 
 
@@ -238,6 +289,7 @@ class AnalyticsChatService:
         rag_workflow: RunbookRagWorkflow | None = None,
         semantic_planner: SemanticPlanner | None = None,
         jev_adapter: JEVAdapter | None = None,
+        conversation_store: ConversationStore | None = None,
     ):
         self._config = config
         self._incident_facts = incident_facts
@@ -272,6 +324,16 @@ class AnalyticsChatService:
         self._closed = False
         self._conversation_states: OrderedDict[str, _ConversationState] = OrderedDict()
         self._conversation_lock = RLock()
+        self._conversation_store: ConversationStore | None
+        if conversation_store is not None:
+            self._conversation_store = conversation_store
+        elif config.conversation_store == "redis":
+            self._conversation_store = RedisConversationStore(
+                config.conversation_redis_url,
+                ttl_seconds=config.conversation_ttl_seconds,
+            )
+        else:
+            self._conversation_store = None
         # Shadow work has a separate, small worker budget. It is never awaited
         # by the request that produced the legacy response.
         self._shadow_executor = (
@@ -379,7 +441,11 @@ class AnalyticsChatService:
         if not question or len(question) > 4_000:
             raise ChatInputError("question must contain between 1 and 4000 characters")
         conversation_id = _validate_conversation_id(conversation_id)
-        prior = self._get_conversation(conversation_id) if conversation_id else None
+        try:
+            prior = self._get_conversation(conversation_id) if conversation_id else None
+        except ConversationStoreError:
+            assert conversation_id is not None
+            return self._conversation_store_failure(conversation_id)
         relevance = self._classify_relevance(question, prior=prior)
         if relevance is not None:
             decision, error = relevance
@@ -394,7 +460,7 @@ class AnalyticsChatService:
         ):
             outcome = needs_clarification(reason="ambiguous_verified_context")
             result = {
-                "answer": "Mình cần biết connector hoặc incident cụ thể để xác định mức độ nghiêm trọng.",
+                "answer": "Mình cần biết connector hoặc incident cụ thể để tiếp tục.",
                 "route": "clarification",
                 "source": "verified_context_guard",
                 **outcome.to_dict(),
@@ -433,6 +499,7 @@ class AnalyticsChatService:
             }
             return self._with_conversation(result, conversation_id, context_used=prior is not None, action="planning_failed")
         planning_calls = self._qwen.calls_since(planning_model_index)
+        semantic_plan = _inherit_guidance_context(question, semantic_plan, prior)
 
         if semantic_plan.conversation_action == "clear_context":
             if conversation_id:
@@ -506,16 +573,48 @@ class AnalyticsChatService:
             "runbook": execution_calls[len(analytics_calls):],
         }
         internal = result.pop("_conversation_state", None)
+        context_saved = True
         if conversation_id and isinstance(internal, dict):
-            self._remember_conversation(conversation_id, semantic_plan, internal, result=result)
+            context_saved = self._remember_conversation(
+                conversation_id, semantic_plan, internal, result=result
+            )
         return self._with_conversation(
             result,
             conversation_id,
             context_used=prior is not None and _uses_conversation_context(
                 question, semantic_plan, prior
             ),
-            action="semantic_plan",
+            action="semantic_plan" if context_saved else "context_not_saved",
         )
+
+    def _conversation_store_failure(self, conversation_id: str) -> dict[str, Any]:
+        outcome = degraded(reason="conversation_store_unavailable")
+        return {
+            "answer": "Ngữ cảnh cuộc trò chuyện hiện không khả dụng. Bạn có thể thử lại sau.",
+            "route": "fallback",
+            "source": "conversation_store",
+            **outcome.to_dict(),
+            "status": outcome.outcome,
+            "reason": outcome.reason,
+            "fallback_reason": outcome.reason,
+            "query_executed": False,
+            "evidence_complete": False,
+            "row_count": 0,
+            "citations": [],
+            "sources": [],
+            "evidence": [],
+            "recommended_runbooks": [],
+            "candidates": [],
+            "query_plan": None,
+            "semantic_plan": None,
+            "evidence_ids": [],
+            "model_usage": {"planning": [], "analytics_response": [], "runbook": []},
+            "conversation": {
+                "id": conversation_id,
+                "context_used": False,
+                "action": "context_unavailable",
+            },
+        }
 
     def _classify_relevance(
         self, question: str, *, prior: _ConversationState | None
@@ -1071,23 +1170,41 @@ class AnalyticsChatService:
     ) -> dict[str, Any]:
         if conversation_id:
             if result.get("outcome") in {"cannot_verify", "degraded"}:
-                self.clear_conversation(conversation_id)
+                try:
+                    self.clear_conversation(conversation_id)
+                except ConversationStoreError:
+                    logger.warning(
+                        "conversation context cleanup failed",
+                        extra={"event": "conversation_store_cleanup_failed"},
+                    )
             result["conversation"] = {"id": conversation_id, "context_used": context_used, "action": action}
         return result
 
     def clear_conversation(self, conversation_id: str) -> None:
         value = _validate_conversation_id(conversation_id)
         if value is not None:
+            if self._conversation_store is not None:
+                self._conversation_store.delete(value)
+                return
             with self._conversation_lock:
                 self._conversation_states.pop(value, None)
 
     def _get_conversation(self, conversation_id: str) -> _ConversationState | None:
+        if self._conversation_store is not None:
+            payload = self._conversation_store.get(conversation_id)
+            if payload is None:
+                return None
+            state = _conversation_state_from_payload(payload)
+            if state.expires_at <= self._now():
+                self._conversation_store.delete(conversation_id)
+                return None
+            return state
         with self._conversation_lock:
             self._evict_expired_conversations(self._now())
-            state = self._conversation_states.get(conversation_id)
-            if state:
+            memory_state = self._conversation_states.get(conversation_id)
+            if memory_state:
                 self._conversation_states.move_to_end(conversation_id)
-            return state
+            return memory_state
 
     def _remember_conversation(
         self,
@@ -1096,15 +1213,15 @@ class AnalyticsChatService:
         internal: dict[str, Any],
         *,
         result: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         if result.get("outcome") not in {"verified_results", "verified_empty"}:
-            return
+            return True
         query_plan = internal.get("plan")
         if query_plan is not None and not isinstance(query_plan, QueryPlan):
-            return
+            return True
         fact_count = internal.get("fact_count")
         if type(fact_count) is not int or fact_count < 0:
-            return
+            return True
         stored_context = internal.get("context")
         context = sanitize_jev_context(stored_context) if isinstance(stored_context, dict) else {}
         if query_plan is not None:
@@ -1135,12 +1252,25 @@ class AnalyticsChatService:
             error_code=context.get("error_code"),
             exception_class=context.get("exception_class"),
         )
+        if self._conversation_store is not None:
+            try:
+                self._conversation_store.set(conversation_id, _conversation_state_payload(state))
+            except ConversationStoreError:
+                # The current verified answer remains valid; only its follow-up
+                # context is unavailable until the store recovers.
+                logger.warning(
+                    "conversation context persistence failed",
+                    extra={"event": "conversation_store_write_failed"},
+                )
+                return False
+            return True
         with self._conversation_lock:
             self._evict_expired_conversations(self._now())
             self._conversation_states[conversation_id] = state
             self._conversation_states.move_to_end(conversation_id)
             while len(self._conversation_states) > self._config.conversation_max_entries:
                 self._conversation_states.popitem(last=False)
+        return True
 
     def _evict_expired_conversations(self, now: datetime) -> None:
         for key in [key for key, state in self._conversation_states.items() if state.expires_at <= now]:
@@ -1159,6 +1289,156 @@ class AnalyticsChatService:
                 self._shadow_executor.shutdown(wait=False, cancel_futures=True)
             if self._owns_client:
                 self._client.close()
+            if self._conversation_store is not None:
+                self._conversation_store.close()
+
+
+def _semantic_plan_payload(plan: SemanticPlan) -> dict[str, Any]:
+    return {
+        "version": plan.version,
+        "data_request": plan.data_request,
+        "guidance_request": plan.guidance_request.to_dict(),
+        "clarification": plan.clarification,
+        "conversation_action": plan.conversation_action,
+        "inherited_fields": list(plan.inherited_fields),
+    }
+
+
+def _query_plan_payload(plan: QueryPlan) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    if plan.time_range is not None:
+        filters["time_range"] = plan.time_range.to_dict()
+    if plan.event_types:
+        filters["event_type"] = list(plan.event_types)
+    if plan.outcomes:
+        filters["final_outcome"] = list(plan.outcomes)
+    if plan.connector_name:
+        filters["connector_name"] = plan.connector_name
+    if plan.error_code:
+        filters["error_code"] = plan.error_code
+    return {
+        "dataset": plan.dataset,
+        "metrics": [
+            {"name": metric.name, "aggregation": metric.aggregation}
+            for metric in plan.metrics
+        ],
+        "group_by": list(plan.group_by),
+        "filters": filters,
+        "order_by": [{"field": plan.order_by, "direction": plan.direction}],
+        "limit": plan.limit,
+        "comparison": plan.comparison,
+        "details": list(plan.details),
+        "ranking": plan.ranking,
+        "tie_policy": plan.tie_policy,
+    }
+
+
+def _conversation_state_payload(state: _ConversationState) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "expires_at": state.expires_at.isoformat(),
+        "semantic_plan": _semantic_plan_payload(state.semantic_plan),
+        "query_plan": _query_plan_payload(state.query_plan) if state.query_plan else None,
+        "fact_count": state.fact_count,
+        "single_incident": state.single_incident,
+        "evidence_ids": list(state.evidence_ids[:20]),
+        "route": state.route,
+        "outcome": state.outcome,
+        "source_kind": state.source_kind,
+        "connector": state.connector,
+        "root_connector": state.root_connector,
+        "error_code": state.error_code,
+        "exception_class": state.exception_class,
+    }
+
+
+def _query_plan_from_payload(value: object) -> QueryPlan | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConversationStoreError("conversation state is invalid")
+    if set(value) != {
+        "dataset", "metrics", "group_by", "filters", "order_by", "limit",
+        "comparison", "details", "ranking", "tie_policy",
+    }:
+        raise ConversationStoreError("conversation state is invalid")
+    filters = value.get("filters")
+    if not isinstance(filters, dict):
+        raise ConversationStoreError("conversation state is invalid")
+    try:
+        return parse_plan({
+            "dataset": value.get("dataset"),
+            "metrics": value.get("metrics"),
+            "group_by": value.get("group_by"),
+            "filters": filters,
+            "order_by": value.get("order_by"),
+            "limit": value.get("limit"),
+            "comparison": value.get("comparison"),
+            "details": value.get("details"),
+            "ranking": value.get("ranking"),
+            "tie_policy": value.get("tie_policy"),
+        })
+    except (TypeError, ValueError) as exc:
+        raise ConversationStoreError("conversation state is invalid") from exc
+
+
+def _conversation_state_from_payload(value: dict[str, Any]) -> _ConversationState:
+    if set(value) != {
+        "version", "expires_at", "semantic_plan", "query_plan", "fact_count",
+        "single_incident", "evidence_ids", "route", "outcome", "source_kind",
+        "connector", "root_connector", "error_code", "exception_class",
+    }:
+        raise ConversationStoreError("conversation state is invalid")
+    if value.get("version") != 1:
+        raise ConversationStoreError("conversation state is invalid")
+    expires_at = parse_datetime(value.get("expires_at"))
+    if expires_at is None or type(value.get("fact_count")) is not int:
+        raise ConversationStoreError("conversation state is invalid")
+    if value.get("fact_count", -1) < 0 or value.get("fact_count", 0) > MAX_LIMIT:
+        raise ConversationStoreError("conversation state is invalid")
+    try:
+        semantic_plan = parse_semantic_plan(value.get("semantic_plan"))
+        query_plan = _query_plan_from_payload(value.get("query_plan"))
+    except (TypeError, ValueError) as exc:
+        raise ConversationStoreError("conversation state is invalid") from exc
+    outcome = value.get("outcome")
+    if outcome not in {"verified_results", "verified_empty"}:
+        raise ConversationStoreError("conversation state is invalid")
+    if type(value.get("single_incident")) is not bool:
+        raise ConversationStoreError("conversation state is invalid")
+    if value.get("route") not in {None, "analytics", "runbook", "combined"}:
+        raise ConversationStoreError("conversation state is invalid")
+    if value.get("source_kind") not in {None, "historical_incident_snapshot"}:
+        raise ConversationStoreError("conversation state is invalid")
+    context = sanitize_jev_context({
+        "connector": value.get("connector"),
+        "root_connector": value.get("root_connector"),
+        "error_code": value.get("error_code"),
+        "exception_class": value.get("exception_class"),
+        "evidence_ids": value.get("evidence_ids"),
+    })
+    raw_evidence_ids = value.get("evidence_ids")
+    if not isinstance(raw_evidence_ids, list) or raw_evidence_ids != context.get("evidence_ids", []):
+        raise ConversationStoreError("conversation state is invalid")
+    for field in ("connector", "root_connector", "error_code", "exception_class"):
+        raw = value.get(field)
+        if raw is not None and context.get(field) != raw:
+            raise ConversationStoreError("conversation state is invalid")
+    return _ConversationState(
+        expires_at=expires_at,
+        semantic_plan=semantic_plan,
+        query_plan=query_plan,
+        fact_count=value["fact_count"],
+        single_incident=value.get("single_incident") is True,
+        evidence_ids=tuple(context.get("evidence_ids", [])),
+        route=value.get("route") if isinstance(value.get("route"), str) else None,
+        outcome=outcome,
+        source_kind=value.get("source_kind") if isinstance(value.get("source_kind"), str) else None,
+        connector=context.get("connector"),
+        root_connector=context.get("root_connector"),
+        error_code=context.get("error_code"),
+        exception_class=context.get("exception_class"),
+    )
 
 
 def _planning_failure(

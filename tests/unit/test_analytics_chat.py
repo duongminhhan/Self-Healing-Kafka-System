@@ -8,6 +8,7 @@ import pytest
 from self_healthy_kafka.config import AnalyticsChatConfig
 from self_healthy_kafka.semantic.catalog import CATALOG_VERSION
 from self_healthy_kafka.semantic.planner import SemanticPlanner, parse_semantic_plan
+from self_healthy_kafka.storage.conversation import ConversationStoreError, RedisConversationStore
 from self_healthy_kafka.webhook.analytics_chat import AnalyticsChatService
 
 
@@ -86,6 +87,135 @@ def _planner(*values):
     planner = SemanticPlanner(raw_generate, enforce_cues=False)
     planner.calls = calls  # type: ignore[attr-defined]
     return planner
+
+
+class _SharedRedisClient:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def setex(self, key, _ttl, value):
+        self.values[key] = value
+
+    def delete(self, key):
+        self.values.pop(key, None)
+
+    def close(self):
+        return None
+
+
+class _UnavailableConversationStore:
+    def get(self, _conversation_id):
+        raise ConversationStoreError("unavailable")
+
+    def set(self, _conversation_id, _value):
+        raise ConversationStoreError("unavailable")
+
+    def delete(self, _conversation_id):
+        raise ConversationStoreError("unavailable")
+
+    def close(self):
+        return None
+
+
+class _WriteFailingConversationStore(_UnavailableConversationStore):
+    def get(self, _conversation_id):
+        return None
+
+
+def test_shared_redis_context_survives_service_recreation_for_runbook_follow_up():
+    client = _SharedRedisClient()
+    first_store = RedisConversationStore("redis://unused", ttl_seconds=1800, client=client)
+    first = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **_kwargs: [{
+            "incident_id": "incident-1",
+            "job_name": "orders-root",
+            "connector_name": "orders",
+            "error_code": "ORA-01013",
+            "error_message": "ORA-01013: user requested cancel",
+        }],
+        semantic_planner=_planner(_plan(details=["error_message"])),
+        conversation_store=first_store,
+    )
+    first_result = first.ask(
+        "Nội dung lỗi connector orders là gì?", conversation_id="shared-context"
+    )
+    first.close()
+
+    guidance = {
+        "version": CATALOG_VERSION,
+        "data_request": None,
+        "guidance_request": {
+            "needed": True,
+            "purpose": "remediation",
+            "error_codes": [],
+            "connector_class": None,
+        },
+        "clarification": None,
+        "conversation_action": "none",
+        "inherited_fields": [],
+    }
+    second = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **_kwargs: pytest.fail("runbook follow-up must not query DB"),
+        semantic_planner=_planner(guidance),
+        conversation_store=RedisConversationStore(
+            "redis://unused", ttl_seconds=1800, client=client
+        ),
+    )
+    follow_up = second.ask(
+        "Lỗi vừa nêu fix như thế nào?", conversation_id="shared-context"
+    )
+
+    assert first_result["outcome"] == "verified_results"
+    assert follow_up["route"] == "runbook"
+    assert follow_up["semantic_plan"]["guidance_request"]["error_codes"] == ["ORA-01013"]
+    assert follow_up["conversation"]["context_used"] is True
+    second.close()
+
+
+def test_unavailable_conversation_store_fails_closed_before_planner_or_database():
+    planner_calls = []
+    database_calls = []
+    service = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **kwargs: database_calls.append(kwargs) or [],
+        semantic_planner=SemanticPlanner(
+            lambda messages, **_kwargs: planner_calls.append(messages) or _plan(),
+            enforce_cues=False,
+        ),
+        conversation_store=_UnavailableConversationStore(),
+    )
+
+    result = service.ask("Connector orders gặp lỗi gì?", conversation_id="unavailable")
+
+    assert result["outcome"] == "degraded"
+    assert result["reason"] == "conversation_store_unavailable"
+    assert result["query_executed"] is False
+    assert planner_calls == []
+    assert database_calls == []
+
+
+def test_conversation_write_failure_keeps_current_verified_answer():
+    service = AnalyticsChatService(
+        _config(),
+        incident_facts=lambda **_kwargs: [{
+            "incident_id": "incident-1",
+            "connector_name": "orders",
+            "error_code": "ORA-01013",
+        }],
+        semantic_planner=_planner(_plan()),
+        conversation_store=_WriteFailingConversationStore(),
+    )
+
+    result = service.ask("Connector orders gặp lỗi gì?", conversation_id="write-failure")
+
+    assert result["outcome"] == "verified_results"
+    assert result["query_executed"] is True
+    assert result["conversation"]["action"] == "context_not_saved"
 
 
 def test_analytics_execution_uses_backend_time_and_parameterized_fact_callable():

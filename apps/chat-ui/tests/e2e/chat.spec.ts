@@ -270,7 +270,7 @@ test("conversation search is accent-insensitive, keyboard accessible and session
   await expect(page.locator(".search-count")).toHaveText("Không có kết quả");
 });
 
-test("auto-title, in-memory rename and quick actions keep the active conversation",async({page})=>{
+test("auto-title, persisted rename and quick actions keep the active conversation",async({page})=>{
   await page.goto("/");
   await sendQuestion(page, "Connector nào đang gặp sự cố cần xử lý ngay bây giờ?");
   await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.",{exact:true})).toBeVisible();
@@ -278,14 +278,45 @@ test("auto-title, in-memory rename and quick actions keep the active conversatio
   await expect(activeTitle).not.toHaveText("Cuộc trò chuyện 1");
   const generatedTitle=(await activeTitle.innerText()).trim();
   expect(generatedTitle.length).toBeLessThanOrEqual(42);
-  await page.getByRole("button",{name:`Đổi tên ${generatedTitle}`}).click();
+  await page.locator(".history-edit").click();
   const rename=page.getByRole("textbox",{name:new RegExp("Tên mới cho")});
   await rename.fill("Theo dõi connector khẩn cấp");await rename.press("Enter");
   await expect(page.getByRole("button",{name:"Theo dõi connector khẩn cấp",exact:true})).toBeVisible();
   await page.getByRole("button",{name:"Đề xuất bước tiếp theo"}).click();
   await expect(page.getByText(/Follow-up dùng đúng phiên session-1\./)).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("button",{name:"Cuộc trò chuyện 1",exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Theo dõi connector khẩn cấp",exact:true})).toBeVisible();
+  await expect(page.getByText(/Follow-up dùng đúng phiên session-1\./)).toBeVisible();
+});
+
+test("conversation transcript and id survive reload and delete clears backend context",async({page})=>{
+  const ids:string[]=[];
+  const deletes:string[]=[];
+  page.on("request",request=>{
+    if(request.url().endsWith("/api/chat")&&request.method()==="POST"){
+      const id=(request.postDataJSON() as {conversation_id?:string}).conversation_id;
+      if(id)ids.push(id);
+    }
+    if(request.url().includes("/api/chat?conversation_id=")&&request.method()==="DELETE")deletes.push(request.url());
+  });
+  await page.goto("/");
+  await sendQuestion(page,"Persistence test");
+  await expect(page.getByText("Connector orders có 2 incident trong dữ liệu thử nghiệm.",{exact:true})).toBeVisible();
+  expect(ids).toHaveLength(1);
+  const conversationId=ids[0];
+  await page.reload();
+  await expect(page.locator(".session:not([hidden]) .user-message")).toContainText("Persistence test");
+  await expect(page.locator(".session:not([hidden]) .assistant-message")).toContainText("Connector orders có 2 incident");
+  await sendQuestion(page,"Persistence follow-up");
+  expect(ids[1]).toBe(conversationId);
+  await page.locator(".history-delete").first().click();
+  await expect(page.getByRole("button",{name:"Xóa",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Xóa",exact:true}).click();
+  await expect(page.locator(".no-sessions")).toBeVisible();
+  await expect.poll(()=>deletes.length).toBe(1);
+  expect(deletes[0]).toContain(`conversation_id=${encodeURIComponent(conversationId)}`);
+  await page.reload();
+  await expect(page.locator(".no-sessions")).toBeVisible();
 });
 
 test("verified table can filter, stably sort, reset and open fullscreen",async({page})=>{
